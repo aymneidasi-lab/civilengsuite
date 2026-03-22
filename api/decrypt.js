@@ -1,19 +1,12 @@
-/**
- * Civil Engineering Suite — AES-256-GCM Decrypt Edge Function
- * Environment variable required: CES_DECRYPT_KEY (64 hex chars)
- */
-
 export const config = { runtime: 'edge' };
 
 export default async function handler(req) {
 
-  /* ── 1. Key ── */
   const keyHex = (process.env.CES_DECRYPT_KEY || '').trim();
   if (!keyHex || keyHex.length !== 64) {
-    return html500('CES_DECRYPT_KEY not set or invalid. Add it in Vercel → Settings → Environment Variables.');
+    return err('CES_DECRYPT_KEY not set in Vercel Environment Variables.');
   }
 
-  /* ── 2. Which page ── */
   const pathname = new URL(req.url).pathname.replace(/\/+$/, '') || '/';
   let encFile;
   if (pathname === '' || pathname === '/' || pathname === '/index.html') {
@@ -24,72 +17,47 @@ export default async function handler(req) {
     return new Response('Not found', { status: 404 });
   }
 
-  /* ── 3. Load .enc via internal API route ── */
+  // Fetch the .enc file from the same deployment's static files
   const origin = new URL(req.url).origin;
-  const encUrl = `${origin}/api/getenc?file=${encFile}`;
-
   let encData;
   try {
-    const res = await fetch(encUrl);
-    if (!res.ok) throw new Error(`getenc returned ${res.status}`);
+    const res = await fetch(`${origin}/public/${encFile}`);
+    if (!res.ok) throw new Error(`status ${res.status}`);
     encData = await res.text();
-  } catch (err) {
-    return html500(`Cannot load encrypted file: ${err.message}`);
+  } catch (e) {
+    return err(`Cannot load ${encFile}: ${e.message}`);
   }
 
-  /* ── 4. Parse ── */
   const dot = encData.indexOf('.');
-  if (dot === -1) return html500('Encrypted file format invalid');
-  const nonce      = b64ToBytes(encData.slice(0, dot));
-  const ciphertext = b64ToBytes(encData.slice(dot + 1));
+  if (dot === -1) return err('Bad encrypted file format');
 
-  /* ── 5. Import key ── */
-  let cryptoKey;
+  let key;
   try {
-    cryptoKey = await crypto.subtle.importKey(
-      'raw', hexToBytes(keyHex), { name: 'AES-GCM' }, false, ['decrypt']
+    key = await crypto.subtle.importKey(
+      'raw', hex(keyHex), { name: 'AES-GCM' }, false, ['decrypt']
     );
-  } catch (err) {
-    return html500(`Key error: ${err.message}`);
-  }
+  } catch(e) { return err(`Key error: ${e.message}`); }
 
-  /* ── 6. Decrypt ── */
-  let plaintext;
+  let html;
   try {
     const buf = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: nonce }, cryptoKey, ciphertext
+      { name: 'AES-GCM', iv: b64(encData.slice(0, dot)) },
+      key,
+      b64(encData.slice(dot + 1))
     );
-    plaintext = new TextDecoder().decode(buf);
-  } catch (err) {
-    return html500(`Decryption failed: ${err.message}`);
-  }
+    html = new TextDecoder().decode(buf);
+  } catch(e) { return err(`Decrypt failed: ${e.message}`); }
 
-  /* ── 7. Serve ── */
-  return new Response(plaintext, {
-    status: 200,
-    headers: {
-      'Content-Type': 'text/html; charset=utf-8',
-      'Cache-Control': 'public, max-age=3600, must-revalidate',
-    },
+  return new Response(html, {
+    headers: { 'Content-Type': 'text/html; charset=utf-8',
+               'Cache-Control': 'public, max-age=3600' }
   });
 }
 
-function html500(msg) {
-  return new Response(`<!DOCTYPE html><html><body><h2>Server Error</h2><p>${msg}</p></body></html>`, {
-    status: 500,
-    headers: { 'Content-Type': 'text/html' }
-  });
-}
+const err = m => new Response(
+  `<!DOCTYPE html><html><body><h2>Error</h2><p>${m}</p></body></html>`,
+  { status: 500, headers: { 'Content-Type': 'text/html' } }
+);
 
-function hexToBytes(hex) {
-  const b = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < hex.length; i += 2) b[i/2] = parseInt(hex.slice(i, i+2), 16);
-  return b;
-}
-
-function b64ToBytes(b64) {
-  const bin = atob(b64);
-  const b = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) b[i] = bin.charCodeAt(i);
-  return b;
-}
+const hex = h => { const b=new Uint8Array(h.length/2); for(let i=0;i<h.length;i+=2)b[i/2]=parseInt(h.slice(i,i+2),16); return b; };
+const b64 = s => { const bin=atob(s),b=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++)b[i]=bin.charCodeAt(i); return b; };
