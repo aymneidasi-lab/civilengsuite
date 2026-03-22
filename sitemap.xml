@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xmlns:image="http://www.google.com/schemas/sitemap-image/1.1"
+        xmlns:xhtml="http://www.w3.org/1999/xhtml"
+        xsi:schemaLocation="
+          http://www.sitemaps.org/schemas/sitemap/0.9
+          http://www.sitemaps.org/schemas/sitemap/0.9/sitemap.xsd
+          http://www.google.com/schemas/sitemap-image/1.1
+          http://www.google.com/schemas/sitemap-image/1.1/sitemap-image.xsd">
+
+  <!-- ═══ Civil Engineering Suite — Homepage (English) ═══ -->
+  <url>
+    <loc>https://civilengsuite.is-a.dev/</loc>
+    <lastmod>2026-03-19</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>1.0</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://civilengsuite.is-a.dev/"/>
+    <xhtml:link rel="alternate" hreflang="ar" href="https://civilengsuite.is-a.dev/?lang=ar"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://civilengsuite.is-a.dev/"/>
+    <image:image>
+      <image:loc>https://civilengsuite.is-a.dev/og-image.png</image:loc>
+      <image:title>Civil Engineering Suite — Professional Structural Engineering Software by Eng. Aymn Asi</image:title>
+      <image:caption>Civil Engineering Suite: professional-grade structural and civil engineering tools. Footing Pro v.2026 — ACI 318-compliant, offline, single-file.</image:caption>
+    </image:image>
+  </url>
+
+  <!-- ═══ Footing Pro v.2026 — Product Page (English) ═══ -->
+  <url>
+    <loc>https://civilengsuite.is-a.dev/footing-pro/</loc>
+    <lastmod>2026-03-19</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.9</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://civilengsuite.is-a.dev/footing-pro/"/>
+    <xhtml:link rel="alternate" hreflang="ar" href="https://civilengsuite.is-a.dev/footing-pro/?lang=ar"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://civilengsuite.is-a.dev/footing-pro/"/>
+    <image:image>
+      <image:loc>https://civilengsuite.is-a.dev/footing-pro/og-image.png</image:loc>
+      <image:title>Footing Pro v.2026 — Combined Footing Design Software</image:title>
+      <image:caption>Professional combined footing design software with 17 engineering modules, ACI 318-compliant, 100% offline. By Eng. Aymn Asi.</image:caption>
+    </image:image>
+    <image:image>
+      <image:loc>https://civilengsuite.is-a.dev/footing-pro/images/screenshot-01.png</image:loc>
+      <image:title>Footing Pro v.2026 — About: A Revolution in Foundation Design</image:title>
+      <image:caption>Footing Pro overview infographic — boundary constraints, load combinations, footing dimensions, reinforcement design, and ACI 318 code checks.</image:caption>
+    </image:image>
+    <image:image>
+      <image:loc>https://civilengsuite.is-a.dev/footing-pro/images/screenshot-02.png</image:loc>
+      <image:title>Footing Pro v.2026 — System Requirements</image:title>
+      <image:caption>Footing Pro system requirements: Microsoft Excel, Windows OS, .NET Framework, free disk space, internet connection, permissions.</image:caption>
+    </image:image>
+    <image:image>
+      <image:loc>https://civilengsuite.is-a.dev/footing-pro/images/screenshot-12.png</image:loc>
+      <image:title>Footing Pro — Dual-Mode Engine: Interactive Mode and Run Mode</image:title>
+      <image:caption>Footing Pro dual calculation engine — Interactive Mode for live input feedback and Run Mode for full ACI 318 code check execution.</image:caption>
+    </image:image>
+  </url>
+
+</urlset>

@@ -1,0 +1,9 @@
+PUT THESE FILES IN THIS FOLDER:
+- screenshot-01.png through screenshot-26.png
+- hero-bg.png        (footing pro background)
+- apple-touch-icon.png
+- favicon-32.png
+- favicon-192.png
+
+All images shown in Image 1 of the folder screenshots go here.
+Total: 30 image files.

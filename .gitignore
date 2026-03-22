@@ -1,0 +1,35 @@
+# ══════════════════════════════════════════════════
+#  Civil Engineering Suite — .gitignore
+#  IMPORTANT: The raw HTML files must NEVER be
+#  committed to GitHub. Only the .enc files go up.
+# ══════════════════════════════════════════════════
+
+# Raw HTML source — NEVER commit these
+index.html
+footing-pro/index.html
+
+# Encryption key file — NEVER commit this
+ENCRYPTION_KEY.txt
+*.key
+.env
+.env.local
+.env.production
+
+# Encrypted files DO get committed (they are useless without the key)
+# !public/pc_suite.enc
+# !public/footing_pro.enc
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Node (if you ever add build tools)
+node_modules/
+.vercel/
