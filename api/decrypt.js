@@ -81,84 +81,78 @@ module.exports = async function handler(req, res) {
 
   // ── Browser path ─────────────────────────────────────
 
-  const copyrightPage = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Protected</title></head>`
-    + `<body style="margin:0;background:#0A1A2E;display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:Inter,sans-serif">`
+  const copyrightInner = `<head><meta charset="UTF-8"><title>Protected<\\/title><\\/head>`
+    + `<body style="margin:0;background:#0A1A2E;display:flex;align-items:center;`
+    + `justify-content:center;min-height:100vh;font-family:sans-serif">`
     + `<div style="text-align:center;padding:40px">`
-    + `<div style="font-size:3rem;margin-bottom:24px">\uD83D\uDD12</div>`
-    + `<h2 style="color:#C17B1A;font-size:1.6rem;margin-bottom:16px">\u00A9 Civil Engineering Suite</h2>`
-    + `<p style="color:#8AA3C7;font-size:1rem;line-height:1.8">Eng. Aymn Asi \u2014 All Rights Reserved<br>`
-    + `Unauthorized copying or reproduction is strictly prohibited.</p>`
-    + `</div></body></html>`;
+    + `<div style="font-size:3rem;margin-bottom:20px">\\uD83D\\uDD12<\\/div>`
+    + `<h2 style="color:#C17B1A;margin-bottom:12px">\\u00A9 Civil Engineering Suite<\\/h2>`
+    + `<p style="color:#8AA3C7">Eng. Aymn Asi \\u2014 All Rights Reserved<br>`
+    + `Unauthorized copying is strictly prohibited.<\\/p><\\/div><\\/body>`;
 
-  // Protection script injected into decoded HTML:
-  // - Alt key / F10 detected → marks "menu likely opening" → on blur swap DOM
-  // - Tab switch / minimize: no Alt/F10 → blur ignored → no DOM swap
-  // - Ctrl+S: intercept → download copyright file
-  // - beforeprint: swap DOM
+  // KEY TECHNIQUE:
+  // visibilitychange fires on tab switch/minimize — but NOT when File menu opens
+  // blur fires on BOTH tab switch AND File menu
+  // So: blur alone (without visibilitychange) = File menu = swap DOM
   const protectionScript = `<script>(function(){`
-    + `var _r=null,_ready=false,_menuLikely=false,_t=null;`
+    + `var _r=null,_ready=false,_tabSwitch=false,_blurTimer=null;`
 
-    // Store real content once loaded
+    // Store real HTML on load
     + `window.addEventListener('load',function(){`
-    + `_r=document.documentElement.outerHTML;_ready=true;`
+    + `_r=document.documentElement.outerHTML;`
+    + `_ready=true;`
     + `},false);`
 
-    // Detect Alt or F10 — signals user may be opening browser menu
-    + `document.addEventListener('keydown',function(e){`
-    + `if(e.key==='Alt'||e.key==='F10'){`
-    + `_menuLikely=true;`
-    + `clearTimeout(_t);`
-    // Reset flag after 3 seconds if blur never fired
-    + `_t=setTimeout(function(){_menuLikely=false;},3000);`
+    // visibilitychange = tab switch or minimize — flag it
+    + `document.addEventListener('visibilitychange',function(){`
+    + `if(document.hidden){_tabSwitch=true;}`
+    + `else{_tabSwitch=false;}`
+    + `},false);`
+
+    // blur fires on both tab switch AND File menu
+    // Wait 80ms — if visibilitychange fired too → it's a tab switch → skip
+    // If visibilitychange did NOT fire → it's a menu open → swap DOM
+    + `window.addEventListener('blur',function(){`
+    + `if(!_ready)return;`
+    + `_tabSwitch=false;`
+    + `clearTimeout(_blurTimer);`
+    + `_blurTimer=setTimeout(function(){`
+    + `if(_tabSwitch)return;` // tab switch happened — do nothing
+    // No tab switch = menu opened = swap DOM
+    + `document.documentElement.innerHTML='${copyrightInner}';`
+    + `},80);`
+    + `},false);`
+
+    // focus = window returned — restore
+    + `window.addEventListener('focus',function(){`
+    + `clearTimeout(_blurTimer);`
+    + `if(!_ready||!_r)return;`
+    + `if(document.documentElement.innerHTML!==_r){`
+    + `document.open();document.write(_r);document.close();`
     + `}`
+    + `},false);`
+
     // Ctrl+S intercept
+    + `document.addEventListener('keydown',function(e){`
     + `if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){`
     + `e.preventDefault();e.stopPropagation();e.stopImmediatePropagation();`
-    + `var _h='${copyrightPage.replace(/'/g,"\\'").replace(/\n/g,'')}';`
+    + `var _h='<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Protected</title></head>'`
+    + `+'<body style="margin:0;background:#0A1A2E;display:flex;align-items:center;'`
+    + `+'justify-content:center;min-height:100vh;font-family:sans-serif">'`
+    + `+'<div style="text-align:center;padding:40px">'`
+    + `+'<h2 style="color:#C17B1A">\\u00A9 Civil Engineering Suite \\u2014 Eng. Aymn Asi</h2>'`
+    + `+'<p style="color:#8AA3C7">All Rights Reserved</p></div></body></html>';`
     + `var _b=new Blob([_h],{type:'text/html'});`
     + `var _a=document.createElement('a');`
     + `_a.href=URL.createObjectURL(_b);_a.download='${pageFilename}';`
     + `document.body.appendChild(_a);_a.click();`
     + `setTimeout(function(){document.body.removeChild(_a);URL.revokeObjectURL(_a.href);},100);`
-    + `}`
-    + `},true);`
-
-    // Reset menuLikely on keyup of Alt/F10
-    + `document.addEventListener('keyup',function(e){`
-    + `if(e.key==='Alt'||e.key==='F10'){`
-    + `clearTimeout(_t);`
-    // Short delay before reset — gives time for blur to fire
-    + `_t=setTimeout(function(){_menuLikely=false;},500);`
-    + `}`
-    + `},true);`
-
-    // Blur: only swap if menu key was pressed
-    + `window.addEventListener('blur',function(){`
-    + `if(!_ready||!_menuLikely)return;`
-    + `document.documentElement.innerHTML='<head><meta charset="UTF-8"><title>Protected</title></head>'`
-    + `+'<body style="margin:0;background:#0A1A2E;display:flex;align-items:center;justify-content:center;min-height:100vh">'`
-    + `+'<div style="text-align:center;padding:40px;font-family:sans-serif">'`
-    + `+'<div style="font-size:3rem">\uD83D\uDD12</div>'`
-    + `+'<h2 style="color:#C17B1A">\u00A9 Civil Engineering Suite \u2014 Eng. Aymn Asi</h2>'`
-    + `+'<p style="color:#8AA3C7">All Rights Reserved</p></div></body>';`
-    + `_menuLikely=false;`
-    + `},false);`
-
-    // Focus: restore real content
-    + `window.addEventListener('focus',function(){`
-    + `if(!_ready||!_r)return;`
-    + `document.open();document.write(_r);document.close();`
-    + `},false);`
+    + `}},true);`
 
     // Print protection
     + `window.addEventListener('beforeprint',function(){`
     + `if(!_ready)return;`
-    + `document.documentElement.innerHTML='<head><meta charset="UTF-8"><title>Protected</title></head>'`
-    + `+'<body style="margin:0;background:#0A1A2E;display:flex;align-items:center;justify-content:center;min-height:100vh">'`
-    + `+'<div style="text-align:center;padding:40px;font-family:sans-serif">'`
-    + `+'<div style="font-size:3rem">\uD83D\uDD12</div>'`
-    + `+'<h2 style="color:#C17B1A">\u00A9 Civil Engineering Suite \u2014 Eng. Aymn Asi</h2>'`
-    + `+'<p style="color:#8AA3C7">All Rights Reserved</p></div></body>';`
+    + `document.documentElement.innerHTML='${copyrightInner}';`
     + `});`
     + `window.addEventListener('afterprint',function(){`
     + `if(!_ready||!_r)return;`
