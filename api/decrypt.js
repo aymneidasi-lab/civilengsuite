@@ -20,13 +20,18 @@ module.exports = async function handler(req, res) {
   // ── 2. Route ─────────────────────────────────────────
   const pathname = (req.url||'/').split('?')[0].replace(/\/+$/,'') || '/';
 
-  let encFile, baseHref;
+  let encFile, baseHref, faviconLinks;
   if (pathname === '' || pathname === '/' || pathname === '/index.html') {
-    encFile  = 'pc_suite.enc';
-    baseHref = '/';
+    encFile      = 'pc_suite.enc';
+    baseHref     = '/';
+    faviconLinks = '<link rel="icon" type="image/x-icon" href="/images/favicon.ico">'
+                 + '<link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png">';
   } else if (pathname.startsWith('/footing-pro')) {
-    encFile  = 'footing_pro.enc';
-    baseHref = '/footing-pro/';
+    encFile      = 'footing_pro.enc';
+    baseHref     = '/footing-pro/';
+    faviconLinks = '<link rel="icon" type="image/png" sizes="32x32" href="/footing-pro/images/favicon-32.png">'
+                 + '<link rel="icon" type="image/png" sizes="192x192" href="/footing-pro/images/favicon-192.png">'
+                 + '<link rel="apple-touch-icon" sizes="180x180" href="/footing-pro/images/apple-touch-icon.png">';
   } else {
     return res.status(404).send('Not found');
   }
@@ -60,20 +65,19 @@ module.exports = async function handler(req, res) {
   // ── 5. Inject <base> so relative paths resolve correctly ──
   html = html.replace(/(<head[^>]*>)/i, `$1<base href="${baseHref}">`);
 
-  // ── 6. Obfuscate: XOR + base64 (two layers, no chunking) ──
-  // This keeps the bootstrap small and reliable
-  const KEY = 0x5A;
-  // Step A: UTF-8 bytes of HTML → XOR each byte → base64
-  const rawBytes  = Buffer.from(html, 'utf-8');
-  const xored     = rawBytes.map(b => b ^ KEY);
-  const payload   = xored.toString('base64');  // safe: only A-Za-z0-9+/=
+  // ── 6. Obfuscate: XOR bytes + base64 ─────────────────
+  const KEY     = 0x5A;
+  const xored   = Buffer.from(html, 'utf-8').map(b => b ^ KEY);
+  const payload = xored.toString('base64');
 
   // ── 7. Bootstrap ─────────────────────────────────────
-  // Scoped spinner (#_s) so its CSS cannot leak into the rendered page.
-  // document.open() fully resets the document (layout, CSS, scripts).
+  // IMPORTANT: favicons MUST be in the bootstrap <head>.
+  // Browsers ignore favicon <link> tags written via document.write().
+  // Absolute paths used so they work regardless of base href.
   const bootstrap = `<!DOCTYPE html><html><head><meta charset="UTF-8">`
   + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
   + `<meta name="robots" content="noindex"><title>Loading\u2026</title>`
+  + faviconLinks
   + `<style>#_s{position:fixed;inset:0;background:#0A1A2E;display:flex;align-items:center;`
   + `justify-content:center}#_s b{width:44px;height:44px;border:4px solid rgba(193,123,26,.2);`
   + `border-top-color:#C17B1A;border-radius:50%;animation:_r .8s linear infinite}`
@@ -91,8 +95,8 @@ module.exports = async function handler(req, res) {
   + `})();`
   + `<\/script></body></html>`;
 
-  res.setHeader('Content-Type',        'text/html; charset=utf-8');
-  res.setHeader('Cache-Control',       'no-store');
+  res.setHeader('Content-Type',         'text/html; charset=utf-8');
+  res.setHeader('Cache-Control',        'no-store');
   res.setHeader('X-Content-Type-Options','nosniff');
   res.status(200).send(bootstrap);
 };
