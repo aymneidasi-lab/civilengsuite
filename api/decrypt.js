@@ -20,13 +20,6 @@ module.exports = async function handler(req, res) {
   catch(e) { return res.status(500).send(errPage('Key Error', e.message)); }
 
   const pathname = (req.url||'/').split('?')[0].replace(/\/+$/,'') || '/';
-  // ── Debug mode ───────────────────────────────────────
-  // Access: /?debug=CES_DEV_2026  or  /footing-pro?debug=CES_DEV_2026
-  const DEBUG_KEY = 'CES_DEV_2026';
-  const urlParams = new URLSearchParams((req.url||'').split('?')[1]||'');
-  const isDebug   = urlParams.get('debug') === DEBUG_KEY;
-
-
 
   let encFile, baseHref, faviconLinks, pageFilename;
   if (pathname === '' || pathname === '/' || pathname === '/index.html') {
@@ -71,61 +64,6 @@ module.exports = async function handler(req, res) {
   }
 
   html = html.replace(/(<head[^>]*>)/i, `$1<base href="${baseHref}">`);
-
-
-  // ── Debug path ───────────────────────────────────────
-  // Serves full protected HTML but with F12/DevTools keys unblocked
-  // so you can open console and watch what triggers the blur
-  if (isDebug) {
-    // Inject a small debug override BEFORE all protection scripts
-    // that unblocks F12 and DevTools shortcuts
-    const debugOverride = `<script>
-/* ===== DEBUG MODE - Eng. Aymn Asi - FOR TESTING ONLY ===== */
-(function(){
-  /* Allow F12, Ctrl+Shift+I/J/C in debug mode by suppressing shield */
-  window.__DEBUG_MODE__ = true;
-
-  /* Log every event that could cause blur/shield */
-  ['blur','focus','visibilitychange'].forEach(function(ev){
-    window.addEventListener(ev, function(e){
-      console.log('[DEBUG] window event:', ev, '| hidden:', document.hidden, '| time:', Date.now());
-    }, true);
-  });
-
-  /* Intercept triggerShield and showShield to log caller */
-  document.addEventListener('DOMContentLoaded', function(){
-    /* Patch copyright-shield.classList.add to log stack trace */
-    var shield = document.getElementById('copyright-shield');
-    if(!shield) return;
-    var origAdd = shield.classList.add.bind(shield.classList);
-    shield.classList.add = function(cls){
-      if(cls === 'show'){
-        console.warn('[DEBUG] \u26A0\uFE0F SHIELD TRIGGERED! Stack trace:');
-        console.trace();
-      }
-      origAdd(cls);
-    };
-  });
-})();
-<\/script>`;
-
-    // Also unblock F12 by patching keydown — inject after <head>
-    const debugHtml = html
-      .replace(/(<head[^>]*>)/i, '$1' + debugOverride)
-      .replace(
-        /if\(e\.key\s*===\s*['"]F12['"]\)\s*\{[^}]*\}/g,
-        'if(e.key===\'F12\' && !window.__DEBUG_MODE__){e.preventDefault();return false;}'
-      )
-      .replace(
-        /if\(ctrl\s*&&\s*e\.shiftKey\s*&&[^}]*triggerShield[^}]*\}/g,
-        'if(ctrl&&e.shiftKey&&(k===\'i\'||k===\'j\'||k===\'c\')&&!window.__DEBUG_MODE__){e.preventDefault();triggerShield();return false;}'
-      );
-
-    res.setHeader('Content-Type',  'text/html; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('X-Debug-Mode',  'active');
-    return res.status(200).send(debugHtml);
-  }
 
   // ── Bot path ─────────────────────────────────────────
   const ua    = req.headers['user-agent'] || '';
