@@ -1,5 +1,8 @@
 /**
  * Civil Engineering Suite — AES-256-GCM Decrypt
+ * - Bots: plain HTML (for SEO)
+ * - Browsers: obfuscated bootstrap
+ * - Ctrl+S intercepted: downloads obfuscated bootstrap instead of live DOM
  */
 
 const fs   = require('fs');
@@ -7,6 +10,11 @@ const path = require('path');
 const { createDecipheriv } = require('crypto');
 
 const BOT_RE = /googlebot|google-inspectiontool|googleother|bingbot|yandexbot|duckduckbot|baiduspider|applebot|slurp|facebookexternalhit|twitterbot|linkedinbot|whatsapp|telegrambot|slackbot|discordbot/i;
+const KEY    = 0x5A;
+
+function xorB64(str) {
+  return Buffer.from(str, 'utf-8').map(b => b ^ KEY).toString('base64');
+}
 
 module.exports = async function handler(req, res) {
 
@@ -20,15 +28,17 @@ module.exports = async function handler(req, res) {
 
   const pathname = (req.url||'/').split('?')[0].replace(/\/+$/,'') || '/';
 
-  let encFile, baseHref, faviconLinks;
+  let encFile, baseHref, faviconLinks, pageFilename;
   if (pathname === '' || pathname === '/' || pathname === '/index.html') {
     encFile      = 'pc_suite.enc';
     baseHref     = '/';
+    pageFilename = 'civil-engineering-suite.html';
     faviconLinks = '<link rel="icon" type="image/x-icon" href="/images/favicon.ico">'
                  + '<link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png">';
   } else if (pathname.startsWith('/footing-pro')) {
     encFile      = 'footing_pro.enc';
     baseHref     = '/footing-pro/';
+    pageFilename = 'footing-pro.html';
     faviconLinks = '<link rel="icon" type="image/png" sizes="32x32" href="/footing-pro/images/favicon-32.png">'
                  + '<link rel="icon" type="image/png" sizes="192x192" href="/footing-pro/images/favicon-192.png">'
                  + '<link rel="apple-touch-icon" sizes="180x180" href="/footing-pro/images/apple-touch-icon.png">';
@@ -62,10 +72,9 @@ module.exports = async function handler(req, res) {
 
   html = html.replace(/(<head[^>]*>)/i, `$1<base href="${baseHref}">`);
 
-  // ── Bot path: plain HTML for search engines ──────────
+  // ── Bot path ─────────────────────────────────────────
   const ua    = req.headers['user-agent'] || '';
   const isBot = BOT_RE.test(ua);
-
   if (isBot) {
     const botHtml = html.replace(
       /<meta\s+name="robots"\s+content="noindex[^"]*"/gi,
@@ -77,37 +86,44 @@ module.exports = async function handler(req, res) {
     return res.status(200).send(botHtml);
   }
 
-  // ── Browser path: obfuscated bootstrap ───────────────
-  // XOR + base64 the full HTML
-  const KEY     = 0x5A;
-  const xored   = Buffer.from(html, 'utf-8').map(b => b ^ KEY);
-  const payload = xored.toString('base64');
-
-  // Encode the favicon links too so they don't appear in view-source or saved MHTML
-  const favXored   = Buffer.from(faviconLinks, 'utf-8').map(b => b ^ KEY);
-  const favPayload = favXored.toString('base64');
-
-  // Extract real title server-side — shows correctly in tab immediately
+  // ── Browser path ─────────────────────────────────────
   const titleMatch = html.match(/<title>([^<]*)<\/title>/i);
   const pageTitle  = titleMatch ? titleMatch[1] : 'Civil Engineering Suite';
 
-  const bootstrap = `<!DOCTYPE html><html><head><meta charset="UTF-8">`
+  // Obfuscate main HTML payload
+  const payload = xorB64(html);
+
+  // Build the bootstrap HTML string
+  const bootstrapHTML = `<!DOCTYPE html><html><head><meta charset="UTF-8">`
   + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
   + `<meta name="robots" content="noindex">`
   + `<title>${pageTitle}</title>`
+  + faviconLinks
   + `</head><body><script>`
   + `(function(){`
   + `try{`
-  // Inject favicons dynamically so they don't appear in saved HTML source
-  + `var f=new TextDecoder("utf-8").decode(new Uint8Array(atob("${favPayload}").split("").map(function(c){return c.charCodeAt(0)^0x5A;})));`
-  + `var t=document.createElement("template");t.innerHTML=f;`
-  + `document.head.appendChild(t.content);`
-  // Decode and write the full page
   + `var p="${payload}";`
   + `var b=atob(p);`
   + `var u=new Uint8Array(b.length);`
   + `for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i)^0x5A;`
   + `var h=new TextDecoder("utf-8").decode(u);`
+  // ── Ctrl+S / Cmd+S interceptor ──
+  // Injected into decoded page BEFORE document.write so it survives the DOM replacement.
+  // When user presses Ctrl+S, they download the obfuscated bootstrap instead of the live DOM.
+  + `var _fn="${pageFilename}";`
+  + `var _bs=btoa(unescape(encodeURIComponent(p)));`  // re-encode bootstrap payload ref
+  + `var _saveScript='<scr'+'ipt>(function(){'`
+  + `+'document.addEventListener(\\'keydown\\',function(e){'`
+  + `+'if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()===\\'s\\'){'`
+  + `+'e.preventDefault();e.stopPropagation();'`
+  + `+'var _p="'+p+'";'`
+  + `+'var _b=new Blob(["<!DOCTYPE html><html><head><meta charset=\\\\"UTF-8\\\\"><meta name=\\\\"robots\\\\" content=\\\\"noindex\\\\"><title>${pageTitle}<\\/title>${faviconLinks.replace(/"/g,'\\\\"')}<\\/head><body><script>(function(){var p=\\\\""+_p+"\\\\";var b=atob(p);var u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i)^0x5A;var h=new TextDecoder(\\\\"utf-8\\\\").decode(u);document.open();document.write(h);document.close();})()</s'+'cript><\\/body><\\/html>"],{type:"text/html"});'`
+  + `+'var _a=document.createElement("a");_a.href=URL.createObjectURL(_b);_a.download="${pageFilename}";document.body.appendChild(_a);_a.click();document.body.removeChild(_a);'`
+  + `+'}'`
+  + `+'},true);'`
+  + `+'})();<\\/scr'+'ipt>';`
+  // Inject the save-interceptor script just before </body>
+  + `h=h.replace(/<\\/body>/i,_saveScript+'<\\/body>');`
   + `document.open();`
   + `document.write(h);`
   + `document.close();`
@@ -120,7 +136,7 @@ module.exports = async function handler(req, res) {
   res.setHeader('Content-Type',          'text/html; charset=utf-8');
   res.setHeader('Cache-Control',         'no-store');
   res.setHeader('X-Content-Type-Options','nosniff');
-  res.status(200).send(bootstrap);
+  res.status(200).send(bootstrapHTML);
 };
 
 function errPage(t, m) {
