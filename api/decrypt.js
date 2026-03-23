@@ -80,111 +80,52 @@ module.exports = async function handler(req, res) {
   }
 
   // ── Browser path ─────────────────────────────────────
+  // Three 100% reliable protections — no blur (too unreliable):
+  // 1. Ctrl+S → intercept → download copyright notice
+  // 2. Print  → replace with copyright notice
+  // 3. view-source → obfuscated XOR+base64 garbage
 
-  const copyrightInner = `<head><meta charset="UTF-8"><title>Protected<\\/title><\\/head>`
+  const copyrightHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Protected</title></head>`
     + `<body style="margin:0;background:#0A1A2E;display:flex;align-items:center;`
     + `justify-content:center;min-height:100vh;font-family:sans-serif">`
     + `<div style="text-align:center;padding:40px">`
-    + `<div style="font-size:3rem;margin-bottom:20px">\\uD83D\\uDD12<\\/div>`
-    + `<h2 style="color:#C17B1A;margin-bottom:12px">\\u00A9 Civil Engineering Suite<\\/h2>`
-    + `<p style="color:#8AA3C7">Eng. Aymn Asi \\u2014 All Rights Reserved<br>`
-    + `Unauthorized copying is strictly prohibited.<\\/p><\\/div><\\/body>`;
+    + `<div style="font-size:3rem;margin-bottom:20px">&#x1F512;</div>`
+    + `<h2 style="color:#C17B1A;margin-bottom:12px">&#169; Civil Engineering Suite</h2>`
+    + `<p style="color:#8AA3C7;line-height:1.8">Eng. Aymn Asi &#8212; All Rights Reserved<br>`
+    + `Unauthorized copying or reproduction is strictly prohibited.</p>`
+    + `</div></body></html>`;
 
-  // CASES that cause blur — and how we handle each:
-  // 1. Tab switch    → visibilitychange(hidden) fires → cancel timer ✅
-  // 2. Minimize      → visibilitychange(hidden) fires → cancel timer ✅
-  // 3. Link click    → mousedown on <a> sets _navigating=true → cancel timer ✅
-  // 4. beforeunload  → page is leaving → cancel timer ✅
-  // 5. File menu     → none of the above → 300ms passes → swap DOM ✅
   const protectionScript = `<script>(function(){`
-    + `var _r=null,_ready=false,_timer=null,_swapped=false,_navigating=false;`
 
-    + `window.addEventListener('load',function(){`
-    + `_r=document.documentElement.outerHTML;`
-    + `_ready=true;`
-    + `},false);`
-
-    // Detect link/button clicks → user is navigating, not opening File menu
-    + `document.addEventListener('mousedown',function(e){`
-    + `var t=e.target;`
-    + `while(t&&t!==document){`
-    + `if(t.tagName==='A'||t.tagName==='BUTTON'||t.type==='submit'){`
-    + `_navigating=true;`
-    + `setTimeout(function(){_navigating=false;},2000);`
-    + `break;`
-    + `}`
-    + `t=t.parentNode;`
-    + `}`
-    + `},true);`
-
-    // beforeunload = page is navigating away → cancel swap
-    + `window.addEventListener('beforeunload',function(){`
-    + `_navigating=true;`
-    + `clearTimeout(_timer);`
-    + `},false);`
-
-    // visibilitychange hidden = tab switch or minimize → cancel swap
-    + `document.addEventListener('visibilitychange',function(){`
-    + `if(document.hidden){clearTimeout(_timer);}`
-    + `},false);`
-
-    // blur → wait 300ms, then check all conditions
-    + `window.addEventListener('blur',function(){`
-    + `if(!_ready)return;`
-    + `clearTimeout(_timer);`
-    + `_timer=setTimeout(function(){`
-    + `if(document.hidden)return;`  // tab/minimize
-    + `if(_navigating)return;`      // link click / navigation
-    // File menu: swap DOM
-    + `_swapped=true;`
-    + `document.documentElement.innerHTML='${copyrightInner}';`
-    + `},300);`
-    + `},false);`
-
-    // focus → restore
-    + `window.addEventListener('focus',function(){`
-    + `clearTimeout(_timer);`
-    + `_navigating=false;`
-    + `if(!_ready||!_r)return;`
-    + `if(_swapped){`
-    + `_swapped=false;`
-    + `document.open();document.write(_r);document.close();`
-    + `}`
-    + `},false);`
-
-    // Ctrl+S
+    // ── 1. Ctrl+S / Cmd+S ──────────────────────────────
     + `document.addEventListener('keydown',function(e){`
     + `if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){`
     + `e.preventDefault();e.stopPropagation();e.stopImmediatePropagation();`
-    + `var _h='<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Protected</title></head>'`
-    + `+'<body style="margin:0;background:#0A1A2E;display:flex;align-items:center;'`
-    + `+'justify-content:center;min-height:100vh;font-family:sans-serif">'`
-    + `+'<div style="text-align:center;padding:40px">'`
-    + `+'<div style="font-size:3rem">\\uD83D\\uDD12</div>'`
-    + `+'<h2 style="color:#C17B1A">\\u00A9 Civil Engineering Suite \\u2014 Eng. Aymn Asi</h2>'`
-    + `+'<p style="color:#8AA3C7">All Rights Reserved</p></div></body></html>';`
-    + `var _b=new Blob([_h],{type:'text/html'});`
+    + `var _b=new Blob(['${copyrightHtml.replace(/'/g,"\\'").replace(/\n/g,'')}'],{type:'text/html'});`
     + `var _a=document.createElement('a');`
     + `_a.href=URL.createObjectURL(_b);_a.download='${pageFilename}';`
     + `document.body.appendChild(_a);_a.click();`
     + `setTimeout(function(){document.body.removeChild(_a);URL.revokeObjectURL(_a.href);},100);`
     + `}},true);`
 
-    // Print
+    // ── 2. Print ────────────────────────────────────────
+    + `var _origBody=null;`
+    + `window.addEventListener('load',function(){_origBody=document.body.innerHTML;});`
     + `window.addEventListener('beforeprint',function(){`
-    + `if(!_ready)return;`
-    + `document.documentElement.innerHTML='${copyrightInner}';`
+    + `if(_origBody!==null)document.body.innerHTML='<div style="text-align:center;padding:80px;font-family:sans-serif">'`
+    + `+'<h2 style="color:#C17B1A">&#169; Civil Engineering Suite &#8212; Eng. Aymn Asi</h2>'`
+    + `+'<p>All Rights Reserved. Unauthorized reproduction is prohibited.</p></div>';`
     + `});`
     + `window.addEventListener('afterprint',function(){`
-    + `if(!_ready||!_r)return;`
-    + `document.open();document.write(_r);document.close();`
+    + `if(_origBody!==null)document.body.innerHTML=_origBody;`
     + `});`
 
     + `})();\u003c/script>`;
 
+  // Inject before </body>
   html = html.replace(/<\/body>/i, protectionScript + '</body>');
 
-  // Minify
+  // Minify to single line
   html = html
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/>\s+</g, '><')
@@ -192,6 +133,7 @@ module.exports = async function handler(req, res) {
     .replace(/\n|\r/g, '')
     .trim();
 
+  // XOR + base64 obfuscation
   const xored   = Buffer.from(html, 'utf-8').map(b => b ^ KEY);
   const payload = xored.toString('base64');
 
