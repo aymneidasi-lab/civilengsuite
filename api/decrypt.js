@@ -58,17 +58,22 @@ module.exports = async function handler(req, res) {
     return res.status(500).send(errPage('Decrypt Error', e.message));
   }
 
+  // Extract real page title to show correctly in browser tab
+  const titleMatch = html.match(/<title>([^<]*)<\/title>/i);
+  const pageTitle  = titleMatch ? titleMatch[1] : 'Civil Engineering Suite';
+
+  // Inject <base> so relative paths resolve correctly
   html = html.replace(/(<head[^>]*>)/i, `$1<base href="${baseHref}">`);
 
+  // Obfuscate: XOR + base64
   const KEY     = 0x5A;
   const xored   = Buffer.from(html, 'utf-8').map(b => b ^ KEY);
   const payload = xored.toString('base64');
 
-  // No spinner — blank page while JS runs (decode is ~instant, no network needed)
-  // document.open() + write() + close() is the most reliable full-page replacement
   const bootstrap = `<!DOCTYPE html><html><head><meta charset="UTF-8">`
   + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
-  + `<meta name="robots" content="noindex"><title>Loading\u2026</title>`
+  + `<meta name="robots" content="noindex">`
+  + `<title>${pageTitle}</title>`
   + faviconLinks
   + `</head><body><script>`
   + `(function(){`
@@ -82,7 +87,7 @@ module.exports = async function handler(req, res) {
   + `document.write(h);`
   + `document.close();`
   + `}catch(e){`
-  + `document.body.innerHTML="<p style='font-family:sans-serif;padding:40px;color:#C17B1A'>Loading failed: "+e.message+" \u2014 please refresh.</p>";`
+  + `document.body.innerHTML="<p style='font-family:sans-serif;padding:40px;color:#C17B1A'>Error: "+e.message+"</p>";`
   + `}`
   + `})();`
   + `<\/script></body></html>`;
