@@ -81,6 +81,18 @@ module.exports = async function handler(req, res) {
 
   // ── Browser path ─────────────────────────────────────
 
+  // LOGIC (research-backed):
+  // visibilitychange (hidden=true) fires for: tab switch + minimize
+  // blur fires for: tab switch + minimize + File menu open
+  // Therefore:
+  //   blur WITHOUT visibilitychange(hidden) = File menu = swap DOM
+  //   blur WITH    visibilitychange(hidden) = tab/minimize = do nothing
+  //
+  // TIMING FIX: visibilitychange fires at unpredictable time relative to blur.
+  // Solution: wait 300ms after blur — by then visibilitychange has always fired.
+  // If document.hidden is true after 300ms → tab/minimize → skip
+  // If document.hidden is false after 300ms → File menu → swap DOM
+
   const copyrightInner = `<head><meta charset="UTF-8"><title>Protected<\\/title><\\/head>`
     + `<body style="margin:0;background:#0A1A2E;display:flex;align-items:center;`
     + `justify-content:center;min-height:100vh;font-family:sans-serif">`
@@ -90,12 +102,8 @@ module.exports = async function handler(req, res) {
     + `<p style="color:#8AA3C7">Eng. Aymn Asi \\u2014 All Rights Reserved<br>`
     + `Unauthorized copying is strictly prohibited.<\\/p><\\/div><\\/body>`;
 
-  // KEY TECHNIQUE:
-  // visibilitychange fires on tab switch/minimize — but NOT when File menu opens
-  // blur fires on BOTH tab switch AND File menu
-  // So: blur alone (without visibilitychange) = File menu = swap DOM
   const protectionScript = `<script>(function(){`
-    + `var _r=null,_ready=false,_tabSwitch=false,_blurTimer=null;`
+    + `var _r=null,_ready=false,_timer=null,_swapped=false;`
 
     // Store real HTML on load
     + `window.addEventListener('load',function(){`
@@ -103,36 +111,34 @@ module.exports = async function handler(req, res) {
     + `_ready=true;`
     + `},false);`
 
-    // visibilitychange = tab switch or minimize — flag it
-    + `document.addEventListener('visibilitychange',function(){`
-    + `if(document.hidden){_tabSwitch=true;}`
-    + `else{_tabSwitch=false;}`
-    + `},false);`
-
-    // blur fires on both tab switch AND File menu
-    // Wait 80ms — if visibilitychange fired too → it's a tab switch → skip
-    // If visibilitychange did NOT fire → it's a menu open → swap DOM
+    // BLUR: wait 300ms, then check document.hidden
+    // If still visible after 300ms → File menu (not tab/minimize) → swap
     + `window.addEventListener('blur',function(){`
     + `if(!_ready)return;`
-    + `_tabSwitch=false;`
-    + `clearTimeout(_blurTimer);`
-    + `_blurTimer=setTimeout(function(){`
-    + `if(_tabSwitch)return;` // tab switch happened — do nothing
-    // No tab switch = menu opened = swap DOM
+    + `clearTimeout(_timer);`
+    + `_timer=setTimeout(function(){`
+    + `if(document.hidden)return;` // tab switch or minimize — visibilitychange set this
+    + `_swapped=true;`
     + `document.documentElement.innerHTML='${copyrightInner}';`
-    + `},80);`
+    + `},300);`
     + `},false);`
 
-    // focus = window returned — restore
+    // FOCUS: restore real content
     + `window.addEventListener('focus',function(){`
-    + `clearTimeout(_blurTimer);`
+    + `clearTimeout(_timer);`
     + `if(!_ready||!_r)return;`
-    + `if(document.documentElement.innerHTML!==_r){`
+    + `if(_swapped){`
+    + `_swapped=false;`
     + `document.open();document.write(_r);document.close();`
     + `}`
     + `},false);`
 
-    // Ctrl+S intercept
+    // VISIBILITY CHANGE: if tab/minimize, cancel any pending swap
+    + `document.addEventListener('visibilitychange',function(){`
+    + `if(document.hidden){clearTimeout(_timer);}` // cancel swap — it's tab/minimize
+    + `},false);`
+
+    // CTRL+S: download copyright file
     + `document.addEventListener('keydown',function(e){`
     + `if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){`
     + `e.preventDefault();e.stopPropagation();e.stopImmediatePropagation();`
@@ -140,6 +146,7 @@ module.exports = async function handler(req, res) {
     + `+'<body style="margin:0;background:#0A1A2E;display:flex;align-items:center;'`
     + `+'justify-content:center;min-height:100vh;font-family:sans-serif">'`
     + `+'<div style="text-align:center;padding:40px">'`
+    + `+'<div style="font-size:3rem">\\uD83D\\uDD12</div>'`
     + `+'<h2 style="color:#C17B1A">\\u00A9 Civil Engineering Suite \\u2014 Eng. Aymn Asi</h2>'`
     + `+'<p style="color:#8AA3C7">All Rights Reserved</p></div></body></html>';`
     + `var _b=new Blob([_h],{type:'text/html'});`
@@ -149,7 +156,7 @@ module.exports = async function handler(req, res) {
     + `setTimeout(function(){document.body.removeChild(_a);URL.revokeObjectURL(_a.href);},100);`
     + `}},true);`
 
-    // Print protection
+    // PRINT protection
     + `window.addEventListener('beforeprint',function(){`
     + `if(!_ready)return;`
     + `document.documentElement.innerHTML='${copyrightInner}';`
