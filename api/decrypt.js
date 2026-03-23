@@ -1,13 +1,19 @@
 /**
  * Civil Engineering Suite — AES-256-GCM Decrypt
+ * Serves plain HTML to search bots (for indexing)
+ * Serves obfuscated bootstrap to real browsers
  */
 
 const fs   = require('fs');
 const path = require('path');
 const { createDecipheriv } = require('crypto');
 
+// Known search engine / social preview bots
+const BOT_RE = /googlebot|google-inspectiontool|googleother|bingbot|yandexbot|duckduckbot|baiduspider|applebot|slurp|facebookexternalhit|twitterbot|linkedinbot|whatsapp|telegrambot|slackbot|discordbot|rogerbot|semrushbot|ahrefsbot/i;
+
 module.exports = async function handler(req, res) {
 
+  // ── 1. Key ──────────────────────────────────────────
   const keyHex = (process.env.CES_DECRYPT_KEY || '').trim();
   if (!keyHex || keyHex.length !== 64)
     return res.status(500).send(errPage('Config Error', 'CES_DECRYPT_KEY missing'));
@@ -16,6 +22,7 @@ module.exports = async function handler(req, res) {
   try { keyBuf = Buffer.from(keyHex, 'hex'); }
   catch(e) { return res.status(500).send(errPage('Key Error', e.message)); }
 
+  // ── 2. Route ─────────────────────────────────────────
   const pathname = (req.url||'/').split('?')[0].replace(/\/+$/,'') || '/';
 
   let encFile, baseHref, faviconLinks;
@@ -34,6 +41,7 @@ module.exports = async function handler(req, res) {
     return res.status(404).send('Not found');
   }
 
+  // ── 3. Read .enc ─────────────────────────────────────
   const encPath = path.join(process.cwd(), 'public', encFile);
   let encData;
   try { encData = fs.readFileSync(encPath, 'utf-8').trim(); }
@@ -42,8 +50,9 @@ module.exports = async function handler(req, res) {
       `Cannot read ${encFile}: ${e.message} | public/: ${listDir(path.join(process.cwd(),'public'))}`));
   }
 
+  // ── 4. Parse & decrypt ───────────────────────────────
   const dot = encData.indexOf('.');
-  if (dot === -1) return res.status(500).send(errPage('Format Error','Bad .enc format'));
+  if (dot === -1) return res.status(500).send(errPage('Format Error', 'Bad .enc format'));
 
   let html;
   try {
@@ -58,14 +67,33 @@ module.exports = async function handler(req, res) {
     return res.status(500).send(errPage('Decrypt Error', e.message));
   }
 
-  // Extract real page title to show correctly in browser tab
+  // ── 5. Inject <base> tag ─────────────────────────────
+  html = html.replace(/(<head[^>]*>)/i, `$1<base href="${baseHref}">`);
+
+  // ── 6. Bot detection ─────────────────────────────────
+  const ua    = req.headers['user-agent'] || '';
+  const isBot = BOT_RE.test(ua);
+
+  if (isBot) {
+    // ── PATH A: Search bots — serve plain HTML directly ──
+    // Google, Bing, social previews all get full readable HTML
+    // robots meta tag allows indexing for bots
+    const botHtml = html.replace(
+      /<meta\s+name="robots"\s+content="noindex[^"]*"/gi,
+      '<meta name="robots" content="index, follow"'
+    );
+    res.setHeader('Content-Type',  'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=3600, must-revalidate');
+    res.setHeader('X-Robots-Tag',  'index, follow');
+    return res.status(200).send(botHtml);
+  }
+
+  // ── PATH B: Real browsers — serve obfuscated bootstrap ──
+  // Extract real title for the browser tab
   const titleMatch = html.match(/<title>([^<]*)<\/title>/i);
   const pageTitle  = titleMatch ? titleMatch[1] : 'Civil Engineering Suite';
 
-  // Inject <base> so relative paths resolve correctly
-  html = html.replace(/(<head[^>]*>)/i, `$1<base href="${baseHref}">`);
-
-  // Obfuscate: XOR + base64
+  // XOR + base64 obfuscation
   const KEY     = 0x5A;
   const xored   = Buffer.from(html, 'utf-8').map(b => b ^ KEY);
   const payload = xored.toString('base64');
