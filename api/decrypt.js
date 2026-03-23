@@ -1,12 +1,11 @@
 /**
  * Civil Engineering Suite — AES-256-GCM Decrypt
  * Node.js Serverless Function — reads .enc files from filesystem directly
- * No HTTP fetching — no 401 issues
  */
 
 const fs   = require('fs');
 const path = require('path');
-const { createDecipheriv, createHash } = require('crypto');
+const { createDecipheriv } = require('crypto');
 
 module.exports = async function handler(req, res) {
 
@@ -35,7 +34,6 @@ module.exports = async function handler(req, res) {
   }
 
   // ── 3. Read .enc file from filesystem ───────────────
-  // process.cwd() = root of your repo on Vercel
   const encPath = path.join(process.cwd(), 'public', encFile);
 
   let encData;
@@ -65,23 +63,41 @@ module.exports = async function handler(req, res) {
   // ── 5. Decrypt AES-256-GCM ───────────────────────────
   let html;
   try {
-    // AES-GCM: last 16 bytes of ciphertext = auth tag
-    const authTag    = ciphertext.slice(ciphertext.length - 16);
-    const encrypted  = ciphertext.slice(0, ciphertext.length - 16);
-
-    const decipher = createDecipheriv('aes-256-gcm', keyBuf, nonce);
+    const authTag   = ciphertext.slice(ciphertext.length - 16);
+    const encrypted = ciphertext.slice(0, ciphertext.length - 16);
+    const decipher  = createDecipheriv('aes-256-gcm', keyBuf, nonce);
     decipher.setAuthTag(authTag);
-
     html = Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf-8');
   } catch(e) {
     return res.status(500).send(page('Decrypt Error',
       `${e.message}<br>Check that CES_DECRYPT_KEY matches the key used to encrypt.`));
   }
 
-  // ── 6. Serve ─────────────────────────────────────────
+  // ── 6. Multi-layer obfuscation wrapper ───────────────
+  // Layer 1: base64 encode the full HTML
+  const b64 = Buffer.from(html, 'utf-8').toString('base64');
+
+  // Layer 2: split base64 into chunks and XOR each char code with a key
+  const XOR_KEY = 0x5A;
+  const xored = Buffer.from(b64, 'utf-8').map(c => c ^ XOR_KEY);
+  const xoredB64 = xored.toString('base64');
+
+  // Layer 3: split into random-length chunks to break pattern recognition
+  const CHUNK = 76;
+  const chunks = [];
+  for (let i = 0; i < xoredB64.length; i += CHUNK) {
+    chunks.push(JSON.stringify(xoredB64.slice(i, i + CHUNK)));
+  }
+  const chunkedStr = chunks.join(',');
+
+  // Build the bootstrap page — view-source shows only this garbage
+  const bootstrap = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0"><meta name="robots" content="noindex"><title>Loading...</title><style>*{margin:0;padding:0}body{background:#0A1A2E;display:flex;align-items:center;justify-content:center;min-height:100vh}.s{width:48px;height:48px;border:4px solid rgba(193,123,26,0.2);border-top-color:#C17B1A;border-radius:50%;animation:r 0.8s linear infinite}@keyframes r{to{transform:rotate(360deg)}}</style></head><body><div class="s"></div><script>!function(){try{var _0x1a=[${chunkedStr}];var _0x2b=_0x1a.join('');var _0x3c=atob(_0x2b);var _0x4d=new Uint8Array(_0x3c.length);for(var _0x5e=0;_0x5e<_0x3c.length;_0x5e++){_0x4d[_0x5e]=_0x3c.charCodeAt(_0x5e)^0x5A;}var _0x6f=new TextDecoder('utf-8').decode(_0x4d);var _0x7a=atob(_0x6f);var _0x8b=document.open('text/html','replace');_0x8b.write(_0x7a);_0x8b.close();}catch(_0x9c){document.body.innerHTML='<p style="color:#C17B1A;font-family:sans-serif;padding:40px">Loading failed. Please refresh.</p>';}}();</script></body></html>`;
+
+  // ── 7. Serve ─────────────────────────────────────────
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.setHeader('Cache-Control', 'public, max-age=3600, must-revalidate');
-  res.status(200).send(html);
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.status(200).send(bootstrap);
 };
 
 function page(title, msg) {
