@@ -81,67 +81,96 @@ module.exports = async function handler(req, res) {
 
   // ── Browser path ─────────────────────────────────────
 
-  // Copyright notice shown when window loses focus (File menu opened)
-  const copyrightNotice = `<div style="display:flex;align-items:center;justify-content:center;`
-    + `min-height:100vh;font-family:Inter,sans-serif;background:#0A1A2E;text-align:center;padding:40px">`
-    + `<div><div style="font-size:3rem;margin-bottom:24px">\uD83D\uDD12</div>`
+  const copyrightPage = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Protected</title></head>`
+    + `<body style="margin:0;background:#0A1A2E;display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:Inter,sans-serif">`
+    + `<div style="text-align:center;padding:40px">`
+    + `<div style="font-size:3rem;margin-bottom:24px">\uD83D\uDD12</div>`
     + `<h2 style="color:#C17B1A;font-size:1.6rem;margin-bottom:16px">\u00A9 Civil Engineering Suite</h2>`
     + `<p style="color:#8AA3C7;font-size:1rem;line-height:1.8">Eng. Aymn Asi \u2014 All Rights Reserved<br>`
-    + `Unauthorized copying or reproduction is strictly prohibited.</p></div></div>`;
+    + `Unauthorized copying or reproduction is strictly prohibited.</p>`
+    + `</div></body></html>`;
 
-  // The protection script injected into the decoded HTML:
-  // 1. window.blur  → fires when File menu opens → replace body with copyright notice
-  // 2. window.focus → fires when menu closes    → restore real content from JS variable
-  // 3. Ctrl+S       → intercepted → download obfuscated file
-  // 4. beforeprint  → replace with copyright notice
+  // Protection script injected into decoded HTML:
+  // - Alt key / F10 detected → marks "menu likely opening" → on blur swap DOM
+  // - Tab switch / minimize: no Alt/F10 → blur ignored → no DOM swap
+  // - Ctrl+S: intercept → download copyright file
+  // - beforeprint: swap DOM
   const protectionScript = `<script>(function(){`
-    // Store real body after page loads
-    + `var _r=null,_on=false;`
-    + `window.addEventListener('load',function(){_r=document.body.innerHTML;_on=true;},false);`
+    + `var _r=null,_ready=false,_menuLikely=false,_t=null;`
 
-    // BLUR: File menu opens → swap to copyright notice instantly
-    + `window.addEventListener('blur',function(){`
-    + `if(!_on)return;`
-    + `document.body.innerHTML='${copyrightNotice.replace(/'/g, "\\'")}';`
+    // Store real content once loaded
+    + `window.addEventListener('load',function(){`
+    + `_r=document.documentElement.outerHTML;_ready=true;`
     + `},false);`
 
-    // FOCUS: menu closes → restore real content
-    + `window.addEventListener('focus',function(){`
-    + `if(!_on||!_r)return;`
-    + `document.body.innerHTML=_r;`
-    + `},false);`
-
-    // CTRL+S: download obfuscated file
+    // Detect Alt or F10 — signals user may be opening browser menu
     + `document.addEventListener('keydown',function(e){`
+    + `if(e.key==='Alt'||e.key==='F10'){`
+    + `_menuLikely=true;`
+    + `clearTimeout(_t);`
+    // Reset flag after 3 seconds if blur never fired
+    + `_t=setTimeout(function(){_menuLikely=false;},3000);`
+    + `}`
+    // Ctrl+S intercept
     + `if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){`
     + `e.preventDefault();e.stopPropagation();e.stopImmediatePropagation();`
-    + `var _h='<!DOCTYPE html><html><head><meta charset="UTF-8"><title>...</title></head>'`
-    + `+'<body><div style="font-family:sans-serif;padding:40px;color:#C17B1A">'`
-    + `+'\u00A9 Civil Engineering Suite \u2014 Eng. Aymn Asi. All Rights Reserved.</div>'`
-    + `+'</body></html>';`
+    + `var _h='${copyrightPage.replace(/'/g,"\\'").replace(/\n/g,'')}';`
     + `var _b=new Blob([_h],{type:'text/html'});`
     + `var _a=document.createElement('a');`
     + `_a.href=URL.createObjectURL(_b);_a.download='${pageFilename}';`
     + `document.body.appendChild(_a);_a.click();`
     + `setTimeout(function(){document.body.removeChild(_a);URL.revokeObjectURL(_a.href);},100);`
-    + `}},true);`
+    + `}`
+    + `},true);`
 
-    // PRINT: replace with copyright
+    // Reset menuLikely on keyup of Alt/F10
+    + `document.addEventListener('keyup',function(e){`
+    + `if(e.key==='Alt'||e.key==='F10'){`
+    + `clearTimeout(_t);`
+    // Short delay before reset — gives time for blur to fire
+    + `_t=setTimeout(function(){_menuLikely=false;},500);`
+    + `}`
+    + `},true);`
+
+    // Blur: only swap if menu key was pressed
+    + `window.addEventListener('blur',function(){`
+    + `if(!_ready||!_menuLikely)return;`
+    + `document.documentElement.innerHTML='<head><meta charset="UTF-8"><title>Protected</title></head>'`
+    + `+'<body style="margin:0;background:#0A1A2E;display:flex;align-items:center;justify-content:center;min-height:100vh">'`
+    + `+'<div style="text-align:center;padding:40px;font-family:sans-serif">'`
+    + `+'<div style="font-size:3rem">\uD83D\uDD12</div>'`
+    + `+'<h2 style="color:#C17B1A">\u00A9 Civil Engineering Suite \u2014 Eng. Aymn Asi</h2>'`
+    + `+'<p style="color:#8AA3C7">All Rights Reserved</p></div></body>';`
+    + `_menuLikely=false;`
+    + `},false);`
+
+    // Focus: restore real content
+    + `window.addEventListener('focus',function(){`
+    + `if(!_ready||!_r)return;`
+    + `document.open();document.write(_r);document.close();`
+    + `},false);`
+
+    // Print protection
     + `window.addEventListener('beforeprint',function(){`
-    + `if(!_on)return;`
-    + `document.body.innerHTML='${copyrightNotice.replace(/'/g, "\\'")}';`
+    + `if(!_ready)return;`
+    + `document.documentElement.innerHTML='<head><meta charset="UTF-8"><title>Protected</title></head>'`
+    + `+'<body style="margin:0;background:#0A1A2E;display:flex;align-items:center;justify-content:center;min-height:100vh">'`
+    + `+'<div style="text-align:center;padding:40px;font-family:sans-serif">'`
+    + `+'<div style="font-size:3rem">\uD83D\uDD12</div>'`
+    + `+'<h2 style="color:#C17B1A">\u00A9 Civil Engineering Suite \u2014 Eng. Aymn Asi</h2>'`
+    + `+'<p style="color:#8AA3C7">All Rights Reserved</p></div></body>';`
     + `});`
     + `window.addEventListener('afterprint',function(){`
-    + `if(!_on||!_r)return;`
-    + `document.body.innerHTML=_r;`
+    + `if(!_ready||!_r)return;`
+    + `document.open();document.write(_r);document.close();`
     + `});`
 
     + `})();\u003c/script>`;
 
-  // Inject protection before </body>
+  // Inject before </body>
   html = html.replace(/<\/body>/i, protectionScript + '</body>');
 
-  // Minify to one line
+  // Minify
   html = html
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/>\s+</g, '><')
