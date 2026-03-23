@@ -87,15 +87,14 @@ module.exports = async function handler(req, res) {
   const favXored   = Buffer.from(faviconLinks, 'utf-8').map(b => b ^ KEY);
   const favPayload = favXored.toString('base64');
 
-  // Bootstrap is stripped of ALL revealing info:
-  // - No real title (generic "..." only)
-  // - No visible favicon links in HTML (injected via JS after decode)
-  // - No paths, no structure hints
-  // Both view-source AND Ctrl+S saved file show identical meaningless content
+  // Extract real title server-side — shows correctly in tab immediately
+  const titleMatch = html.match(/<title>([^<]*)<\/title>/i);
+  const pageTitle  = titleMatch ? titleMatch[1] : 'Civil Engineering Suite';
+
   const bootstrap = `<!DOCTYPE html><html><head><meta charset="UTF-8">`
   + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
   + `<meta name="robots" content="noindex">`
-  + `<title>...</title>`
+  + `<title>${pageTitle}</title>`
   + `</head><body><script>`
   + `(function(){`
   + `try{`
