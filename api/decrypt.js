@@ -65,22 +65,24 @@ module.exports = async function handler(req, res) {
   // ── 5. Inject <base> so relative paths resolve correctly ──
   html = html.replace(/(<head[^>]*>)/i, `$1<base href="${baseHref}">`);
 
-  // ── 6. Obfuscate: XOR bytes + base64 ─────────────────
+  // ── 6. Obfuscate: XOR + base64 ───────────────────────
   const KEY     = 0x5A;
   const xored   = Buffer.from(html, 'utf-8').map(b => b ^ KEY);
   const payload = xored.toString('base64');
 
   // ── 7. Bootstrap ─────────────────────────────────────
-  // IMPORTANT: favicons MUST be in the bootstrap <head>.
-  // Browsers ignore favicon <link> tags written via document.write().
-  // Absolute paths used so they work regardless of base href.
+  // - Favicons in bootstrap <head> (browsers ignore those in document.write content)
+  // - Spinner is NOT fixed/fullscreen — just centered inline — so it cannot bleed over content
+  // - document.getElementById('_s').remove() clears spinner explicitly before write
+  // - document.open() with no args is most compatible across all browsers
   const bootstrap = `<!DOCTYPE html><html><head><meta charset="UTF-8">`
   + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
   + `<meta name="robots" content="noindex"><title>Loading\u2026</title>`
   + faviconLinks
-  + `<style>#_s{position:fixed;inset:0;background:#0A1A2E;display:flex;align-items:center;`
-  + `justify-content:center}#_s b{width:44px;height:44px;border:4px solid rgba(193,123,26,.2);`
-  + `border-top-color:#C17B1A;border-radius:50%;animation:_r .8s linear infinite}`
+  + `<style>html,body{margin:0;padding:0;background:#0A1A2E;height:100%}`
+  + `#_s{display:flex;align-items:center;justify-content:center;height:100vh}`
+  + `#_s b{width:44px;height:44px;border:4px solid rgba(193,123,26,.2);`
+  + `border-top-color:#C17B1A;border-radius:50%;animation:_r .8s linear infinite;display:block}`
   + `@keyframes _r{to{transform:rotate(360deg)}}</style>`
   + `</head><body><div id="_s"><b></b></div><script>`
   + `(function(){`
@@ -89,14 +91,16 @@ module.exports = async function handler(req, res) {
   + `var u=new Uint8Array(b.length);`
   + `for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i)^0x5A;`
   + `var h=new TextDecoder('utf-8').decode(u);`
-  + `var d=document.open('text/html','replace');`
+  + `var s=document.getElementById('_s');`
+  + `if(s)s.remove();`
+  + `var d=document.open();`
   + `d.write(h);`
   + `d.close();`
   + `})();`
   + `<\/script></body></html>`;
 
-  res.setHeader('Content-Type',         'text/html; charset=utf-8');
-  res.setHeader('Cache-Control',        'no-store');
+  res.setHeader('Content-Type',          'text/html; charset=utf-8');
+  res.setHeader('Cache-Control',         'no-store');
   res.setHeader('X-Content-Type-Options','nosniff');
   res.status(200).send(bootstrap);
 };
