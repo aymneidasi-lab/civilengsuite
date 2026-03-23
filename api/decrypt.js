@@ -80,9 +80,9 @@ module.exports = async function handler(req, res) {
   }
 
   // ── Browser path ─────────────────────────────────────
-  // Three 100% reliable protections — no blur (too unreliable):
+  // Two 100% reliable protections — no blur (too unreliable):
   // 1. Ctrl+S → intercept → download copyright notice
-  // 2. Print  → replace with copyright notice
+  // 2. Print  → handled by each page's own overlay (not duplicated here)
   // 3. view-source → obfuscated XOR+base64 garbage
 
   const copyrightHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Protected</title></head>`
@@ -108,17 +108,9 @@ module.exports = async function handler(req, res) {
     + `setTimeout(function(){document.body.removeChild(_a);URL.revokeObjectURL(_a.href);},100);`
     + `}},true);`
 
-    // ── 2. Print ────────────────────────────────────────
-    + `var _origBody=null;`
-    + `window.addEventListener('load',function(){_origBody=document.body.innerHTML;});`
-    + `window.addEventListener('beforeprint',function(){`
-    + `if(_origBody!==null)document.body.innerHTML='<div style="text-align:center;padding:80px;font-family:sans-serif">'`
-    + `+'<h2 style="color:#C17B1A">&#169; Civil Engineering Suite &#8212; Eng. Aymn Asi</h2>'`
-    + `+'<p>All Rights Reserved. Unauthorized reproduction is prohibited.</p></div>';`
-    + `});`
-    + `window.addEventListener('afterprint',function(){`
-    + `if(_origBody!==null)document.body.innerHTML=_origBody;`
-    + `});`
+    // ── 2. Print: handled by each page's own overlay — NOT duplicated here
+    //    Reason: duplicating beforeprint/afterprint with innerHTML wipe causes
+    //    body to go blank when navigating between pages via document.write bootstrap.
 
     + `})();\u003c/script>`;
 
