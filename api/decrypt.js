@@ -64,29 +64,26 @@ module.exports = async function handler(req, res) {
   const xored   = Buffer.from(html, 'utf-8').map(b => b ^ KEY);
   const payload = xored.toString('base64');
 
-  // KEY FIX: NO background, NO color on html/body in bootstrap.
-  // Only the spinner div (#_s) is styled - absolutely positioned, transparent bg.
-  // This prevents ANY bootstrap CSS from bleeding into the decoded page.
+  // No spinner — blank page while JS runs (decode is ~instant, no network needed)
+  // document.open() + write() + close() is the most reliable full-page replacement
   const bootstrap = `<!DOCTYPE html><html><head><meta charset="UTF-8">`
   + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
   + `<meta name="robots" content="noindex"><title>Loading\u2026</title>`
   + faviconLinks
-  + `<style>`
-  + `#_s{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:9}`
-  + `#_s b{display:block;width:44px;height:44px;border:4px solid rgba(193,123,26,.3);`
-  + `border-top-color:#C17B1A;border-radius:50%;animation:_r .8s linear infinite}`
-  + `@keyframes _r{to{transform:rotate(360deg)}}`
-  + `</style>`
-  + `</head><body><div id="_s"><b></b></div><script>`
+  + `</head><body><script>`
   + `(function(){`
+  + `try{`
   + `var p="${payload}";`
   + `var b=atob(p);`
   + `var u=new Uint8Array(b.length);`
   + `for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i)^0x5A;`
-  + `var h=new TextDecoder('utf-8').decode(u);`
+  + `var h=new TextDecoder("utf-8").decode(u);`
   + `document.open();`
   + `document.write(h);`
   + `document.close();`
+  + `}catch(e){`
+  + `document.body.innerHTML="<p style='font-family:sans-serif;padding:40px;color:#C17B1A'>Loading failed: "+e.message+" \u2014 please refresh.</p>";`
+  + `}`
   + `})();`
   + `<\/script></body></html>`;
 
