@@ -1,19 +1,15 @@
 /**
  * Civil Engineering Suite — AES-256-GCM Decrypt
- * Serves plain HTML to search bots (for indexing)
- * Serves obfuscated bootstrap to real browsers
  */
 
 const fs   = require('fs');
 const path = require('path');
 const { createDecipheriv } = require('crypto');
 
-// Known search engine / social preview bots
-const BOT_RE = /googlebot|google-inspectiontool|googleother|bingbot|yandexbot|duckduckbot|baiduspider|applebot|slurp|facebookexternalhit|twitterbot|linkedinbot|whatsapp|telegrambot|slackbot|discordbot|rogerbot|semrushbot|ahrefsbot/i;
+const BOT_RE = /googlebot|google-inspectiontool|googleother|bingbot|yandexbot|duckduckbot|baiduspider|applebot|slurp|facebookexternalhit|twitterbot|linkedinbot|whatsapp|telegrambot|slackbot|discordbot/i;
 
 module.exports = async function handler(req, res) {
 
-  // ── 1. Key ──────────────────────────────────────────
   const keyHex = (process.env.CES_DECRYPT_KEY || '').trim();
   if (!keyHex || keyHex.length !== 64)
     return res.status(500).send(errPage('Config Error', 'CES_DECRYPT_KEY missing'));
@@ -22,7 +18,6 @@ module.exports = async function handler(req, res) {
   try { keyBuf = Buffer.from(keyHex, 'hex'); }
   catch(e) { return res.status(500).send(errPage('Key Error', e.message)); }
 
-  // ── 2. Route ─────────────────────────────────────────
   const pathname = (req.url||'/').split('?')[0].replace(/\/+$/,'') || '/';
 
   let encFile, baseHref, faviconLinks;
@@ -41,7 +36,6 @@ module.exports = async function handler(req, res) {
     return res.status(404).send('Not found');
   }
 
-  // ── 3. Read .enc ─────────────────────────────────────
   const encPath = path.join(process.cwd(), 'public', encFile);
   let encData;
   try { encData = fs.readFileSync(encPath, 'utf-8').trim(); }
@@ -50,7 +44,6 @@ module.exports = async function handler(req, res) {
       `Cannot read ${encFile}: ${e.message} | public/: ${listDir(path.join(process.cwd(),'public'))}`));
   }
 
-  // ── 4. Parse & decrypt ───────────────────────────────
   const dot = encData.indexOf('.');
   if (dot === -1) return res.status(500).send(errPage('Format Error', 'Bad .enc format'));
 
@@ -67,17 +60,13 @@ module.exports = async function handler(req, res) {
     return res.status(500).send(errPage('Decrypt Error', e.message));
   }
 
-  // ── 5. Inject <base> tag ─────────────────────────────
   html = html.replace(/(<head[^>]*>)/i, `$1<base href="${baseHref}">`);
 
-  // ── 6. Bot detection ─────────────────────────────────
+  // ── Bot path: plain HTML for search engines ──────────
   const ua    = req.headers['user-agent'] || '';
   const isBot = BOT_RE.test(ua);
 
   if (isBot) {
-    // ── PATH A: Search bots — serve plain HTML directly ──
-    // Google, Bing, social previews all get full readable HTML
-    // robots meta tag allows indexing for bots
     const botHtml = html.replace(
       /<meta\s+name="robots"\s+content="noindex[^"]*"/gi,
       '<meta name="robots" content="index, follow"'
@@ -88,24 +77,33 @@ module.exports = async function handler(req, res) {
     return res.status(200).send(botHtml);
   }
 
-  // ── PATH B: Real browsers — serve obfuscated bootstrap ──
-  // Extract real title for the browser tab
-  const titleMatch = html.match(/<title>([^<]*)<\/title>/i);
-  const pageTitle  = titleMatch ? titleMatch[1] : 'Civil Engineering Suite';
-
-  // XOR + base64 obfuscation
+  // ── Browser path: obfuscated bootstrap ───────────────
+  // XOR + base64 the full HTML
   const KEY     = 0x5A;
   const xored   = Buffer.from(html, 'utf-8').map(b => b ^ KEY);
   const payload = xored.toString('base64');
 
+  // Encode the favicon links too so they don't appear in view-source or saved MHTML
+  const favXored   = Buffer.from(faviconLinks, 'utf-8').map(b => b ^ KEY);
+  const favPayload = favXored.toString('base64');
+
+  // Bootstrap is stripped of ALL revealing info:
+  // - No real title (generic "..." only)
+  // - No visible favicon links in HTML (injected via JS after decode)
+  // - No paths, no structure hints
+  // Both view-source AND Ctrl+S saved file show identical meaningless content
   const bootstrap = `<!DOCTYPE html><html><head><meta charset="UTF-8">`
   + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
   + `<meta name="robots" content="noindex">`
-  + `<title>${pageTitle}</title>`
-  + faviconLinks
+  + `<title>...</title>`
   + `</head><body><script>`
   + `(function(){`
   + `try{`
+  // Inject favicons dynamically so they don't appear in saved HTML source
+  + `var f=new TextDecoder("utf-8").decode(new Uint8Array(atob("${favPayload}").split("").map(function(c){return c.charCodeAt(0)^0x5A;})));`
+  + `var t=document.createElement("template");t.innerHTML=f;`
+  + `document.head.appendChild(t.content);`
+  // Decode and write the full page
   + `var p="${payload}";`
   + `var b=atob(p);`
   + `var u=new Uint8Array(b.length);`
