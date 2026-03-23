@@ -1,8 +1,5 @@
 /**
  * Civil Engineering Suite — AES-256-GCM Decrypt
- * - Bots: plain HTML (for SEO)
- * - Browsers: obfuscated bootstrap
- * - Ctrl+S intercepted: downloads obfuscated bootstrap instead of live DOM
  */
 
 const fs   = require('fs');
@@ -11,10 +8,6 @@ const { createDecipheriv } = require('crypto');
 
 const BOT_RE = /googlebot|google-inspectiontool|googleother|bingbot|yandexbot|duckduckbot|baiduspider|applebot|slurp|facebookexternalhit|twitterbot|linkedinbot|whatsapp|telegrambot|slackbot|discordbot/i;
 const KEY    = 0x5A;
-
-function xorB64(str) {
-  return Buffer.from(str, 'utf-8').map(b => b ^ KEY).toString('base64');
-}
 
 module.exports = async function handler(req, res) {
 
@@ -87,56 +80,54 @@ module.exports = async function handler(req, res) {
   }
 
   // ── Browser path ─────────────────────────────────────
+
+  // Step 1: Inject Ctrl+S interceptor directly into the HTML BEFORE encoding
+  // This runs inside the decoded page — guaranteed to fire on Ctrl+S
+  const ctrlSScript = `<script>(function(){`
+    + `var _p="${pageFilename}";`
+    + `document.addEventListener('keydown',function(e){`
+    + `if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){`
+    + `e.preventDefault();e.stopPropagation();e.stopImmediatePropagation();`
+    + `var _h='<!DOCTYPE html><html><head><meta charset="UTF-8"><title>...</title></head>'`
+    + `+'<body><p style="font-family:sans-serif;padding:40px;color:#C17B1A">'`
+    + `+'\u00A9 Civil Engineering Suite \u2014 Eng. Aymn Asi. All Rights Reserved.</p>'`
+    + `+'</body></html>';`
+    + `var _b=new Blob([_h],{type:'text/html'});`
+    + `var _a=document.createElement('a');`
+    + `_a.href=URL.createObjectURL(_b);`
+    + `_a.download=_p;`
+    + `document.body.appendChild(_a);_a.click();`
+    + `setTimeout(function(){document.body.removeChild(_a);URL.revokeObjectURL(_a.href);},100);`
+    + `}},true);})()\u003c/script>`;
+
+  // Inject before </body>
+  html = html.replace(/<\/body>/i, ctrlSScript + '</body>');
+
+  // Step 2: Minify HTML to one single unreadable line
+  // Remove comments, collapse all whitespace between tags
+  html = html
+    .replace(/<!--[\s\S]*?-->/g, '')           // remove HTML comments
+    .replace(/>\s+</g, '><')                   // remove whitespace between tags
+    .replace(/\s{2,}/g, ' ')                   // collapse multiple spaces
+    .replace(/\n/g, '')                        // remove all newlines
+    .replace(/\r/g, '')                        // remove carriage returns
+    .trim();
+
+  // Step 3: XOR + base64 obfuscation
+  const xored   = Buffer.from(html, 'utf-8').map(b => b ^ KEY);
+  const payload = xored.toString('base64');
+
+  // Extract title for browser tab
   const titleMatch = html.match(/<title>([^<]*)<\/title>/i);
   const pageTitle  = titleMatch ? titleMatch[1] : 'Civil Engineering Suite';
 
-  // Obfuscate main HTML payload
-  const payload = xorB64(html);
-
-  // Build the bootstrap HTML string
-  const bootstrapHTML = `<!DOCTYPE html><html><head><meta charset="UTF-8">`
-  + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
-  + `<meta name="robots" content="noindex">`
-  + `<title>${pageTitle}</title>`
-  + faviconLinks
-  + `</head><body><script>`
-  + `(function(){`
-  + `try{`
-  + `var p="${payload}";`
-  + `var b=atob(p);`
-  + `var u=new Uint8Array(b.length);`
-  + `for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i)^0x5A;`
-  + `var h=new TextDecoder("utf-8").decode(u);`
-  // ── Ctrl+S / Cmd+S interceptor ──
-  // Injected into decoded page BEFORE document.write so it survives the DOM replacement.
-  // When user presses Ctrl+S, they download the obfuscated bootstrap instead of the live DOM.
-  + `var _fn="${pageFilename}";`
-  + `var _bs=btoa(unescape(encodeURIComponent(p)));`  // re-encode bootstrap payload ref
-  + `var _saveScript='<scr'+'ipt>(function(){'`
-  + `+'document.addEventListener(\\'keydown\\',function(e){'`
-  + `+'if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()===\\'s\\'){'`
-  + `+'e.preventDefault();e.stopPropagation();'`
-  + `+'var _p="'+p+'";'`
-  + `+'var _b=new Blob(["<!DOCTYPE html><html><head><meta charset=\\\\"UTF-8\\\\"><meta name=\\\\"robots\\\\" content=\\\\"noindex\\\\"><title>${pageTitle}<\\/title>${faviconLinks.replace(/"/g,'\\\\"')}<\\/head><body><script>(function(){var p=\\\\""+_p+"\\\\";var b=atob(p);var u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i)^0x5A;var h=new TextDecoder(\\\\"utf-8\\\\").decode(u);document.open();document.write(h);document.close();})()</s'+'cript><\\/body><\\/html>"],{type:"text/html"});'`
-  + `+'var _a=document.createElement("a");_a.href=URL.createObjectURL(_b);_a.download="${pageFilename}";document.body.appendChild(_a);_a.click();document.body.removeChild(_a);'`
-  + `+'}'`
-  + `+'},true);'`
-  + `+'})();<\\/scr'+'ipt>';`
-  // Inject the save-interceptor script just before </body>
-  + `h=h.replace(/<\\/body>/i,_saveScript+'<\\/body>');`
-  + `document.open();`
-  + `document.write(h);`
-  + `document.close();`
-  + `}catch(e){`
-  + `document.body.innerHTML="<p style='font-family:sans-serif;padding:40px;color:#C17B1A'>Error: "+e.message+"</p>";`
-  + `}`
-  + `})();`
-  + `<\/script></body></html>`;
+  // Step 4: Bootstrap — single line, no whitespace, no hints
+  const bootstrap = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0"><meta name="robots" content="noindex"><title>${pageTitle}</title>${faviconLinks}</head><body><script>(function(){try{var p="${payload}";var b=atob(p);var u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i)^0x5A;var h=new TextDecoder("utf-8").decode(u);document.open();document.write(h);document.close();}catch(e){document.body.innerHTML="<p style='padding:40px;color:#C17B1A;font-family:sans-serif'>Error: "+e.message+"</p>";}})();<\/script></body></html>`;
 
   res.setHeader('Content-Type',          'text/html; charset=utf-8');
   res.setHeader('Cache-Control',         'no-store');
   res.setHeader('X-Content-Type-Options','nosniff');
-  res.status(200).send(bootstrapHTML);
+  res.status(200).send(bootstrap);
 };
 
 function errPage(t, m) {
