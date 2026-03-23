@@ -8,7 +8,6 @@ const { createDecipheriv } = require('crypto');
 
 module.exports = async function handler(req, res) {
 
-  // ── 1. Key ──────────────────────────────────────────
   const keyHex = (process.env.CES_DECRYPT_KEY || '').trim();
   if (!keyHex || keyHex.length !== 64)
     return res.status(500).send(errPage('Config Error', 'CES_DECRYPT_KEY missing'));
@@ -17,7 +16,6 @@ module.exports = async function handler(req, res) {
   try { keyBuf = Buffer.from(keyHex, 'hex'); }
   catch(e) { return res.status(500).send(errPage('Key Error', e.message)); }
 
-  // ── 2. Route ─────────────────────────────────────────
   const pathname = (req.url||'/').split('?')[0].replace(/\/+$/,'') || '/';
 
   let encFile, baseHref, faviconLinks;
@@ -36,7 +34,6 @@ module.exports = async function handler(req, res) {
     return res.status(404).send('Not found');
   }
 
-  // ── 3. Read .enc ─────────────────────────────────────
   const encPath = path.join(process.cwd(), 'public', encFile);
   let encData;
   try { encData = fs.readFileSync(encPath, 'utf-8').trim(); }
@@ -45,7 +42,6 @@ module.exports = async function handler(req, res) {
       `Cannot read ${encFile}: ${e.message} | public/: ${listDir(path.join(process.cwd(),'public'))}`));
   }
 
-  // ── 4. Parse & decrypt ───────────────────────────────
   const dot = encData.indexOf('.');
   if (dot === -1) return res.status(500).send(errPage('Format Error','Bad .enc format'));
 
@@ -62,28 +58,25 @@ module.exports = async function handler(req, res) {
     return res.status(500).send(errPage('Decrypt Error', e.message));
   }
 
-  // ── 5. Inject <base> so relative paths resolve correctly ──
   html = html.replace(/(<head[^>]*>)/i, `$1<base href="${baseHref}">`);
 
-  // ── 6. Obfuscate: XOR + base64 ───────────────────────
   const KEY     = 0x5A;
   const xored   = Buffer.from(html, 'utf-8').map(b => b ^ KEY);
   const payload = xored.toString('base64');
 
-  // ── 7. Bootstrap ─────────────────────────────────────
-  // - Favicons in bootstrap <head> (browsers ignore those in document.write content)
-  // - Spinner is NOT fixed/fullscreen — just centered inline — so it cannot bleed over content
-  // - document.getElementById('_s').remove() clears spinner explicitly before write
-  // - document.open() with no args is most compatible across all browsers
+  // KEY FIX: NO background, NO color on html/body in bootstrap.
+  // Only the spinner div (#_s) is styled - absolutely positioned, transparent bg.
+  // This prevents ANY bootstrap CSS from bleeding into the decoded page.
   const bootstrap = `<!DOCTYPE html><html><head><meta charset="UTF-8">`
   + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
   + `<meta name="robots" content="noindex"><title>Loading\u2026</title>`
   + faviconLinks
-  + `<style>html,body{margin:0;padding:0;background:#0A1A2E;height:100%}`
-  + `#_s{display:flex;align-items:center;justify-content:center;height:100vh}`
-  + `#_s b{width:44px;height:44px;border:4px solid rgba(193,123,26,.2);`
-  + `border-top-color:#C17B1A;border-radius:50%;animation:_r .8s linear infinite;display:block}`
-  + `@keyframes _r{to{transform:rotate(360deg)}}</style>`
+  + `<style>`
+  + `#_s{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:9}`
+  + `#_s b{display:block;width:44px;height:44px;border:4px solid rgba(193,123,26,.3);`
+  + `border-top-color:#C17B1A;border-radius:50%;animation:_r .8s linear infinite}`
+  + `@keyframes _r{to{transform:rotate(360deg)}}`
+  + `</style>`
   + `</head><body><div id="_s"><b></b></div><script>`
   + `(function(){`
   + `var p="${payload}";`
@@ -91,11 +84,9 @@ module.exports = async function handler(req, res) {
   + `var u=new Uint8Array(b.length);`
   + `for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i)^0x5A;`
   + `var h=new TextDecoder('utf-8').decode(u);`
-  + `var s=document.getElementById('_s');`
-  + `if(s)s.remove();`
-  + `var d=document.open();`
-  + `d.write(h);`
-  + `d.close();`
+  + `document.open();`
+  + `document.write(h);`
+  + `document.close();`
   + `})();`
   + `<\/script></body></html>`;
 
