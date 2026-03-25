@@ -132,7 +132,19 @@ module.exports = async function handler(req, res) {
   const titleMatch = html.match(/<title>([^<]*)<\/title>/i);
   const pageTitle  = titleMatch ? titleMatch[1] : 'Civil Engineering Suite';
 
-  const bootstrap = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0"><meta name="robots" content="noindex"><title>${pageTitle}</title>${faviconLinks}</head><body><script>(function(){try{var p="${payload}";var b=atob(p);var u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i)^0x5A;var h=new TextDecoder("utf-8").decode(u);document.open();document.write(h);document.close();}catch(e){document.body.innerHTML="<p style='padding:40px;color:#C17B1A;font-family:sans-serif'>Error: "+e.message+"</p>";}})();<\/script></body></html>`;
+  // ── Extract OG + Twitter meta tags from the real HTML ─────────────────────
+  // These are safe to expose: they contain only public preview metadata
+  // (title, description, image URL) — zero page content or logic is revealed.
+  // This is the same data any static site would serve openly.
+  // Without this, social crawlers (iMessage, WhatsApp, Telegram, etc.) that
+  // don't match BOT_RE receive the bootstrap page which has NO og:image →
+  // link previews show nothing.
+  const ogTags = (html.match(/<meta\s+(?:property|name)="(?:og|twitter):[^"]+"\s+content="[^"]*"[^>]*>/gi) || []).join('');
+  const descTag = (html.match(/<meta\s+name="description"\s+content="[^"]*"[^>]*/i) || [''])[0];
+  const previewMeta = (descTag ? descTag + '>' : '') + ogTags;
+  // ──────────────────────────────────────────────────────────────────────────
+
+  const bootstrap = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0"><meta name="robots" content="noindex">${previewMeta}<title>${pageTitle}</title>${faviconLinks}</head><body><script>(function(){try{var p="${payload}";var b=atob(p);var u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i)^0x5A;var h=new TextDecoder("utf-8").decode(u);document.open();document.write(h);document.close();}catch(e){document.body.innerHTML="<p style='padding:40px;color:#C17B1A;font-family:sans-serif'>Error: "+e.message+"</p>";}})();<\/script></body></html>`;
 
   res.setHeader('Content-Type',          'text/html; charset=utf-8');
   res.setHeader('Cache-Control',         'no-store');
