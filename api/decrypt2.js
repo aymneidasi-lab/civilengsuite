@@ -1,38 +1,67 @@
 /**
  * Civil Engineering Suite — AES-256-GCM Decrypt
- * ─────────────────────────────────────────────────────────────────────────────
- * A+ Security changes vs previous version:
  *
- *   1. Nonce on BOT path  — bots now also receive script-src 'nonce-{n}' with
- *      no 'unsafe-inline'. All <script> tags (including JSON-LD data blocks)
- *      get the nonce injected before the response leaves the server.
- *      This closes the last unsafe-inline gap across ALL response paths.
+ * Security fixes applied:
+ *   1. Nonce-based CSP  — removes 'unsafe-inline' from script-src on the browser path.
+ *      A fresh cryptographic nonce is generated per request, injected into every
+ *      <script> tag in the decrypted HTML, and set in the Content-Security-Policy
+ *      header.  The global vercel.json CSP (which keeps 'unsafe-inline' for the
+ *      static files served to bots) is overridden only for this handler's responses.
  *
- *   2. Distributed rate limiter — uses @upstash/ratelimit + @upstash/redis
- *      when UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN env vars are
- *      present. Falls back to the in-process Map automatically if they are not,
- *      so the handler works immediately in both environments with zero code changes.
+ *   2. Rate limiting    — simple in-memory token-bucket per IP address.
+ *      Works within a single warm Vercel Lambda instance (module-level Map persists
+ *      between invocations).  For multi-region or high-traffic production, swap the
+ *      allowRequest() function for @upstash/ratelimit + @upstash/redis — the call
+ *      site is identical.
  *
- *   3. All paths now go through this handler — vercel.json rewrites are
- *      unconditional. Static HTML files are never served directly to anyone,
- *      eliminating the last surface where unsafe-inline could leak through the
- *      global vercel.json CSP.
+ *   3. Bot path CSP     — bots now also receive an explicit strict-ish CSP instead
+ *      of relying solely on the global vercel.json header.  Bots don't execute JS
+ *      so 'unsafe-inline' on that path is harmless, but tightening it costs nothing.
  */
-
-'use strict';
 
 const fs   = require('fs');
 const path = require('path');
 const { createDecipheriv, randomBytes } = require('crypto');
 
-// ── Bot / crawler UA pattern ──────────────────────────────────────────────────
 const BOT_RE = /googlebot|google-inspectiontool|googleother|bingbot|yandexbot|duckduckbot|baiduspider|applebot|slurp|facebookexternalhit|twitterbot|linkedinbot|whatsapp|telegrambot|slackbot|discordbot/i;
 
-// XOR key — client-side obfuscation layer only (not cryptographic security)
+// XOR key used only for client-side view-source obfuscation.
+// This is deterrence, not security — the real protection is AES-256-GCM above.
 const XOR_KEY = 0x5A;
 
+// ── Rate limiter ──────────────────────────────────────────────────────────────
+// Module-level Map persists across warm invocations of the same Lambda instance.
+// To upgrade to a production-grade distributed rate limiter:
+//
+//   npm install @upstash/ratelimit @upstash/redis
+//
+//   const { Ratelimit } = require('@upstash/ratelimit');
+//   const { Redis }     = require('@upstash/redis');
+//   const ratelimit = new Ratelimit({
+//     redis:    Redis.fromEnv(),
+//     limiter:  Ratelimit.slidingWindow(40, '1 m'),
+//     prefix:   'ces:rl',
+//   });
+//   // Then replace allowRequest(ip) with:
+//   //   const { success } = await ratelimit.limit(ip);
+//   //   return success;
+
+const _ipMap      = new Map();
+const RATE_WINDOW = 60_000;   // sliding window: 1 minute
+const RATE_MAX    = 40;       // max requests per IP per window
+
+function allowRequest(ip) {
+  const now  = Date.now();
+  const slot = _ipMap.get(ip);
+  if (!slot || now - slot.t > RATE_WINDOW) {
+    _ipMap.set(ip, { t: now, n: 1 });
+    return true;
+  }
+  slot.n += 1;
+  return slot.n <= RATE_MAX;
+}
+
 // ── Shared CSP fragments ──────────────────────────────────────────────────────
-// script-src is always set per-request via nonce — never unsafe-inline
 const CSP_COMMON = [
   "default-src 'self'",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
@@ -45,63 +74,6 @@ const CSP_COMMON = [
   "upgrade-insecure-requests",
 ].join('; ');
 
-// ── Distributed rate limiter with automatic in-memory fallback ────────────────
-//
-// TO ENABLE DISTRIBUTED (MULTI-INSTANCE) RATE LIMITING:
-//   1. npm install @upstash/ratelimit @upstash/redis
-//   2. Add to Vercel environment variables:
-//        UPSTASH_REDIS_REST_URL   = https://…upstash.io
-//        UPSTASH_REDIS_REST_TOKEN = your_token_here
-//   The handler detects these vars and switches to Redis automatically.
-//   Remove them to revert to in-memory (e.g. in local dev).
-//
-let _upstashLimiter = null;
-try {
-  if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
-    const { Ratelimit } = require('@upstash/ratelimit');
-    const { Redis }     = require('@upstash/redis');
-    _upstashLimiter = new Ratelimit({
-      redis:   Redis.fromEnv(),
-      limiter: Ratelimit.slidingWindow(40, '1 m'),
-      prefix:  'ces:rl',
-    });
-  }
-} catch (_) {
-  // Packages not installed — in-memory fallback used automatically
-}
-
-// In-memory fallback (single warm Lambda instance)
-const _ipMap      = new Map();
-const RATE_WINDOW = 60_000;
-const RATE_MAX    = 40;
-
-async function allowRequest(ip) {
-  if (_upstashLimiter) {
-    const { success } = await _upstashLimiter.limit(ip);
-    return success;
-  }
-  const now  = Date.now();
-  const slot = _ipMap.get(ip);
-  if (!slot || now - slot.t > RATE_WINDOW) {
-    _ipMap.set(ip, { t: now, n: 1 });
-    return true;
-  }
-  slot.n += 1;
-  return slot.n <= RATE_MAX;
-}
-
-// ── Nonce injection ───────────────────────────────────────────────────────────
-// Stamps nonce="${nonce}" on every <script …> opening tag.
-// Works correctly on:
-//   - Inline executable scripts:   <script>
-//   - External scripts:            <script src="…">
-//   - JSON-LD data blocks:         <script type="application/ld+json">
-//     (nonce on JSON-LD is ignored by browsers and harmless for crawlers)
-// Does NOT match </script> end-tags (lookahead (?=[\s>]) requires space or >).
-function injectNonces(html, nonce) {
-  return html.replace(/<script(?=[\s>])/g, `<script nonce="${nonce}"`);
-}
-
 // ── Handler ───────────────────────────────────────────────────────────────────
 module.exports = async function handler(req, res) {
 
@@ -110,13 +82,13 @@ module.exports = async function handler(req, res) {
           || req.socket?.remoteAddress
           || 'anon';
 
-  if (!(await allowRequest(ip))) {
+  if (!allowRequest(ip)) {
     res.setHeader('Retry-After', '60');
     return res.status(429).send(errPage('Too Many Requests',
       'Rate limit exceeded. Please wait a moment and try again.'));
   }
 
-  // 2. Validate AES-256-GCM key ───────────────────────────────────────────────
+  // 2. Validate AES key ───────────────────────────────────────────────────────
   const keyHex = (process.env.CES_DECRYPT_KEY || '').trim();
   if (!keyHex || keyHex.length !== 64)
     return res.status(500).send(errPage('Config Error', 'CES_DECRYPT_KEY missing or invalid.'));
@@ -125,7 +97,7 @@ module.exports = async function handler(req, res) {
   try { keyBuf = Buffer.from(keyHex, 'hex'); }
   catch (e) { return res.status(500).send(errPage('Key Error', e.message)); }
 
-  // 3. Route to correct .enc file ─────────────────────────────────────────────
+  // 3. Route to the right .enc file ───────────────────────────────────────────
   const pathname = (req.url || '/').split('?')[0].replace(/\/+$/, '') || '/';
 
   let encFile, baseHref, faviconLinks, pageFilename;
@@ -146,7 +118,7 @@ module.exports = async function handler(req, res) {
     return res.status(404).send('Not found');
   }
 
-  // 4. Read and decrypt .enc ──────────────────────────────────────────────────
+  // 4. Read + decrypt .enc file ───────────────────────────────────────────────
   const encPath = path.join(process.cwd(), 'public', encFile);
   let encData;
   try { encData = fs.readFileSync(encPath, 'utf-8').trim(); }
@@ -156,8 +128,7 @@ module.exports = async function handler(req, res) {
   }
 
   const dot = encData.indexOf('.');
-  if (dot === -1)
-    return res.status(500).send(errPage('Format Error', 'Bad .enc format (missing dot separator).'));
+  if (dot === -1) return res.status(500).send(errPage('Format Error', 'Bad .enc format (missing dot separator).'));
 
   let html;
   try {
@@ -172,48 +143,46 @@ module.exports = async function handler(req, res) {
     return res.status(500).send(errPage('Decrypt Error', e.message));
   }
 
-  // Inject <base> for correct relative-path resolution
+  // Inject <base> so all relative asset paths resolve correctly
   html = html.replace(/(<head[^>]*>)/i, `$1<base href="${baseHref}">`);
 
-  // ── Generate per-request nonce — used on BOTH bot and browser paths ─────────
-  const cspNonce = randomBytes(16).toString('base64url');
-
-  // ── Bot path ──────────────────────────────────────────────────────────────
+  // ── Bot path ─────────────────────────────────────────────────────────────────
+  // Bots reach this handler only when they bypass the vercel.json rewrite
+  // (e.g. direct /api/decrypt access).  We still serve them the full indexable HTML.
   const ua    = req.headers['user-agent'] || '';
   const isBot = BOT_RE.test(ua);
 
   if (isBot) {
     const host = req.headers['host'] || 'civilengsuite.is-a.dev';
 
-    // Make page indexable
+    // Make sure search engines can index this response
     let botHtml = html.replace(
       /<meta\s+name="robots"\s+content="noindex[^"]*"/gi,
       '<meta name="robots" content="index, follow"'
     );
 
-    // Rewrite og:image / twitter:image to match the serving host
+    // Rewrite og:image / twitter:image so previews work on any domain
+    // (Vercel preview URLs, custom domains, etc.)
     botHtml = botHtml.replace(
       /(<meta\s+(?:property|name)="(?:og:image|og:image:secure_url|twitter:image)"\s+content=")https:\/\/[^/]+(\/[^"]*")/gi,
       `$1https://${host}$2`
     );
 
-    // Inject nonce on bot path — eliminates 'unsafe-inline' here too
-    botHtml = injectNonces(botHtml, cspNonce);
-
-    res.setHeader('Content-Type',            'text/html; charset=utf-8');
-    res.setHeader('Cache-Control',           'public, max-age=3600, must-revalidate');
-    res.setHeader('X-Robots-Tag',            'index, follow');
+    res.setHeader('Content-Type',              'text/html; charset=utf-8');
+    res.setHeader('Cache-Control',             'public, max-age=3600, must-revalidate');
+    res.setHeader('X-Robots-Tag',              'index, follow');
+    // Explicit CSP for the bot path (bots don't run JS, but good hygiene)
     res.setHeader('Content-Security-Policy',
-      `${CSP_COMMON}; script-src 'nonce-${cspNonce}'`);
+      `${CSP_COMMON}; script-src 'self' 'unsafe-inline'`);
     return res.status(200).send(botHtml);
   }
 
-  // ── Browser path ─────────────────────────────────────────────────────────
+  // ── Browser path ─────────────────────────────────────────────────────────────
   // Protections:
-  //   1. Ctrl+S / Cmd+S  → intercept → download copyright notice
-  //   2. Print           → handled by each page's own overlay
-  //   3. view-source     → XOR + base64 obfuscation (deterrence)
-  //   4. CSP nonce       → per-request, no unsafe-inline
+  //   1. Ctrl+S / Cmd+S → intercept → serve copyright notice download
+  //   2. Print           → handled by each page's own overlay (not duplicated here)
+  //   3. view-source     → XOR + base64 payload (obfuscation / deterrence layer)
+  //   4. CSP nonce       → every <script> requires a per-request nonce (NEW)
 
   const copyrightHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Protected</title></head>`
     + `<body style="margin:0;background:#0A1A2E;display:flex;align-items:center;`
@@ -225,7 +194,9 @@ module.exports = async function handler(req, res) {
     + `Unauthorized copying or reproduction is strictly prohibited.</p>`
     + `</div></body></html>`;
 
-  // Nonce is added to this tag in the bulk injectNonces() pass below
+  // NOTE: The nonce attribute is NOT added here by hand.
+  // After minification, all <script> tags are bulk-replaced with
+  // <script nonce="…"> in a single pass below — including this one.
   const protectionScript = `<script>(function(){`
     + `document.addEventListener('keydown',function(e){`
     + `if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){`
@@ -238,10 +209,11 @@ module.exports = async function handler(req, res) {
     + `}},true);`
     + `})();\u003c/script>`;
 
+  // Inject protection script before </body>
   html = html.replace(/<\/body>/i, protectionScript + '</body>');
 
-  // Minify first — normalises all <script …> tags into a consistent form
-  // before injectNonces() processes them
+  // Minify to a single line (must happen BEFORE nonce injection so all
+  // <script …> patterns are normalised into the same form)
   html = html
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/>\s+</g,           '><')
@@ -249,16 +221,25 @@ module.exports = async function handler(req, res) {
     .replace(/\n|\r/g,           '')
     .trim();
 
-  // Inject nonce into every <script> tag, then XOR+base64 the whole thing
-  html = injectNonces(html, cspNonce);
+  // ── Generate per-request CSP nonce ─────────────────────────────────────────
+  // base64url avoids + / = characters that would need escaping in HTML attributes.
+  const cspNonce = randomBytes(16).toString('base64url');
 
+  // ── Inject nonce into EVERY <script> tag ───────────────────────────────────
+  // Lookahead (?=[\s>]) matches <script> and <script …> but NOT </script>.
+  // This single pass covers page scripts, external scripts, AND the protection
+  // script injected above — no script in the final HTML is nonce-less.
+  html = html.replace(/<script(?=[\s>])/g, `<script nonce="${cspNonce}"`);
+
+  // XOR + base64 obfuscation (nonces are now baked into the payload)
   const xored   = Buffer.from(html, 'utf-8').map(b => b ^ XOR_KEY);
   const payload = xored.toString('base64');
 
   const titleMatch = html.match(/<title>([^<]*)<\/title>/i);
   const pageTitle  = titleMatch ? titleMatch[1] : 'Civil Engineering Suite';
 
-  // Bootstrap shell — its own <script> carries the same nonce
+  // The bootstrap <script> itself also carries the nonce so the browser
+  // will execute it under the strict nonce-only CSP set below.
   const bootstrap = `<!DOCTYPE html><html><head>`
     + `<meta charset="UTF-8">`
     + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
@@ -282,6 +263,12 @@ module.exports = async function handler(req, res) {
     + `\u003c/script>`
     + `</body></html>`;
 
+  // ── Set strict nonce-based CSP ──────────────────────────────────────────────
+  // This res.setHeader() call overrides the global 'unsafe-inline' CSP set in
+  // vercel.json for this specific response.  The static files served directly to
+  // bots still use the vercel.json global (which keeps 'unsafe-inline' for those
+  // pages' own inline scripts — we cannot remove it there without refactoring
+  // the static HTML files themselves).
   res.setHeader('Content-Security-Policy',
     `${CSP_COMMON}; script-src 'nonce-${cspNonce}'`);
   res.setHeader('Content-Type',           'text/html; charset=utf-8');
@@ -297,6 +284,7 @@ function errPage(title, message) {
     + `<h2>${title}</h2><p>${message}</p>`
     + `</body></html>`;
 }
+
 function listDir(dir) {
   try { return fs.readdirSync(dir).join(', '); } catch (e) { return e.message; }
 }
