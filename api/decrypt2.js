@@ -21,11 +21,9 @@
  *   5. [FIX] CSP hardened — added object-src 'none' and worker-src 'none' to
  *      block plugin/Flash injection and rogue service-worker registration.
  *
- *   6. [FIX] XOR key production guard — returns a 500 error page if NODE_ENV or
+ *   6. [FIX] XOR key production guard — throws a startup error if NODE_ENV or
  *      VERCEL_ENV is 'production' and CES_XOR_KEY is absent or malformed,
  *      preventing silent fallback to the known 0x5A dev default in production.
- *      The guard runs inside the handler (not at module load time) so a missing
- *      env var never causes a cold-start FUNCTION_INVOCATION_FAILED crash.
  */
 
 'use strict';
@@ -37,15 +35,26 @@ const { createDecipheriv, randomBytes } = require('crypto');
 // ── Bot / crawler UA pattern ──────────────────────────────────────────────────
 const BOT_RE = /googlebot|google-inspectiontool|googleother|bingbot|yandexbot|duckduckbot|baiduspider|applebot|slurp|facebookexternalhit|twitterbot|linkedinbot|whatsapp|telegrambot|slackbot|discordbot/i;
 
-// ── [FIX #6] XOR key — resolved at module load, guard runs inside handler ────
-// The validity check is done here so XOR_KEY is a simple constant, but the
-// production guard is enforced per-request (inside the handler below) so a
-// missing env var never causes a cold-start FUNCTION_INVOCATION_FAILED crash.
-const _xorHex   = (process.env.CES_XOR_KEY || '').trim();
-const _xorValid = _xorHex.length === 2 && /^[0-9A-Fa-f]{2}$/.test(_xorHex);
-const XOR_KEY   = _xorValid
+// ── [FIX #6] XOR key — production guard ──────────────────────────────────────
+// In production, the absence of CES_XOR_KEY is a misconfiguration — fail loud.
+// In local dev, fall back to 0x5A so the handler works without env vars.
+const _xorHex      = (process.env.CES_XOR_KEY || '').trim();
+const _xorValid    = _xorHex.length === 2 && /^[0-9A-Fa-f]{2}$/.test(_xorHex);
+const _isProduction = process.env.NODE_ENV === 'production'
+                   || process.env.VERCEL_ENV === 'production';
+
+if (_isProduction && !_xorValid) {
+  // Hard crash at module load time — Vercel will surface this in the
+  // function logs and the deployment will fail rather than silently degrade.
+  throw new Error(
+    '[CES] CES_XOR_KEY is missing or invalid in production. ' +
+    'Set it to a 2-digit hex string (e.g. "A3") in Vercel environment variables.'
+  );
+}
+
+const XOR_KEY = _xorValid
   ? parseInt(_xorHex, 16)
-  : 0x5A; // dev fallback only — production guard in handler prevents this being used live
+  : 0x5A; // dev fallback only — never reached in production after the guard above
 
 // ── [FIX #5] Shared CSP fragments ────────────────────────────────────────────
 // script-src is always set per-request via nonce — never unsafe-inline.
@@ -155,18 +164,7 @@ module.exports = async function handler(req, res) {
       'Rate limit exceeded. Please wait a moment and try again.'));
   }
 
-  // 2. [FIX #6] XOR key production guard ─────────────────────────────────────
-  // Runs per-request (not at module load) so a missing env var returns a clean
-  // 500 page instead of crashing the cold-start with FUNCTION_INVOCATION_FAILED.
-  const _isProd = process.env.NODE_ENV === 'production'
-               || process.env.VERCEL_ENV === 'production';
-  if (_isProd && !_xorValid) {
-    return res.status(500).send(errPage('Config Error',
-      'CES_XOR_KEY is missing or invalid. ' +
-      'Set it to a 2-digit hex string (e.g. "A3") in Vercel environment variables.'));
-  }
-
-  // 3. Validate AES-256-GCM key ───────────────────────────────────────────────
+  // 2. Validate AES-256-GCM key ───────────────────────────────────────────────
   const keyHex = (process.env.CES_DECRYPT_KEY || '').trim();
   if (!keyHex || keyHex.length !== 64)
     return res.status(500).send(errPage('Config Error', 'CES_DECRYPT_KEY missing or invalid.'));
@@ -175,7 +173,7 @@ module.exports = async function handler(req, res) {
   try { keyBuf = Buffer.from(keyHex, 'hex'); }
   catch (e) { return res.status(500).send(errPage('Key Error', e.message)); }
 
-  // 4. Route to correct .enc file ─────────────────────────────────────────────
+  // 3. Route to correct .enc file ─────────────────────────────────────────────
   const pathname = (req.url || '/').split('?')[0].replace(/\/+$/, '') || '/';
 
   let encFile, baseHref, faviconLinks, pageFilename;
@@ -196,7 +194,7 @@ module.exports = async function handler(req, res) {
     return res.status(404).send('Not found');
   }
 
-  // 5. Read and decrypt .enc ──────────────────────────────────────────────────
+  // 4. Read and decrypt .enc ──────────────────────────────────────────────────
   const encPath = path.join(process.cwd(), 'public', encFile);
   let encData;
   try { encData = fs.readFileSync(encPath, 'utf-8').trim(); }
