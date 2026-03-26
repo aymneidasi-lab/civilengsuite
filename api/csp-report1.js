@@ -23,7 +23,7 @@
 // Maximum body size accepted — prevents memory exhaustion from oversized reports.
 const MAX_BYTES = 8_192;
 
-module.exports = async function handler(req, res) {
+export default async function handler(req, res) {
 
   // Only POST is valid for CSP reports.
   if (req.method !== 'POST') {

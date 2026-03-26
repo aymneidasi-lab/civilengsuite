@@ -180,6 +180,15 @@ function injectNonces(html, nonce) {
   return html.replace(/<script(?=[\s>])/g, `<script nonce="${nonce}"`);
 }
 
+// FIX: Per-request style nonce injection — mirrors the script nonce pattern.
+//      Stamps a nonce attribute on every <style> element so that style-src can
+//      use 'nonce-{styleNonce}' instead of 'unsafe-inline'. Inline style=""
+//      attributes on elements are not affected (they do not accept nonces);
+//      JavaScript DOM style manipulation (.style.foo) is never blocked by CSP
+//      style-src regardless of directives — so the protection bundle is safe.
+function injectStyleNonces(html, nonce) {
+  return html.replace(/<style(?=[\s>])/g, `<style nonce="${nonce}"`);
+}
 
 // ── Handler ───────────────────────────────────────────────────────────────────
 module.exports = async function handler(req, res) {
@@ -595,7 +604,7 @@ module.exports = async function handler(req, res) {
     + `var h=new TextDecoder("utf-8").decode(u);`
     + `document.open();document.write(h);document.close();`
     + `}catch(e){`
-    + `document.body.innerHTML="<p style='padding:40px;color:#C17B1A;font-family:sans-serif'>Page could not be loaded. Please refresh or contact support.</p>";`
+    + `document.body.innerHTML="<p style='padding:40px;color:#C17B1A;font-family:sans-serif'>Error: "+e.message+"</p>";`
     + `}`
     + `})();`
     + `\u003c/script>`
