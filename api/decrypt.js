@@ -90,13 +90,30 @@ const XOR_KEY  = (_xorHex.length === 2 && /^[0-9A-Fa-f]{2}$/.test(_xorHex))
 //      tools (Google CSP Evaluator, securityheaders.com) flag the absence of
 //      explicit directives as a strict-mode gap. Being explicit also prevents
 //      any future default-src widening from silently opening these vectors.
+//
+// FIX: Removed 'unsafe-inline' from style-src entirely. We now generate a
+//      per-request styleNonce (same pattern as cspNonce for scripts) and inject
+//      it into every <style> element before the page is sent. The styleNonce is
+//      appended to the CSP string at the point of res.setHeader() below, not
+//      here, because it is request-scoped.
+//
+// FIX: img-src — removed bare 'https:' wildcard. That directive allowed any
+//      HTTPS host to serve images into the page, enabling tracking pixels and
+//      data-exfiltration via CSS url() references. 'self' and 'data:' are
+//      sufficient; data: is retained for base64-inlined images in enc pages.
+//
+// FIX: Added manifest-src 'none' and media-src 'none'. Both were implicitly
+//      covered by default-src 'self' but explicit 'none' closes the vector
+//      permanently, survives future default-src widening, and satisfies strict
+//      CSP linting (Google CSP Evaluator, Mozilla Observatory).
 const CSP_COMMON = [
   "default-src 'self'",
   "object-src 'none'",
   "worker-src 'none'",
-  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "manifest-src 'none'",
+  "media-src 'none'",
   "font-src 'self' https://fonts.gstatic.com",
-  "img-src 'self' data: https:",
+  "img-src 'self' data:",
   "connect-src 'self'",
   "frame-ancestors 'none'",
   "base-uri 'self'",
@@ -153,6 +170,16 @@ function injectNonces(html, nonce) {
   return html.replace(/<script(?=[\s>])/g, `<script nonce="${nonce}"`);
 }
 
+// FIX: Per-request style nonce injection — mirrors the script nonce pattern.
+//      Stamps a nonce attribute on every <style> element so that style-src can
+//      use 'nonce-{styleNonce}' instead of 'unsafe-inline'. Inline style=""
+//      attributes on elements are not affected (they do not accept nonces);
+//      JavaScript DOM style manipulation (.style.foo) is never blocked by CSP
+//      style-src regardless of directives — so the protection bundle is safe.
+function injectStyleNonces(html, nonce) {
+  return html.replace(/<style(?=[\s>])/g, `<style nonce="${nonce}"`);
+}
+
 // ── Handler ───────────────────────────────────────────────────────────────────
 module.exports = async function handler(req, res) {
 
@@ -181,7 +208,11 @@ module.exports = async function handler(req, res) {
 
   let keyBuf;
   try { keyBuf = Buffer.from(keyHex, 'hex'); }
-  catch (e) { return sendErr(res, 500, 'Key Error', e.message); }
+  catch (e) {
+    // FIX: Buffer.from errors can reveal the key format. Log server-side only.
+    console.error('[ces:decrypt] Key buffer error:', e.message);
+    return sendErr(res, 500, 'Server Error', 'A configuration error occurred. Please try again later.');
+  }
 
   // 3. Route to correct .enc file ─────────────────────────────────────────────
   const pathname = (req.url || '/').split('?')[0].replace(/\/+$/, '') || '/';
@@ -209,8 +240,13 @@ module.exports = async function handler(req, res) {
   let encData;
   try { encData = fs.readFileSync(encPath, 'utf-8').trim(); }
   catch (e) {
-    return sendErr(res, 500, 'File Error',
-      `Cannot read ${encFile}: ${e.message} | public/: ${listDir(path.join(process.cwd(), 'public'))}`);
+    // FIX: Never send e.message or listDir() output to the client.
+    //      Node.js fs errors include full server paths (e.g. /var/task/public/...)
+    //      and listDir() exposes every filename in public/. Log server-side only.
+    console.error('[ces:decrypt] File read error — file:', encFile,
+      '| error:', e.message,
+      '| public/:', listDir(path.join(process.cwd(), 'public')));
+    return sendErr(res, 500, 'Server Error', 'A configuration error occurred. Please try again later.');
   }
 
   const dot = encData.indexOf('.');
@@ -227,14 +263,25 @@ module.exports = async function handler(req, res) {
     decipher.setAuthTag(authTag);
     html = Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf-8');
   } catch (e) {
-    return sendErr(res, 500, 'Decrypt Error', e.message);
+    // FIX: Crypto library error messages (wrong key, bad auth tag, etc.) can
+    //      reveal implementation details. Log server-side, return opaque message.
+    console.error('[ces:decrypt] Decryption failed for', encFile, '—', e.message);
+    return sendErr(res, 500, 'Server Error', 'A configuration error occurred. Please try again later.');
   }
 
   // Inject <base> for correct relative-path resolution
   html = html.replace(/(<head[^>]*>)/i, `$1<base href="${baseHref}">`);
 
   // ── Per-request nonce ─────────────────────────────────────────────────────
-  const cspNonce = randomBytes(16).toString('base64url');
+  const cspNonce   = randomBytes(16).toString('base64url');
+  // FIX: Per-request style nonce — replaces 'unsafe-inline' in style-src.
+  //      Generated independently so a leaked script nonce cannot be reused
+  //      to bypass the style-src restriction.
+  const styleNonce = randomBytes(16).toString('base64url');
+
+  // Inject style nonces into all <style> elements before bot/browser split.
+  // Must run before minification so the <style tag pattern is still intact.
+  html = injectStyleNonces(html, styleNonce);
 
   // ── Bot path ──────────────────────────────────────────────────────────────
   const ua    = req.headers['user-agent'] || '';
@@ -257,7 +304,7 @@ module.exports = async function handler(req, res) {
     res.setHeader('Cache-Control',           'public, max-age=3600, must-revalidate');
     res.setHeader('X-Robots-Tag',            'index, follow');
     res.setHeader('Content-Security-Policy',
-      `${CSP_COMMON}; script-src 'nonce-${cspNonce}'`);
+      `${CSP_COMMON}; script-src 'nonce-${cspNonce}'; style-src 'self' 'nonce-${styleNonce}' https://fonts.googleapis.com`);
     return res.status(200).send(botHtml);
   }
 
@@ -561,7 +608,7 @@ module.exports = async function handler(req, res) {
     + `</body></html>`;
 
   res.setHeader('Content-Security-Policy',
-    `${CSP_COMMON}; script-src 'nonce-${cspNonce}'`);
+    `${CSP_COMMON}; script-src 'nonce-${cspNonce}'; style-src 'self' 'nonce-${styleNonce}' https://fonts.googleapis.com`);
   res.setHeader('Content-Type',           'text/html; charset=utf-8');
   res.setHeader('Cache-Control',          'no-store');
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -610,6 +657,20 @@ function sendErr(res, status, title, message) {
   return res.status(status).send(errPage(title, message));
 }
 
+// FIX: listDir — server-side logging only, never returns listing to caller.
+//      The previous version returned the directory listing as a string, which
+//      was then concatenated into the HTTP error response body and sent to the
+//      browser. Any user who could trigger a 500 (e.g. deleting/corrupting the
+//      .enc file in a development environment) could enumerate public/ contents.
+//      Now the listing goes to console.error() (Vercel function logs, not HTTP)
+//      and the function returns a safe placeholder used only in log context.
 function listDir(dir) {
-  try { return fs.readdirSync(dir).join(', '); } catch (e) { return e.message; }
+  try {
+    console.error('[ces:decrypt] public/ contents:', fs.readdirSync(dir).join(', '));
+  } catch (e) {
+    console.error('[ces:decrypt] listDir error:', e.message);
+  }
+  // Return value is only used inside console.error() calls above — never in
+  // any string that reaches res.send(). This return is a safety net only.
+  return '[see server logs]';
 }

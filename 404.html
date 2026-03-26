@@ -11,8 +11,10 @@
 <meta http-equiv="Permissions-Policy" content="camera=(), microphone=(), geolocation=(), payment=()">
 <!-- [FIX] Removed 'unsafe-inline' from script-src — this page has no executable inline scripts.
      The JSON-LD block below is type="application/ld+json" (a data block, not JS) and does
-     not require unsafe-inline. Added object-src 'none' and worker-src 'none'. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; object-src 'none'; worker-src 'none'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self';">
+     not require unsafe-inline. Added object-src 'none' and worker-src 'none'.
+     [FIX v2] Removed 'unsafe-inline' from style-src — styles moved to external /404.css.
+     Removed 'https:' wildcard from img-src. Added manifest-src/media-src 'none'. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; object-src 'none'; worker-src 'none'; manifest-src 'none'; media-src 'none'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'">
 
 <!-- ── SEO ── -->
 <title>404 — Page Not Found | Civil Engineering Suite</title>
@@ -81,57 +83,10 @@
 <link rel="icon" type="image/x-icon" href="/images/favicon.ico">
 <link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png">
 
-<style>
-*{margin:0;padding:0;box-sizing:border-box;}
-body{
-  background:#0A1A2E;
-  color:#E6EEF9;
-  font-family:'Inter',system-ui,-apple-system,sans-serif;
-  min-height:100vh;
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  text-align:center;
-  padding:40px 20px;
-  background-image:radial-gradient(ellipse 80% 60% at 50% -10%, rgba(193,123,26,0.08) 0%, transparent 70%);
-}
-.wrap{max-width:600px;animation:fadeUp 0.6s ease-out;}
-@keyframes fadeUp{from{opacity:0;transform:translateY(24px);}to{opacity:1;transform:translateY(0);}}
-.code{
-  font-family:'Playfair Display',Georgia,serif;
-  font-size:clamp(5rem,20vw,8rem);
-  font-weight:900;
-  color:#C17B1A;
-  line-height:1;
-  margin-bottom:16px;
-  text-shadow:0 4px 32px rgba(193,123,26,0.35);
-}
-h1{
-  font-family:'Playfair Display',Georgia,serif;
-  font-size:clamp(1.6rem,5vw,2.2rem);
-  font-weight:700;
-  color:#fff;
-  margin-bottom:14px;
-}
-p{color:#8AA3C7;font-size:1.05rem;line-height:1.75;margin-bottom:36px;}
-.btns{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;}
-.btn{
-  display:inline-flex;
-  align-items:center;
-  gap:8px;
-  padding:14px 28px;
-  border-radius:50px;
-  font-size:1rem;
-  font-weight:700;
-  transition:all 0.3s;
-  text-decoration:none;
-}
-.btn-gold{background:#C17B1A;color:#fff;box-shadow:0 6px 20px rgba(193,123,26,0.4);}
-.btn-gold:hover{background:#8F5F0F;transform:translateY(-2px);box-shadow:0 10px 28px rgba(193,123,26,0.5);}
-.btn-out{background:rgba(255,255,255,0.07);color:#E6EEF9;border:2px solid rgba(255,255,255,0.15);}
-.btn-out:hover{background:rgba(255,255,255,0.12);border-color:rgba(255,255,255,0.3);transform:translateY(-2px);}
-.footer-note{margin-top:48px;font-size:0.78rem;color:rgba(138,163,199,0.5);letter-spacing:0.04em;}
-</style>
+<!-- FIX: Inline <style> block extracted to /404.css (external file).
+     This removes the requirement for 'unsafe-inline' in style-src CSP.
+     The external file is served with immutable cache headers in vercel.json. -->
+<link rel="stylesheet" href="/404.css">
 </head>
 <body>
 <div class="wrap">
