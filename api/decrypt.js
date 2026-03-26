@@ -123,6 +123,12 @@ const CSP_COMMON = [
   "base-uri 'self'",
   "form-action 'self'",
   "upgrade-insecure-requests",
+  // FIX: Added report-uri so CSP violations in production are logged
+  //      via /api/csp-report (same-origin endpoint, no third-party).
+  //      Violations appear in Vercel function logs, searchable via any
+  //      log drain (Logtail, Datadog, Axiom). Low overhead: browsers
+  //      send reports asynchronously and only on actual violations.
+  "report-uri /api/csp-report",
 ].join('; ');
 
 // ── Distributed rate limiter with automatic in-memory fallback ────────────────
