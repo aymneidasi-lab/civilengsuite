@@ -106,7 +106,10 @@ function injectNonces(html, nonce) {
 module.exports = async function handler(req, res) {
 
   // 1. Rate limit ─────────────────────────────────────────────────────────────
-  const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim()
+  // x-vercel-forwarded-for is set by Vercel's edge and cannot be spoofed by
+  // the client, unlike x-forwarded-for which is user-controlled.
+  const ip = req.headers['x-vercel-forwarded-for']
+          || (req.headers['x-forwarded-for'] || '').split(',')[0].trim()
           || req.socket?.remoteAddress
           || 'anon';
 
