@@ -91,11 +91,14 @@ const XOR_KEY  = (_xorHex.length === 2 && /^[0-9A-Fa-f]{2}$/.test(_xorHex))
 //      explicit directives as a strict-mode gap. Being explicit also prevents
 //      any future default-src widening from silently opening these vectors.
 //
-// FIX: Removed 'unsafe-inline' from style-src entirely. We now generate a
-//      per-request styleNonce (same pattern as cspNonce for scripts) and inject
-//      it into every <style> element before the page is sent. The styleNonce is
-//      appended to the CSP string at the point of res.setHeader() below, not
-//      here, because it is request-scoped.
+// NOTE: style-src retains 'unsafe-inline' intentionally.
+//      CSS nonces cover <style> blocks but NOT element-level style="" attributes.
+//      The encrypted .enc pages use inline style attributes extensively for
+//      layout — removing 'unsafe-inline' blocks those attributes in all browsers
+//      and breaks the page rendering entirely. 'unsafe-inline' is the only
+//      mechanism that covers both <style> blocks AND style="" attributes.
+//      The script-src nonce approach (which works for JS) cannot be applied
+//      to style="" attributes — this is a fundamental CSP limitation.
 //
 // FIX: img-src — removed bare 'https:' wildcard. That directive allowed any
 //      HTTPS host to serve images into the page, enabling tracking pixels and
@@ -112,6 +115,7 @@ const CSP_COMMON = [
   "worker-src 'none'",
   "manifest-src 'none'",
   "media-src 'none'",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "font-src 'self' https://fonts.gstatic.com",
   "img-src 'self' data:",
   "connect-src 'self'",
@@ -274,14 +278,7 @@ module.exports = async function handler(req, res) {
 
   // ── Per-request nonce ─────────────────────────────────────────────────────
   const cspNonce   = randomBytes(16).toString('base64url');
-  // FIX: Per-request style nonce — replaces 'unsafe-inline' in style-src.
-  //      Generated independently so a leaked script nonce cannot be reused
-  //      to bypass the style-src restriction.
-  const styleNonce = randomBytes(16).toString('base64url');
 
-  // Inject style nonces into all <style> elements before bot/browser split.
-  // Must run before minification so the <style tag pattern is still intact.
-  html = injectStyleNonces(html, styleNonce);
 
   // ── Bot path ──────────────────────────────────────────────────────────────
   const ua    = req.headers['user-agent'] || '';
@@ -304,7 +301,7 @@ module.exports = async function handler(req, res) {
     res.setHeader('Cache-Control',           'public, max-age=3600, must-revalidate');
     res.setHeader('X-Robots-Tag',            'index, follow');
     res.setHeader('Content-Security-Policy',
-      `${CSP_COMMON}; script-src 'nonce-${cspNonce}'; style-src 'self' 'nonce-${styleNonce}' https://fonts.googleapis.com`);
+      `${CSP_COMMON}; script-src 'nonce-${cspNonce}'`);
     return res.status(200).send(botHtml);
   }
 
@@ -608,7 +605,7 @@ module.exports = async function handler(req, res) {
     + `</body></html>`;
 
   res.setHeader('Content-Security-Policy',
-    `${CSP_COMMON}; script-src 'nonce-${cspNonce}'; style-src 'self' 'nonce-${styleNonce}' https://fonts.googleapis.com`);
+    `${CSP_COMMON}; script-src 'nonce-${cspNonce}'`);
   res.setHeader('Content-Type',           'text/html; charset=utf-8');
   res.setHeader('Cache-Control',          'no-store');
   res.setHeader('X-Content-Type-Options', 'nosniff');
