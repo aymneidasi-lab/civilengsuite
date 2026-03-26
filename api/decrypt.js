@@ -42,7 +42,10 @@ module.exports = async function handler(req, res) {
     return res.status(404).send('Not found');
   }
 
-  const encPath = path.join(process.cwd(), 'public', encFile);
+  // .enc files live in /private — bundled into the function via vercel.json
+  // "includeFiles": "private/*.enc"
+  // They are NOT in /public (which is CDN-only and not fs-accessible from functions).
+  const encPath = path.join(process.cwd(), 'private', encFile);
   let encData;
   try { encData = fs.readFileSync(encPath, 'utf-8').trim(); }
   catch(e) {

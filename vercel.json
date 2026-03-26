@@ -1,4 +1,10 @@
 {
+  "functions": {
+    "api/decrypt.js": {
+      "includeFiles": "private/*.enc"
+    }
+  },
+
   "rewrites": [
     {
       "source": "/",
