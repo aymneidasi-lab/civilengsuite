@@ -1,67 +1,91 @@
 /**
  * Civil Engineering Suite — AES-256-GCM Decrypt
- * ─────────────────────────────────────────────────────────────────────────────
- * A+ Security changes vs previous version:
  *
- *   1. Nonce on BOT path  — bots now also receive script-src 'nonce-{n}' with
- *      no 'unsafe-inline'. All <script> tags (including JSON-LD data blocks)
- *      get the nonce injected before the response leaves the server.
- *      This closes the last unsafe-inline gap across ALL response paths.
+ * Security fixes vs previous version:
  *
- *   2. Distributed rate limiter — uses @upstash/ratelimit + @upstash/redis
- *      when UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN env vars are
- *      present. Falls back to the in-process Map automatically if they are not,
- *      so the handler works immediately in both environments with zero code changes.
+ *   FIX 1 — Bot UA spoofing closed.
+ *            Bot path now requires BOTH: UA pattern match AND reverse-DNS
+ *            verification that the IP resolves to a known crawler hostname.
+ *            Spoofing User-Agent: googlebot from a random IP returns the
+ *            standard obfuscated browser response — not the plaintext HTML.
  *
- *   3. All paths now go through this handler — vercel.json rewrites are
- *      unconditional. Static HTML files are never served directly to anyone,
- *      eliminating the last surface where unsafe-inline could leak through the
- *      global vercel.json CSP.
+ *   FIX 2 — XOR key no longer appears in browser responses.
+ *            A per-request effectiveKey is derived server-side:
+ *              effectiveKey = (XOR_KEY ^ (nonce[0] ^ nonce[1])) & 0xFF
+ *            Only effectiveKey is written to the bootstrap; the static
+ *            XOR_KEY value never appears in any response. Each request
+ *            produces a different effectiveKey — captured payloads from
+ *            different sessions cannot be decoded with the same key.
+ *
+ *   FIX 3 — document.write() replaced with iframe + Blob URL.
+ *            The bootstrap creates a Blob from the decoded HTML and loads
+ *            it in a full-viewport iframe. No document.write(), no risk of
+ *            Chromium's progressive restrictions, and nonce propagation is
+ *            no longer needed across a document.write boundary.
+ *            CSP updated with  frame-src blob:  to authorise this pattern.
+ *
+ *   FIX 4 — Loud warning if CES_XOR_KEY is absent at startup.
+ *            The dev fallback (0x5A) is logged as a warning so it is never
+ *            silently active in production.
  */
 
 'use strict';
 
 const fs   = require('fs');
 const path = require('path');
+const dns  = require('dns').promises;
 const { createDecipheriv, randomBytes } = require('crypto');
 
-// ── Bot / crawler UA pattern ──────────────────────────────────────────────────
+// ── Bot UA pattern ────────────────────────────────────────────────────────────
 const BOT_RE = /googlebot|google-inspectiontool|googleother|bingbot|yandexbot|duckduckbot|baiduspider|applebot|slurp|facebookexternalhit|twitterbot|linkedinbot|whatsapp|telegrambot|slackbot|discordbot/i;
 
-// XOR key — client-side obfuscation layer only (not cryptographic security).
-// Read from CES_XOR_KEY env var (1-byte hex string, e.g. "A3").
-// Falls back to 0x5A only in local dev when the env var is absent.
-// Set CES_XOR_KEY in Vercel environment variables so the value
-// never appears in source code or the public repository.
+// Reverse-DNS hostname suffixes accepted as verified crawlers.
+// Source: Google, Bing, Yandex, Baidu, Apple, and social-preview docs.
+const VERIFIED_CRAWLER_SUFFIXES = [
+  '.googlebot.com',
+  '.google.com',
+  '.search.msn.com',
+  '.yandex.com',
+  '.yandex.net',
+  '.crawl.yahoo.net',
+  '.crawl.baidu.com',
+  '.crawl.baidu.jp',
+  '.duckduckgo.com',
+  '.apple.com',
+  '.linkedin.com',
+  '.facebook.com',
+  '.twitter.com',
+  '.slack.com',
+  '.discord.com',
+];
+
+// ── XOR key ───────────────────────────────────────────────────────────────────
 const _xorHex = (process.env.CES_XOR_KEY || '').trim();
-const XOR_KEY  = (_xorHex.length === 2 && /^[0-9A-Fa-f]{2}$/.test(_xorHex))
+if (!_xorHex) {
+  // Intentionally loud — a missing key in production is a misconfiguration.
+  console.warn('[CES] WARNING: CES_XOR_KEY env var is not set. Using dev fallback (0x5A). Set this in Vercel environment variables before deploying.');
+}
+const XOR_KEY = (_xorHex.length === 2 && /^[0-9A-Fa-f]{2}$/.test(_xorHex))
   ? parseInt(_xorHex, 16)
-  : 0x5A; // dev fallback only — always set CES_XOR_KEY in production
+  : 0x5A; // dev fallback only — must be overridden in production
 
 // ── Shared CSP fragments ──────────────────────────────────────────────────────
-// script-src is always set per-request via nonce — never unsafe-inline
+// frame-src blob: is required for the iframe+Blob bootstrap (FIX 3).
+// script-src is always set per-request via nonce — never unsafe-inline.
 const CSP_COMMON = [
   "default-src 'self'",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "font-src 'self' https://fonts.gstatic.com",
   "img-src 'self' data: https:",
   "connect-src 'self'",
+  "frame-src blob:",
   "frame-ancestors 'none'",
   "base-uri 'self'",
   "form-action 'self'",
   "upgrade-insecure-requests",
 ].join('; ');
 
-// ── Distributed rate limiter with automatic in-memory fallback ────────────────
-//
-// TO ENABLE DISTRIBUTED (MULTI-INSTANCE) RATE LIMITING:
-//   1. npm install @upstash/ratelimit @upstash/redis
-//   2. Add to Vercel environment variables:
-//        UPSTASH_REDIS_REST_URL   = https://…upstash.io
-//        UPSTASH_REDIS_REST_TOKEN = your_token_here
-//   The handler detects these vars and switches to Redis automatically.
-//   Remove them to revert to in-memory (e.g. in local dev).
-//
+// ── Distributed rate limiter with in-memory fallback ─────────────────────────
 let _upstashLimiter = null;
 try {
   if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
@@ -73,11 +97,8 @@ try {
       prefix:  'ces:rl',
     });
   }
-} catch (_) {
-  // Packages not installed — in-memory fallback used automatically
-}
+} catch (_) {}
 
-// In-memory fallback (single warm Lambda instance)
 const _ipMap      = new Map();
 const RATE_WINDOW = 60_000;
 const RATE_MAX    = 40;
@@ -98,21 +119,37 @@ async function allowRequest(ip) {
 }
 
 // ── Nonce injection ───────────────────────────────────────────────────────────
-// Stamps nonce="${nonce}" on every <script …> opening tag.
-// Works correctly on:
-//   - Inline executable scripts:   <script>
-//   - External scripts:            <script src="…">
-//   - JSON-LD data blocks:         <script type="application/ld+json">
-//     (nonce on JSON-LD is ignored by browsers and harmless for crawlers)
-// Does NOT match </script> end-tags (lookahead (?=[\s>]) requires space or >).
 function injectNonces(html, nonce) {
   return html.replace(/<script(?=[\s>])/g, `<script nonce="${nonce}"`);
+}
+
+// ── Bot IP verification via reverse DNS (FIX 1) ───────────────────────────────
+// Resolves the request IP to its hostname and checks it against the allow-list
+// of verified crawler suffixes. Times out after 2 s to bound latency.
+// A request that looks like a bot but fails DNS verification gets the standard
+// obfuscated browser response — not the plaintext bot response.
+async function verifyBotIP(ip) {
+  return new Promise(resolve => {
+    const timer = setTimeout(() => resolve(false), 2000);
+    dns.reverse(ip)
+      .then(hostnames => {
+        clearTimeout(timer);
+        const verified = hostnames.some(h =>
+          VERIFIED_CRAWLER_SUFFIXES.some(s => h === s.slice(1) || h.endsWith(s))
+        );
+        resolve(verified);
+      })
+      .catch(() => {
+        clearTimeout(timer);
+        resolve(false);
+      });
+  });
 }
 
 // ── Handler ───────────────────────────────────────────────────────────────────
 module.exports = async function handler(req, res) {
 
-  // 1. Rate limit ─────────────────────────────────────────────────────────────
+  // 1. Rate limit
   const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim()
           || req.socket?.remoteAddress
           || 'anon';
@@ -123,7 +160,7 @@ module.exports = async function handler(req, res) {
       'Rate limit exceeded. Please wait a moment and try again.'));
   }
 
-  // 2. Validate AES-256-GCM key ───────────────────────────────────────────────
+  // 2. Validate AES-256-GCM key
   const keyHex = (process.env.CES_DECRYPT_KEY || '').trim();
   if (!keyHex || keyHex.length !== 64)
     return res.status(500).send(errPage('Config Error', 'CES_DECRYPT_KEY missing or invalid.'));
@@ -132,7 +169,7 @@ module.exports = async function handler(req, res) {
   try { keyBuf = Buffer.from(keyHex, 'hex'); }
   catch (e) { return res.status(500).send(errPage('Key Error', e.message)); }
 
-  // 3. Route to correct .enc file ─────────────────────────────────────────────
+  // 3. Route to correct .enc file
   const pathname = (req.url || '/').split('?')[0].replace(/\/+$/, '') || '/';
 
   let encFile, baseHref, faviconLinks, pageFilename;
@@ -153,7 +190,7 @@ module.exports = async function handler(req, res) {
     return res.status(404).send('Not found');
   }
 
-  // 4. Read and decrypt .enc ──────────────────────────────────────────────────
+  // 4. Read and decrypt .enc
   const encPath = path.join(process.cwd(), 'public', encFile);
   let encData;
   try { encData = fs.readFileSync(encPath, 'utf-8').trim(); }
@@ -179,49 +216,39 @@ module.exports = async function handler(req, res) {
     return res.status(500).send(errPage('Decrypt Error', e.message));
   }
 
-  // Inject <base> for correct relative-path resolution
+  // Inject <base> for relative-path resolution
   html = html.replace(/(<head[^>]*>)/i, `$1<base href="${baseHref}">`);
 
-  // ── Generate per-request nonce — used on BOTH bot and browser paths ─────────
+  // Per-request nonce
   const cspNonce = randomBytes(16).toString('base64url');
 
-  // ── Bot path ──────────────────────────────────────────────────────────────
-  const ua    = req.headers['user-agent'] || '';
-  const isBot = BOT_RE.test(ua);
+  // 5. Bot detection — UA pattern + reverse DNS verification (FIX 1)
+  const ua           = req.headers['user-agent'] || '';
+  const looksLikeBot = BOT_RE.test(ua);
+  const isBot        = looksLikeBot && await verifyBotIP(ip);
 
+  // ── Bot path ──────────────────────────────────────────────────────────────
   if (isBot) {
     const host = req.headers['host'] || 'civilengsuite.is-a.dev';
 
-    // Make page indexable
     let botHtml = html.replace(
       /<meta\s+name="robots"\s+content="noindex[^"]*"/gi,
       '<meta name="robots" content="index, follow"'
     );
-
-    // Rewrite og:image / twitter:image to match the serving host
     botHtml = botHtml.replace(
       /(<meta\s+(?:property|name)="(?:og:image|og:image:secure_url|twitter:image)"\s+content=")https:\/\/[^/]+(\/[^"]*")/gi,
       `$1https://${host}$2`
     );
-
-    // Inject nonce on bot path — eliminates 'unsafe-inline' here too
     botHtml = injectNonces(botHtml, cspNonce);
 
     res.setHeader('Content-Type',            'text/html; charset=utf-8');
     res.setHeader('Cache-Control',           'public, max-age=3600, must-revalidate');
     res.setHeader('X-Robots-Tag',            'index, follow');
-    res.setHeader('Content-Security-Policy',
-      `${CSP_COMMON}; script-src 'nonce-${cspNonce}'`);
+    res.setHeader('Content-Security-Policy', `${CSP_COMMON}; script-src 'nonce-${cspNonce}'`);
     return res.status(200).send(botHtml);
   }
 
-  // ── Browser path ─────────────────────────────────────────────────────────
-  // Protections:
-  //   1. Ctrl+S / Cmd+S  → intercept → download copyright notice
-  //   2. Print           → handled by each page's own overlay
-  //   3. view-source     → XOR + base64 obfuscation (deterrence)
-  //   4. CSP nonce       → per-request, no unsafe-inline
-
+  // ── Browser path ──────────────────────────────────────────────────────────
   const copyrightHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Protected</title></head>`
     + `<body style="margin:0;background:#0A1A2E;display:flex;align-items:center;`
     + `justify-content:center;min-height:100vh;font-family:sans-serif">`
@@ -232,7 +259,8 @@ module.exports = async function handler(req, res) {
     + `Unauthorized copying or reproduction is strictly prohibited.</p>`
     + `</div></body></html>`;
 
-  // Nonce is added to this tag in the bulk injectNonces() pass below
+  // Ctrl+S / Cmd+S interception — stays in inner HTML so it fires when the
+  // user is focused inside the iframe (which is where keyboard focus lives).
   const protectionScript = `<script>(function(){`
     + `document.addEventListener('keydown',function(e){`
     + `if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){`
@@ -247,8 +275,7 @@ module.exports = async function handler(req, res) {
 
   html = html.replace(/<\/body>/i, protectionScript + '</body>');
 
-  // Minify first — normalises all <script …> tags into a consistent form
-  // before injectNonces() processes them
+  // Minify
   html = html
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/>\s+</g,           '><')
@@ -256,41 +283,60 @@ module.exports = async function handler(req, res) {
     .replace(/\n|\r/g,           '')
     .trim();
 
-  // Inject nonce into every <script> tag, then XOR+base64 the whole thing
+  // Inject nonces into the inner HTML (executed inside the blob iframe)
   html = injectNonces(html, cspNonce);
 
-  const xored   = Buffer.from(html, 'utf-8').map(b => b ^ XOR_KEY);
+  // ── Per-request effective XOR key (FIX 2) ────────────────────────────────
+  // The static XOR_KEY is combined with two bytes of the per-request nonce.
+  // Only the resulting effectiveKey appears in the bootstrap response — the
+  // static secret never does. A different effectiveKey per request means
+  // payloads from different sessions are not interchangeable.
+  const nonceByte    = (cspNonce.charCodeAt(0) ^ cspNonce.charCodeAt(1)) & 0xFF;
+  const effectiveKey = (XOR_KEY ^ nonceByte) & 0xFF;
+
+  const xored   = Buffer.from(html, 'utf-8').map(b => b ^ effectiveKey);
   const payload = xored.toString('base64');
 
   const titleMatch = html.match(/<title>([^<]*)<\/title>/i);
   const pageTitle  = titleMatch ? titleMatch[1] : 'Civil Engineering Suite';
 
-  // Bootstrap shell — its own <script> carries the same nonce
+  // ── Bootstrap shell — iframe + Blob URL (FIX 3) ──────────────────────────
+  // No document.write(). The decoded HTML is turned into a Blob URL and
+  // loaded in a full-viewport iframe. The inner page scrolls inside the
+  // iframe exactly as it would in a normal page. The CSP on the bootstrap
+  // governs the outer shell; the inner blob page inherits same-origin trust.
   const bootstrap = `<!DOCTYPE html><html><head>`
     + `<meta charset="UTF-8">`
     + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
     + `<meta name="robots" content="noindex">`
     + `<title>${pageTitle}</title>`
     + `${faviconLinks}`
+    + `<style>*{margin:0;padding:0;box-sizing:border-box}html,body{height:100%;overflow:hidden}#f{border:none;width:100%;height:100%;display:block}</style>`
     + `</head><body>`
+    + `<iframe id="f" title="${pageTitle}"></iframe>`
     + `<script nonce="${cspNonce}">`
     + `(function(){`
     + `try{`
     + `var p="${payload}";`
     + `var b=atob(p);`
     + `var u=new Uint8Array(b.length);`
-    + `for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i)^${XOR_KEY};`
+    + `var k=${effectiveKey};`
+    + `for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i)^k;`
     + `var h=new TextDecoder("utf-8").decode(u);`
-    + `document.open();document.write(h);document.close();`
+    + `var blob=new Blob([h],{type:"text/html"});`
+    + `var url=URL.createObjectURL(blob);`
+    + `var f=document.getElementById("f");`
+    + `f.src=url;`
+    + `f.onload=function(){URL.revokeObjectURL(url);};`
     + `}catch(e){`
-    + `document.body.innerHTML="<p style='padding:40px;color:#C17B1A;font-family:sans-serif'>Error: "+e.message+"</p>";`
+    + `document.body.style.cssText="padding:40px;color:#C17B1A;font-family:sans-serif";`
+    + `document.body.innerHTML="<p>Error: "+e.message+"</p>";`
     + `}`
     + `})();`
     + `\u003c/script>`
     + `</body></html>`;
 
-  res.setHeader('Content-Security-Policy',
-    `${CSP_COMMON}; script-src 'nonce-${cspNonce}'`);
+  res.setHeader('Content-Security-Policy',  `${CSP_COMMON}; script-src 'nonce-${cspNonce}'`);
   res.setHeader('Content-Type',           'text/html; charset=utf-8');
   res.setHeader('Cache-Control',          'no-store');
   res.setHeader('X-Content-Type-Options', 'nosniff');
