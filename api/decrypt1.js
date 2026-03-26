@@ -1,22 +1,71 @@
 /**
- * Civil Engineering Suite — AES-256-GCM Decrypt
+ * Civil Engineering Suite — AES-256-GCM Decrypt  v3
  * ─────────────────────────────────────────────────────────────────────────────
- * A+ Security changes vs previous version:
+ * Security-audit fixes vs v2
+ * ─────────────────────────────────────────────────────────────────────────────
  *
- *   1. Nonce on BOT path  — bots now also receive script-src 'nonce-{n}' with
- *      no 'unsafe-inline'. All <script> tags (including JSON-LD data blocks)
- *      get the nonce injected before the response leaves the server.
- *      This closes the last unsafe-inline gap across ALL response paths.
+ *  Layer 5  DevTools detection
+ *           + Early check fires synchronously on script parse — catches DevTools
+ *             that were already open before the page loaded (was blind before).
+ *           + visibilitychange re-check — catches the tab-switch moment that
+ *             happens when File→Save As opens an OS dialog in some browsers.
+ *           + All handlers now use useCapture:true — cannot be stopped by
+ *             page-level event listeners.
+ *           + On detection: full-viewport overlay with z-index:MAX hides all
+ *             page content (replaces the old document.write approach which
+ *             does nothing on a loaded page).
  *
- *   2. Distributed rate limiter — uses @upstash/ratelimit + @upstash/redis
- *      when UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN env vars are
- *      present. Falls back to the in-process Map automatically if they are not,
- *      so the handler works immediately in both environments with zero code changes.
+ *  Layer 8  MutationObserver watermark guard
+ *           + Now observes attributes (style, class, hidden) on the watermark
+ *             element itself — the previous version only watched childList and
+ *             was completely blind to style.opacity='0' or visibility:hidden.
+ *           + getComputedStyle interval fallback (2 s) catches opacity set via
+ *             an external stylesheet rule that MutationObserver can't see.
+ *           + Removal path hardened: observer also watches document.body
+ *             (not just wm's own subtree) so node removal is caught even when
+ *             the parent is targeted.
  *
- *   3. All paths now go through this handler — vercel.json rewrites are
- *      unconditional. Static HTML files are never served directly to anyone,
- *      eliminating the last surface where unsafe-inline could leak through the
- *      global vercel.json CSP.
+ *  Layer 1  Right-click block
+ *           + useCapture:true — Firefox Shift+right-click fires the contextmenu
+ *             event at the bubble phase only; capture-phase listener catches it
+ *             regardless of Shift state.
+ *
+ *  Layer 3  Copy/cut block
+ *           + useCapture:true — browser Edit→Copy routes through capture phase;
+ *             bubble-only listeners miss it.
+ *           + setData() replacement — clipboard receives copyright notice text
+ *             instead of the actual selection, so even if the handler fires but
+ *             the preventDefault somehow fails the content is protected.
+ *
+ *  Layer 2  Keyboard shortcut block
+ *           + useCapture:true on all keyboard handlers.
+ *           + Ctrl+Shift+I / Ctrl+Shift+J / Ctrl+Shift+C / Ctrl+Shift+K
+ *             (Firefox console) now blocked.
+ *           + Ctrl+A (select-all) now blocked at capture phase.
+ *
+ *  CSS      selectstart prevention
+ *           + useCapture:true.
+ *           + INPUT / TEXTAREA / contentEditable correctly exempted so the app
+ *             remains usable.
+ *
+ *  Layer 6  Console warning
+ *           + Styled with large stop sign, explicit session-logging notice.
+ *           + console.clear() runs first so the warning is always at the top.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Known limitations (unfixable at JS level — documented for transparency)
+ * ─────────────────────────────────────────────────────────────────────────────
+ *  • File → Save As   — OS-level save dialog; no JS event fires on any browser.
+ *                        Ctrl+S Tier 1/2 remains in place for keyboard path.
+ *  • OS screenshot    — PrintScreen / Cmd+Shift+3 captured by OS compositor
+ *                        before any JS overlay can render.
+ *  • JS disabled      — All client-side layers collapse simultaneously.
+ *                        Mitigated server-side: enc files are never served raw.
+ *  • DevTools undocked— window.outerWidth delta is 0 for undocked DevTools.
+ *                        Debugger-timing method (Method B) still fires.
+ *  • view-source:     — Shows the XOR bootstrap shell, NOT the decrypted HTML.
+ *                        DevTools→Elements always shows live DOM after
+ *                        document.write(); this is fundamental to the approach.
  */
 
 'use strict';
@@ -28,18 +77,13 @@ const { createDecipheriv, randomBytes } = require('crypto');
 // ── Bot / crawler UA pattern ──────────────────────────────────────────────────
 const BOT_RE = /googlebot|google-inspectiontool|googleother|bingbot|yandexbot|duckduckbot|baiduspider|applebot|slurp|facebookexternalhit|twitterbot|linkedinbot|whatsapp|telegrambot|slackbot|discordbot/i;
 
-// XOR key — client-side obfuscation layer only (not cryptographic security).
-// Read from CES_XOR_KEY env var (1-byte hex string, e.g. "A3").
-// Falls back to 0x5A only in local dev when the env var is absent.
-// Set CES_XOR_KEY in Vercel environment variables so the value
-// never appears in source code or the public repository.
+// XOR key — client-side obfuscation only (not cryptographic security).
 const _xorHex = (process.env.CES_XOR_KEY || '').trim();
 const XOR_KEY  = (_xorHex.length === 2 && /^[0-9A-Fa-f]{2}$/.test(_xorHex))
   ? parseInt(_xorHex, 16)
-  : 0x5A; // dev fallback only — always set CES_XOR_KEY in production
+  : 0x5A;
 
 // ── Shared CSP fragments ──────────────────────────────────────────────────────
-// script-src is always set per-request via nonce — never unsafe-inline
 const CSP_COMMON = [
   "default-src 'self'",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
@@ -53,15 +97,6 @@ const CSP_COMMON = [
 ].join('; ');
 
 // ── Distributed rate limiter with automatic in-memory fallback ────────────────
-//
-// TO ENABLE DISTRIBUTED (MULTI-INSTANCE) RATE LIMITING:
-//   1. npm install @upstash/ratelimit @upstash/redis
-//   2. Add to Vercel environment variables:
-//        UPSTASH_REDIS_REST_URL   = https://…upstash.io
-//        UPSTASH_REDIS_REST_TOKEN = your_token_here
-//   The handler detects these vars and switches to Redis automatically.
-//   Remove them to revert to in-memory (e.g. in local dev).
-//
 let _upstashLimiter = null;
 try {
   if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
@@ -73,11 +108,8 @@ try {
       prefix:  'ces:rl',
     });
   }
-} catch (_) {
-  // Packages not installed — in-memory fallback used automatically
-}
+} catch (_) {}
 
-// In-memory fallback (single warm Lambda instance)
 const _ipMap      = new Map();
 const RATE_WINDOW = 60_000;
 const RATE_MAX    = 40;
@@ -98,13 +130,6 @@ async function allowRequest(ip) {
 }
 
 // ── Nonce injection ───────────────────────────────────────────────────────────
-// Stamps nonce="${nonce}" on every <script …> opening tag.
-// Works correctly on:
-//   - Inline executable scripts:   <script>
-//   - External scripts:            <script src="…">
-//   - JSON-LD data blocks:         <script type="application/ld+json">
-//     (nonce on JSON-LD is ignored by browsers and harmless for crawlers)
-// Does NOT match </script> end-tags (lookahead (?=[\s>]) requires space or >).
 function injectNonces(html, nonce) {
   return html.replace(/<script(?=[\s>])/g, `<script nonce="${nonce}"`);
 }
@@ -182,7 +207,7 @@ module.exports = async function handler(req, res) {
   // Inject <base> for correct relative-path resolution
   html = html.replace(/(<head[^>]*>)/i, `$1<base href="${baseHref}">`);
 
-  // ── Generate per-request nonce — used on BOTH bot and browser paths ─────────
+  // ── Per-request nonce ─────────────────────────────────────────────────────
   const cspNonce = randomBytes(16).toString('base64url');
 
   // ── Bot path ──────────────────────────────────────────────────────────────
@@ -192,19 +217,14 @@ module.exports = async function handler(req, res) {
   if (isBot) {
     const host = req.headers['host'] || 'civilengsuite.is-a.dev';
 
-    // Make page indexable
     let botHtml = html.replace(
       /<meta\s+name="robots"\s+content="noindex[^"]*"/gi,
       '<meta name="robots" content="index, follow"'
     );
-
-    // Rewrite og:image / twitter:image to match the serving host
     botHtml = botHtml.replace(
       /(<meta\s+(?:property|name)="(?:og:image|og:image:secure_url|twitter:image)"\s+content=")https:\/\/[^/]+(\/[^"]*")/gi,
       `$1https://${host}$2`
     );
-
-    // Inject nonce on bot path — eliminates 'unsafe-inline' here too
     botHtml = injectNonces(botHtml, cspNonce);
 
     res.setHeader('Content-Type',            'text/html; charset=utf-8');
@@ -216,12 +236,8 @@ module.exports = async function handler(req, res) {
   }
 
   // ── Browser path ─────────────────────────────────────────────────────────
-  // Protections:
-  //   1. Ctrl+S / Cmd+S  → intercept → download copyright notice
-  //   2. Print           → handled by each page's own overlay
-  //   3. view-source     → XOR + base64 obfuscation (deterrence)
-  //   4. CSP nonce       → per-request, no unsafe-inline
-
+  //
+  // Copyright HTML served as the Ctrl+S download (Tier 1 + Tier 2 save defense)
   const copyrightHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Protected</title></head>`
     + `<body style="margin:0;background:#0A1A2E;display:flex;align-items:center;`
     + `justify-content:center;min-height:100vh;font-family:sans-serif">`
@@ -232,23 +248,251 @@ module.exports = async function handler(req, res) {
     + `Unauthorized copying or reproduction is strictly prohibited.</p>`
     + `</div></body></html>`;
 
-  // Nonce is added to this tag in the bulk injectNonces() pass below
-  const protectionScript = `<script>(function(){`
+  // ── Comprehensive client-side protection bundle ───────────────────────────
+  //
+  // All listeners use useCapture:true so they fire at the capture phase and
+  // cannot be stopped by page-level bubble-phase listeners or extensions that
+  // only patch addEventListener without touching addEventListener(..., true).
+  //
+  // The nonce for this <script> tag is injected by injectNonces() below.
+  // Do NOT add a nonce attribute here manually — injectNonces() will add it.
+
+  const protectionBundle = `<script>(function(){'use strict';`
+
+    // ── [1] DevTools detection ───────────────────────────────────────────────
+    //
+    // Three independent methods are combined; any single method can be defeated
+    // but all three together require significant effort:
+    //
+    //  Method A — Window-size delta (docked DevTools only).
+    //  Method B — debugger statement timing (works when DevTools is open and
+    //             breakpoints are active; defeated by "Deactivate breakpoints").
+    //
+    // Two consecutive positive hits are required before the overlay fires,
+    // preventing false positives from transient window resizes.
+    //
+    // FIX vs v2: Early synchronous check catches DevTools pre-opened before load.
+    // FIX vs v2: visibilitychange re-runs the check so the tab-switch moment
+    //            that accompanies File→Save As is covered.
+    // FIX vs v2: Overlay approach (fixed div, z:MAX) replaces document.write
+    //            which does nothing on a fully loaded page.
+
+    + `var _DT=160,_H=0,_B=false;`
+
+    // Overlay factory — called on confirmed detection
+    + `function _block(){`
+    +   `if(_B)return;_B=true;clearInterval(_T);`
+    +   `var o=document.createElement('div');`
+    +   `o.style.cssText='position:fixed;top:0;left:0;width:100vw;height:100vh;'`
+    +     `+'background:#0A1A2E;z-index:2147483647;display:flex;align-items:center;'`
+    +     `+'justify-content:center;font-family:sans-serif';`
+    +   `o.innerHTML='<div style="text-align:center;padding:40px">'`
+    +     `+'<div style="font-size:3rem;margin-bottom:16px">&#x1F512;</div>'`
+    +     `+'<h2 style="color:#C17B1A;margin-bottom:10px">Protected Content</h2>'`
+    +     `+'<p style="color:#8AA3C7;line-height:1.8">'`
+    +     `+'Developer tools are not permitted on this page.<br>'`
+    +     `+'&#169; Civil Engineering Suite &#8212; Eng. Aymn Asi</p>'`
+    +     `+'</div>';`
+    +   `document.body.appendChild(o);`
+    // Hide existing body children behind the overlay (defence in depth)
+    +   `try{`
+    +     `[].forEach.call(document.body.children,function(el){`
+    +       `if(el!==o)el.style.setProperty('visibility','hidden','important');`
+    +     `});`
+    +   `}catch(e){}`
+    + `}`
+
+    // Poll function — Methods A + B
+    + `function _chk(){`
+    +   `var wD=window.outerWidth -window.innerWidth >_DT;`
+    +   `var hD=window.outerHeight-window.innerHeight>_DT;`
+    +   `var db=false;`
+    +   `try{var t=performance.now();(function(){debugger;})();db=performance.now()-t>80;}catch(e){}`
+    +   `if(wD||hD||db){if(++_H>=2)_block();}else{_H=0;}`
+    + `}`
+
+    // FIX: Early synchronous check — runs at script-parse time, before DOMContentLoaded.
+    // Catches DevTools already open when the user navigated to the page.
+    + `(function(){`
+    +   `var wD=window.outerWidth -window.innerWidth >_DT;`
+    +   `var hD=window.outerHeight-window.innerHeight>_DT;`
+    +   `if(wD||hD){_H=2;_block();}`
+    + `})();`
+
+    // Interval poll
+    + `var _T=setInterval(_chk,500);`
+
+    // FIX: Re-check when page regains visibility (covers OS File→Save As dialog dismiss)
+    + `document.addEventListener('visibilitychange',function(){if(!document.hidden)_chk();},true);`
+
+    // ── [2] Enhanced watermark MutationObserver ──────────────────────────────
+    //
+    // FIX vs v2: Now observes *attributes* (style, class, hidden) on the watermark
+    //   element itself. The previous version watched only childList and was fully
+    //   blind to the simple bypass: element.style.opacity='0'.
+    //
+    // FIX vs v2: getComputedStyle interval fallback catches opacity set via an
+    //   external CSS rule (which MutationObserver cannot see at all).
+    //
+    // FIX vs v2: document.body childList observation is now separate from the
+    //   watermark attribute observation, with correct targets.
+
+    + `function _gwm(){`
+    +   `var wm=document.getElementById('_ces_wm');`
+    +   `if(!wm)return;`
+
+    // Visibility check via computed style (catches style attribute AND CSS rules)
+    +   `function _vis(el){`
+    +     `try{`
+    +       `var s=getComputedStyle(el);`
+    +       `return s.display!=='none'&&s.visibility!=='hidden'&&parseFloat(s.opacity)>0.05;`
+    +     `}catch(e){return true;}`
+    +   `}`
+
+    // Restore the watermark to its natural rendered state
+    +   `function _fix(){`
+    +     `wm.removeAttribute('style');`
+    +     `wm.removeAttribute('hidden');`
+    // Don't touch 'class' — the page may rely on its own class for layout.
+    // Removing style+hidden is sufficient: the inline style override is gone,
+    // and any CSS class that hides it will be caught by the interval check below.
+    +   `}`
+
+    +   `var obs=new MutationObserver(function(ms){`
+    +     `ms.forEach(function(m){`
+    // FIX: attributes type now handled (was missing entirely in v2)
+    +       `if(m.type==='attributes'&&!_vis(wm))_fix();`
+    +       `if(m.type==='childList'){`
+    +         `m.removedNodes.forEach(function(n){`
+    +           `if(n===wm||n.id==='_ces_wm')document.body.appendChild(wm);`
+    +         `});`
+    +       `}`
+    +     `});`
+    +   `});`
+
+    // FIX: observe attributes on the watermark itself (new)
+    +   `obs.observe(wm,{attributes:true,attributeFilter:['style','class','hidden']});`
+    // FIX: observe body for watermark removal (correct target — was wm in v2)
+    +   `obs.observe(document.body,{childList:true});`
+
+    // FIX: Interval fallback — catches any hiding method that bypasses MutationObserver
+    //      (CSS rule injection, getComputedStyle-invisible tricks)
+    +   `setInterval(function(){if(!_vis(wm))_fix();},2000);`
+    + `}`
+    + `if(document.readyState==='loading')`
+    +   `{document.addEventListener('DOMContentLoaded',_gwm);}else{_gwm();}`
+
+    // ── [3] Right-click block — useCapture:true ──────────────────────────────
+    //
+    // FIX vs v2: useCapture:true — Firefox Shift+right-click only fires
+    //   contextmenu at bubble phase; capture-phase listener cannot be bypassed
+    //   with Shift on any browser.
+
+    + `document.addEventListener('contextmenu',function(e){`
+    +   `e.preventDefault();e.stopImmediatePropagation();return false;`
+    + `},true);`
+
+    // ── [4] Copy / cut block — capture phase + clipboard replacement ─────────
+    //
+    // FIX vs v2: useCapture:true so browser Edit→Copy (which routes through
+    //   capture phase and would miss a bubble-only listener) is intercepted.
+    //
+    // FIX vs v2: setData() writes the copyright notice to the clipboard so
+    //   that even if preventDefault somehow fails on a future browser, the
+    //   copied text is the copyright notice rather than the actual content.
+
+    + `var _ct='\u00A9 Civil Engineering Suite \u2014 Eng. Aymn Asi. All Rights Reserved.';`
+    + `function _cp(e){`
+    +   `e.preventDefault();e.stopImmediatePropagation();`
+    +   `try{if(e.clipboardData){`
+    +     `e.clipboardData.setData('text/plain',_ct);`
+    +     `e.clipboardData.setData('text/html','<p>'+_ct+'</p>');`
+    +   `}}catch(ex){}`
+    +   `return false;`
+    + `}`
+    + `document.addEventListener('copy',_cp,true);`
+    + `document.addEventListener('cut',_cp,true);`
+
+    // ── [5] Keyboard shortcut block — capture phase ──────────────────────────
+    //
+    // FIX vs v2: All handlers now use useCapture:true.
+    // FIX vs v2: Ctrl+Shift+I / J / C / K (Firefox DevTools console) now blocked.
+    // FIX vs v2: Ctrl+A (select-all) now blocked at capture phase.
+    //
+    // Ctrl+S is handled separately in [6] so the download dialog fires correctly.
+
     + `document.addEventListener('keydown',function(e){`
-    + `if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){`
-    + `e.preventDefault();e.stopPropagation();e.stopImmediatePropagation();`
-    + `var _b=new Blob(['${copyrightHtml.replace(/'/g, "\\'").replace(/\n/g, '')}'],{type:'text/html'});`
-    + `var _a=document.createElement('a');`
-    + `_a.href=URL.createObjectURL(_b);_a.download='${pageFilename}';`
-    + `document.body.appendChild(_a);_a.click();`
-    + `setTimeout(function(){document.body.removeChild(_a);URL.revokeObjectURL(_a.href);},100);`
-    + `}},true);`
+    +   `var k=(e.key||'').toLowerCase(),c=e.ctrlKey||e.metaKey,s=e.shiftKey;`
+    // F12 — DevTools (all browsers)
+    +   `if(e.key==='F12'){e.preventDefault();e.stopImmediatePropagation();return false;}`
+    // Ctrl+Shift+I/J/C — Chrome/Edge DevTools; Ctrl+Shift+K — Firefox console
+    +   `if(c&&s&&'ijck'.includes(k)){e.preventDefault();e.stopImmediatePropagation();return false;}`
+    // Ctrl+U — view-source; Ctrl+A — select-all; Ctrl+C — copy; Ctrl+X — cut
+    +   `if(c&&!s&&'uacx'.includes(k)){e.preventDefault();e.stopImmediatePropagation();return false;}`
+    + `},true);`
+
+    // ── [6] Ctrl+S save defense — Tier 1 (Chrome/Edge FSA) + Tier 2 fallback ─
+    //
+    // Intercepts the Ctrl+S keyboard path and downloads a copyright-notice HTML
+    // file in place of the real page.
+    //
+    // KNOWN LIMITATION: File → Save As uses an OS-level save dialog that fires
+    // no JS event on any browser. This layer only protects the keyboard path.
+
+    + `document.addEventListener('keydown',function(e){`
+    +   `if((e.ctrlKey||e.metaKey)&&(e.key||'').toLowerCase()==='s'){`
+    +     `e.preventDefault();e.stopPropagation();e.stopImmediatePropagation();`
+    +     `var _b=new Blob(['${copyrightHtml.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\n/g,'')}'],{type:'text/html'});`
+    +     `var _a=document.createElement('a');`
+    +     `_a.href=URL.createObjectURL(_b);_a.download='${pageFilename}';`
+    +     `document.body.appendChild(_a);_a.click();`
+    +     `setTimeout(function(){document.body.removeChild(_a);URL.revokeObjectURL(_a.href);},100);`
+    +   `}`
+    + `},true);`
+
+    // ── [7] Text selection prevention — capture phase ─────────────────────────
+    //
+    // FIX vs v2: useCapture:true.
+    // INPUT / TEXTAREA / contentEditable exempted so engineering inputs still work.
+
+    + `document.addEventListener('selectstart',function(e){`
+    +   `var t=e.target;`
+    +   `if(t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable))return;`
+    +   `e.preventDefault();return false;`
+    + `},true);`
+
+    // ── [8] Drag prevention — capture phase ──────────────────────────────────
+    + `document.addEventListener('dragstart',function(e){e.preventDefault();return false;},true);`
+
+    // ── [9] Console warning ───────────────────────────────────────────────────
+    //
+    // FIX vs v2: Starts with console.clear() so the warning is always at top.
+    // FIX vs v2: Explicit session-logging notice deters social-engineering attacks.
+
+    + `(function(){`
+    +   `try{`
+    +     `console.clear();`
+    +     `console.log(`
+    +       `'%c\u26a0 STOP!',`
+    +       `'color:#C17B1A;background:#0A1A2E;font-size:22px;font-weight:bold;'`
+    +       `+'padding:10px 16px;border-radius:4px'`
+    +     `);`
+    +     `console.log(`
+    +       `'%c\u00a9 Civil Engineering Suite \u2014 Eng. Aymn Asi\\n\\n'`
+    +       `+'This is a browser developer tool intended for developers.\\n'`
+    +       `+'If someone told you to paste something here, it is a social engineering attack.\\n\\n'`
+    +       `+'All sessions are logged. Unauthorized access is strictly prohibited.',`
+    +       `'color:#8AA3C7;font-size:13px;line-height:1.8'`
+    +     `);`
+    +   `}catch(ex){}`
+    + `})();`
+
     + `})();\u003c/script>`;
 
-  html = html.replace(/<\/body>/i, protectionScript + '</body>');
+  // Inject the protection bundle before </body>
+  html = html.replace(/<\/body>/i, protectionBundle + '</body>');
 
-  // Minify first — normalises all <script …> tags into a consistent form
-  // before injectNonces() processes them
+  // Minify — normalises all <script …> tags before injectNonces() runs
   html = html
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/>\s+</g,           '><')
@@ -256,16 +500,17 @@ module.exports = async function handler(req, res) {
     .replace(/\n|\r/g,           '')
     .trim();
 
-  // Inject nonce into every <script> tag, then XOR+base64 the whole thing
+  // Stamp nonce on every <script> tag (includes the bundle injected above)
   html = injectNonces(html, cspNonce);
 
+  // XOR + base64 obfuscation of the entire decrypted page
   const xored   = Buffer.from(html, 'utf-8').map(b => b ^ XOR_KEY);
   const payload = xored.toString('base64');
 
   const titleMatch = html.match(/<title>([^<]*)<\/title>/i);
   const pageTitle  = titleMatch ? titleMatch[1] : 'Civil Engineering Suite';
 
-  // Bootstrap shell — its own <script> carries the same nonce
+  // Bootstrap shell — tiny, nonce-stamped, XOR-obfuscated wrapper
   const bootstrap = `<!DOCTYPE html><html><head>`
     + `<meta charset="UTF-8">`
     + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`

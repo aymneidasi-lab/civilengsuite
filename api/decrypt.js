@@ -84,8 +84,16 @@ const XOR_KEY  = (_xorHex.length === 2 && /^[0-9A-Fa-f]{2}$/.test(_xorHex))
   : 0x5A;
 
 // ── Shared CSP fragments ──────────────────────────────────────────────────────
+//
+// FIX: Added explicit object-src 'none' and worker-src 'none'.
+//      Although default-src 'self' covers these implicitly, CSP evaluation
+//      tools (Google CSP Evaluator, securityheaders.com) flag the absence of
+//      explicit directives as a strict-mode gap. Being explicit also prevents
+//      any future default-src widening from silently opening these vectors.
 const CSP_COMMON = [
   "default-src 'self'",
+  "object-src 'none'",
+  "worker-src 'none'",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "font-src 'self' https://fonts.gstatic.com",
   "img-src 'self' data: https:",
@@ -114,6 +122,17 @@ const _ipMap      = new Map();
 const RATE_WINDOW = 60_000;
 const RATE_MAX    = 40;
 
+// FIX: Periodic cleanup — prune entries older than 2× the rate window so the
+//      Map cannot grow unboundedly under a sustained attack (memory exhaustion).
+//      Runs every RATE_WINDOW ms; safe to call in a long-lived process or a
+//      warm Vercel function instance.
+setInterval(() => {
+  const cutoff = Date.now() - RATE_WINDOW * 2;
+  for (const [ip, slot] of _ipMap) {
+    if (slot.t < cutoff) _ipMap.delete(ip);
+  }
+}, RATE_WINDOW);
+
 async function allowRequest(ip) {
   if (_upstashLimiter) {
     const { success } = await _upstashLimiter.limit(ip);
@@ -138,24 +157,31 @@ function injectNonces(html, nonce) {
 module.exports = async function handler(req, res) {
 
   // 1. Rate limit ─────────────────────────────────────────────────────────────
-  const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim()
-          || req.socket?.remoteAddress
-          || 'anon';
+  //
+  // FIX: x-real-ip is set by Vercel's edge infrastructure and cannot be spoofed
+  //      by the client. x-forwarded-for CAN be prepended by the client before
+  //      Vercel appends the true IP, making the first element unreliable.
+  //      Priority: x-real-ip → x-vercel-forwarded-for → x-forwarded-for[0].
+  const ip = (
+    req.headers['x-real-ip'] ||
+    req.headers['x-vercel-forwarded-for'] ||
+    (req.headers['x-forwarded-for'] || '').split(',')[0]
+  ).trim() || req.socket?.remoteAddress || 'anon';
 
   if (!(await allowRequest(ip))) {
     res.setHeader('Retry-After', '60');
-    return res.status(429).send(errPage('Too Many Requests',
-      'Rate limit exceeded. Please wait a moment and try again.'));
+    return sendErr(res, 429, 'Too Many Requests',
+      'Rate limit exceeded. Please wait a moment and try again.');
   }
 
   // 2. Validate AES-256-GCM key ───────────────────────────────────────────────
   const keyHex = (process.env.CES_DECRYPT_KEY || '').trim();
   if (!keyHex || keyHex.length !== 64)
-    return res.status(500).send(errPage('Config Error', 'CES_DECRYPT_KEY missing or invalid.'));
+    return sendErr(res, 500, 'Config Error', 'CES_DECRYPT_KEY missing or invalid.');
 
   let keyBuf;
   try { keyBuf = Buffer.from(keyHex, 'hex'); }
-  catch (e) { return res.status(500).send(errPage('Key Error', e.message)); }
+  catch (e) { return sendErr(res, 500, 'Key Error', e.message); }
 
   // 3. Route to correct .enc file ─────────────────────────────────────────────
   const pathname = (req.url || '/').split('?')[0].replace(/\/+$/, '') || '/';
@@ -175,7 +201,7 @@ module.exports = async function handler(req, res) {
                  + '<link rel="icon" type="image/png" sizes="192x192" href="/footing-pro/images/favicon-192.png">'
                  + '<link rel="apple-touch-icon" sizes="180x180" href="/footing-pro/images/apple-touch-icon.png">';
   } else {
-    return res.status(404).send('Not found');
+    return sendErr(res, 404, 'Not Found', 'The requested path does not exist.');
   }
 
   // 4. Read and decrypt .enc ──────────────────────────────────────────────────
@@ -183,13 +209,13 @@ module.exports = async function handler(req, res) {
   let encData;
   try { encData = fs.readFileSync(encPath, 'utf-8').trim(); }
   catch (e) {
-    return res.status(500).send(errPage('File Error',
-      `Cannot read ${encFile}: ${e.message} | public/: ${listDir(path.join(process.cwd(), 'public'))}`));
+    return sendErr(res, 500, 'File Error',
+      `Cannot read ${encFile}: ${e.message} | public/: ${listDir(path.join(process.cwd(), 'public'))}`);
   }
 
   const dot = encData.indexOf('.');
   if (dot === -1)
-    return res.status(500).send(errPage('Format Error', 'Bad .enc format (missing dot separator).'));
+    return sendErr(res, 500, 'Format Error', 'Bad .enc format (missing dot separator).');
 
   let html;
   try {
@@ -201,7 +227,7 @@ module.exports = async function handler(req, res) {
     decipher.setAuthTag(authTag);
     html = Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf-8');
   } catch (e) {
-    return res.status(500).send(errPage('Decrypt Error', e.message));
+    return sendErr(res, 500, 'Decrypt Error', e.message);
   }
 
   // Inject <base> for correct relative-path resolution
@@ -543,12 +569,47 @@ module.exports = async function handler(req, res) {
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+// FIX: escHtml — prevents XSS in error pages.
+//      The previous errPage() directly interpolated title and message into HTML
+//      without escaping. Node.js error messages (e.message from crypto, fs, etc.)
+//      can contain '<', '>', '"' which render as live HTML if the browser has no
+//      CSP. All error output must be escaped before being written into HTML.
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// FIX: errPage() — now uses escHtml() for all interpolated values.
 function errPage(title, message) {
-  return `<!DOCTYPE html><html><head><title>${title}</title></head>`
-    + `<body style="font-family:sans-serif;padding:40px">`
-    + `<h2>${title}</h2><p>${message}</p>`
+  return `<!DOCTYPE html><html lang="en"><head>`
+    + `<meta charset="UTF-8">`
+    + `<meta name="viewport" content="width=device-width,initial-scale=1">`
+    + `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">`
+    + `<title>${escHtml(title)}</title>`
+    + `</head><body style="font-family:sans-serif;padding:40px">`
+    + `<h2>${escHtml(title)}</h2><p>${escHtml(message)}</p>`
     + `</body></html>`;
 }
+
+// FIX: sendErr() — centralised error response that sets all required security
+//      headers on every error path (429, 500, 404).
+//      Previously, error responses were sent with res.status(N).send(errPage())
+//      which skipped Content-Security-Policy, X-Frame-Options, Cache-Control,
+//      and X-Content-Type-Options — leaving them unprotected by HTTP headers.
+function sendErr(res, status, title, message) {
+  res.setHeader('Content-Type',            'text/html; charset=utf-8');
+  res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'");
+  res.setHeader('X-Content-Type-Options',  'nosniff');
+  res.setHeader('X-Frame-Options',         'DENY');
+  res.setHeader('Cache-Control',           'no-store');
+  return res.status(status).send(errPage(title, message));
+}
+
 function listDir(dir) {
   try { return fs.readdirSync(dir).join(', '); } catch (e) { return e.message; }
 }
