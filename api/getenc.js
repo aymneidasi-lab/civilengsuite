@@ -1,27 +1,23 @@
 /**
- * Static file server for encrypted files
- * This runs server-side so it can read from the filesystem
+ * /api/getenc — DISABLED
+ *
+ * This endpoint previously served raw .enc files to the browser.
+ * It has been disabled because:
+ *
+ *   1. decrypt.js already reads .enc files server-side via fs.readFileSync —
+ *      there is no legitimate use case for a browser to fetch the raw
+ *      encrypted payload directly.
+ *
+ *   2. Exposing the encrypted files over HTTP adds unnecessary attack surface.
+ *      Even though AES-256-GCM is strong, there is no reason to hand
+ *      attackers the ciphertext to work with offline.
+ *
+ *   3. No authentication or rate-limiting was in place on this route.
+ *
+ * If you ever need to restore server-to-server .enc file transfer,
+ * add proper authentication (shared secret header or signed URL) first.
  */
 
-import { readFileSync } from 'fs';
-import { join } from 'path';
-
 export default function handler(req, res) {
-  const { file } = req.query;
-
-  // Only allow our specific enc files — nothing else
-  if (!file || !['pc_suite.enc', 'footing_pro.enc'].includes(file)) {
-    res.status(404).send('Not found');
-    return;
-  }
-
-  try {
-    const filePath = join(process.cwd(), 'public', file);
-    const content = readFileSync(filePath, 'utf-8');
-    res.setHeader('Cache-Control', 'private, no-store');
-    res.setHeader('Content-Type', 'text/plain');
-    res.status(200).send(content);
-  } catch (err) {
-    res.status(500).send(`Cannot read file: ${err.message}`);
-  }
+  res.status(404).send('Not found');
 }

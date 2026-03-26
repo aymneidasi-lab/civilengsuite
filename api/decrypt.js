@@ -4,20 +4,23 @@
 
 const fs   = require('fs');
 const path = require('path');
-const { createDecipheriv } = require('crypto');
+const { createDecipheriv, randomBytes } = require('crypto');
 
-const BOT_RE = /googlebot|google-inspectiontool|googleother|bingbot|yandexbot|duckduckbot|baiduspider|applebot|slurp|facebookexternalhit|twitterbot|linkedinbot|whatsapp|telegrambot|slackbot|discordbot/i;
-const KEY    = 0x5A;
+// No bot detection needed here — Vercel's rewrite rules (missing: user-agent)
+// prevent bots from ever reaching /api/decrypt. Bots are served the static
+// index.html landing page directly by Vercel's file system routing instead.
+// This eliminates the cloaking risk (serving different content to Googlebot
+// vs real users) and ensures Google never indexes the decrypted app logic.
 
 module.exports = async function handler(req, res) {
 
   const keyHex = (process.env.CES_DECRYPT_KEY || '').trim();
   if (!keyHex || keyHex.length !== 64)
-    return res.status(500).send(errPage('Config Error', 'CES_DECRYPT_KEY missing'));
+    return res.status(500).send(errPage('Server Error', 'Internal configuration error.'));
 
   let keyBuf;
   try { keyBuf = Buffer.from(keyHex, 'hex'); }
-  catch(e) { return res.status(500).send(errPage('Key Error', e.message)); }
+  catch(e) { return res.status(500).send(errPage('Server Error', 'Internal configuration error.')); }
 
   const pathname = (req.url||'/').split('?')[0].replace(/\/+$/,'') || '/';
 
@@ -43,12 +46,12 @@ module.exports = async function handler(req, res) {
   let encData;
   try { encData = fs.readFileSync(encPath, 'utf-8').trim(); }
   catch(e) {
-    return res.status(500).send(errPage('File Error',
-      `Cannot read ${encFile}: ${e.message} | public/: ${listDir(path.join(process.cwd(),'public'))}`));
+    // Do NOT expose file paths, directory listings, or internal error details
+    return res.status(500).send(errPage('Server Error', 'Content temporarily unavailable. Please try again later.'));
   }
 
   const dot = encData.indexOf('.');
-  if (dot === -1) return res.status(500).send(errPage('Format Error', 'Bad .enc format'));
+  if (dot === -1) return res.status(500).send(errPage('Server Error', 'Content temporarily unavailable. Please try again later.'));
 
   let html;
   try {
@@ -60,47 +63,17 @@ module.exports = async function handler(req, res) {
     decipher.setAuthTag(authTag);
     html = Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf-8');
   } catch(e) {
-    return res.status(500).send(errPage('Decrypt Error', e.message));
+    // Do NOT expose decryption error details
+    return res.status(500).send(errPage('Server Error', 'Content temporarily unavailable. Please try again later.'));
   }
 
   html = html.replace(/(<head[^>]*>)/i, `$1<base href="${baseHref}">`);
-
-  // ── Bot path ─────────────────────────────────────────
-  const ua    = req.headers['user-agent'] || '';
-  const isBot = BOT_RE.test(ua);
-  if (isBot) {
-    // Get the actual host serving this request (may be vercel.app preview or civilengsuite.is-a.dev)
-    const host = req.headers['host'] || 'civilengsuite.is-a.dev';
-
-    let botHtml = html.replace(
-      /<meta\s+name="robots"\s+content="noindex[^"]*"/gi,
-      '<meta name="robots" content="index, follow"'
-    );
-
-    // ── Rewrite og:image / twitter:image to use the current host ──────────
-    // Facebook (and others) reject og:image URLs that point to a different
-    // domain than the page being served. When accessed via a vercel.app preview
-    // URL, the hardcoded civilengsuite.is-a.dev og:image gets ignored and the
-    // scraper falls back to the first <img> in the page body instead.
-    // Rewriting to the current host fixes this for ALL domains without
-    // changing any other content. The image file must exist at the same path
-    // under public/ (e.g. public/og-image.png, public/footing-pro/og-image.png).
-    botHtml = botHtml.replace(
-      /(<meta\s+(?:property|name)="(?:og:image|og:image:secure_url|twitter:image)"\s+content=")https:\/\/[^/]+(\/[^"]*")/gi,
-      `$1https://${host}$2`
-    );
-
-    res.setHeader('Content-Type',  'text/html; charset=utf-8');
-    res.setHeader('Cache-Control', 'public, max-age=3600, must-revalidate');
-    res.setHeader('X-Robots-Tag',  'index, follow');
-    return res.status(200).send(botHtml);
-  }
 
   // ── Browser path ─────────────────────────────────────
   // Two 100% reliable protections — no blur (too unreliable):
   // 1. Ctrl+S → intercept → download copyright notice
   // 2. Print  → handled by each page's own overlay (not duplicated here)
-  // 3. view-source → obfuscated XOR+base64 garbage
+  // 3. view-source → obfuscated with a random per-request key + base64
 
   const copyrightHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Protected</title></head>`
     + `<body style="margin:0;background:#0A1A2E;display:flex;align-items:center;`
@@ -142,14 +115,22 @@ module.exports = async function handler(req, res) {
     .replace(/\n|\r/g, '')
     .trim();
 
-  // XOR + base64 obfuscation
-  const xored   = Buffer.from(html, 'utf-8').map(b => b ^ KEY);
+  // ── Per-request random XOR key ────────────────────────
+  // A fresh random byte is generated on every request so there is no
+  // static constant that can be read from source or cached responses.
+  // This is obfuscation only (not encryption — the AES-256-GCM layer is
+  // the real protection). It raises the bar from "trivial view-source" to
+  // "requires active per-request interception."
+  const _r = randomBytes(1)[0];
+  const xored   = Buffer.from(html, 'utf-8').map(b => b ^ _r);
   const payload = xored.toString('base64');
 
   const titleMatch = html.match(/<title>([^<]*)<\/title>/i);
   const pageTitle  = titleMatch ? titleMatch[1] : 'Civil Engineering Suite';
 
-  const bootstrap = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0"><meta name="robots" content="noindex"><title>${pageTitle}</title>${faviconLinks}</head><body><script>(function(){try{var p="${payload}";var b=atob(p);var u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i)^0x5A;var h=new TextDecoder("utf-8").decode(u);document.open();document.write(h);document.close();}catch(e){document.body.innerHTML="<p style='padding:40px;color:#C17B1A;font-family:sans-serif'>Error: "+e.message+"</p>";}})();<\/script></body></html>`;
+  // The decode key (_r) is embedded as a numeric literal — it has a different
+  // value on every response, so it cannot be hardcoded by a scraper.
+  const bootstrap = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0"><meta name="robots" content="noindex"><title>${pageTitle}</title>${faviconLinks}</head><body><script>(function(){try{var d="${payload}";var b=atob(d);var u=new Uint8Array(b.length);var k=${_r};for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i)^k;var h=new TextDecoder("utf-8").decode(u);document.open();document.write(h);document.close();}catch(e){document.body.innerHTML="<p style='padding:40px;color:#C17B1A;font-family:sans-serif'>Error loading content. Please refresh.</p>";}})();<\/script></body></html>`;
 
   res.setHeader('Content-Type',          'text/html; charset=utf-8');
   res.setHeader('Cache-Control',         'no-store');
@@ -161,6 +142,5 @@ function errPage(t, m) {
   return `<!DOCTYPE html><html><head><title>${t}</title></head>`
     + `<body style="font-family:sans-serif;padding:40px"><h2>${t}</h2><p>${m}</p></body></html>`;
 }
-function listDir(dir) {
-  try { return fs.readdirSync(dir).join(', '); } catch(e) { return e.message; }
-}
+// listDir() removed — exposing directory contents in error responses
+// is an information disclosure vulnerability (CWE-548).
