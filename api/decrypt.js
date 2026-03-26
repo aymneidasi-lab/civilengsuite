@@ -1,31 +1,22 @@
 /**
  * Civil Engineering Suite — AES-256-GCM Decrypt
  * ─────────────────────────────────────────────────────────────────────────────
- * A+ Security — all audit findings resolved:
+ * A+ Security changes vs previous version:
  *
  *   1. Nonce on BOT path  — bots now also receive script-src 'nonce-{n}' with
  *      no 'unsafe-inline'. All <script> tags (including JSON-LD data blocks)
  *      get the nonce injected before the response leaves the server.
+ *      This closes the last unsafe-inline gap across ALL response paths.
  *
  *   2. Distributed rate limiter — uses @upstash/ratelimit + @upstash/redis
  *      when UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN env vars are
- *      present. Falls back to the in-process Map automatically if they are not.
+ *      present. Falls back to the in-process Map automatically if they are not,
+ *      so the handler works immediately in both environments with zero code changes.
  *
  *   3. All paths now go through this handler — vercel.json rewrites are
- *      unconditional. Static HTML files are never served directly to anyone.
- *
- *   4. [FIX] Trusted IP extraction — uses x-vercel-forwarded-for (set by
- *      Vercel's edge, unspoofable) instead of the first x-forwarded-for value,
- *      which a client can freely prefix. Falls back to the rightmost XFF IP.
- *
- *   5. [FIX] CSP hardened — added object-src 'none' and worker-src 'none' to
- *      block plugin/Flash injection and rogue service-worker registration.
- *
- *   6. [FIX] XOR key production guard — returns a 500 error page if NODE_ENV or
- *      VERCEL_ENV is 'production' and CES_XOR_KEY is absent or malformed,
- *      preventing silent fallback to the known 0x5A dev default in production.
- *      The guard runs inside the handler (not at module load time) so a missing
- *      env var never causes a cold-start FUNCTION_INVOCATION_FAILED crash.
+ *      unconditional. Static HTML files are never served directly to anyone,
+ *      eliminating the last surface where unsafe-inline could leak through the
+ *      global vercel.json CSP.
  */
 
 'use strict';
@@ -37,28 +28,24 @@ const { createDecipheriv, randomBytes } = require('crypto');
 // ── Bot / crawler UA pattern ──────────────────────────────────────────────────
 const BOT_RE = /googlebot|google-inspectiontool|googleother|bingbot|yandexbot|duckduckbot|baiduspider|applebot|slurp|facebookexternalhit|twitterbot|linkedinbot|whatsapp|telegrambot|slackbot|discordbot/i;
 
-// ── [FIX #6] XOR key — resolved at module load, guard runs inside handler ────
-// The validity check is done here so XOR_KEY is a simple constant, but the
-// production guard is enforced per-request (inside the handler below) so a
-// missing env var never causes a cold-start FUNCTION_INVOCATION_FAILED crash.
-const _xorHex   = (process.env.CES_XOR_KEY || '').trim();
-const _xorValid = _xorHex.length === 2 && /^[0-9A-Fa-f]{2}$/.test(_xorHex);
-const XOR_KEY   = _xorValid
+// XOR key — client-side obfuscation layer only (not cryptographic security).
+// Read from CES_XOR_KEY env var (1-byte hex string, e.g. "A3").
+// Falls back to 0x5A only in local dev when the env var is absent.
+// Set CES_XOR_KEY in Vercel environment variables so the value
+// never appears in source code or the public repository.
+const _xorHex = (process.env.CES_XOR_KEY || '').trim();
+const XOR_KEY  = (_xorHex.length === 2 && /^[0-9A-Fa-f]{2}$/.test(_xorHex))
   ? parseInt(_xorHex, 16)
-  : 0x5A; // dev fallback only — production guard in handler prevents this being used live
+  : 0x5A; // dev fallback only — always set CES_XOR_KEY in production
 
-// ── [FIX #5] Shared CSP fragments ────────────────────────────────────────────
-// script-src is always set per-request via nonce — never unsafe-inline.
-// object-src 'none'  → blocks Flash / plugin injection.
-// worker-src 'none'  → blocks rogue service-worker / shared-worker registration.
+// ── Shared CSP fragments ──────────────────────────────────────────────────────
+// script-src is always set per-request via nonce — never unsafe-inline
 const CSP_COMMON = [
   "default-src 'self'",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "font-src 'self' https://fonts.gstatic.com",
   "img-src 'self' data: https:",
   "connect-src 'self'",
-  "object-src 'none'",
-  "worker-src 'none'",
   "frame-ancestors 'none'",
   "base-uri 'self'",
   "form-action 'self'",
@@ -110,27 +97,6 @@ async function allowRequest(ip) {
   return slot.n <= RATE_MAX;
 }
 
-// ── [FIX #4] Trusted IP extraction ───────────────────────────────────────────
-// x-vercel-forwarded-for is injected by Vercel's edge infrastructure and
-// cannot be set or spoofed by the client — use it first.
-//
-// If not present (local dev, non-Vercel), fall back to the RIGHTMOST IP in
-// x-forwarded-for. The rightmost entry is the closest trusted proxy; the
-// leftmost can be freely prefixed by the client and must never be trusted
-// for rate-limiting purposes.
-function getTrustedIp(req) {
-  const vercelIp = (req.headers['x-vercel-forwarded-for'] || '').trim();
-  if (vercelIp) return vercelIp.split(',')[0].trim();
-
-  const xff = (req.headers['x-forwarded-for'] || '').trim();
-  if (xff) {
-    const parts = xff.split(',');
-    return parts[parts.length - 1].trim();
-  }
-
-  return req.socket?.remoteAddress || 'anon';
-}
-
 // ── Nonce injection ───────────────────────────────────────────────────────────
 // Stamps nonce="${nonce}" on every <script …> opening tag.
 // Works correctly on:
@@ -146,8 +112,10 @@ function injectNonces(html, nonce) {
 // ── Handler ───────────────────────────────────────────────────────────────────
 module.exports = async function handler(req, res) {
 
-  // 1. Rate limit — uses trusted IP only ─────────────────────────────────────
-  const ip = getTrustedIp(req);
+  // 1. Rate limit ─────────────────────────────────────────────────────────────
+  const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim()
+          || req.socket?.remoteAddress
+          || 'anon';
 
   if (!(await allowRequest(ip))) {
     res.setHeader('Retry-After', '60');
@@ -155,18 +123,7 @@ module.exports = async function handler(req, res) {
       'Rate limit exceeded. Please wait a moment and try again.'));
   }
 
-  // 2. [FIX #6] XOR key production guard ─────────────────────────────────────
-  // Runs per-request (not at module load) so a missing env var returns a clean
-  // 500 page instead of crashing the cold-start with FUNCTION_INVOCATION_FAILED.
-  const _isProd = process.env.NODE_ENV === 'production'
-               || process.env.VERCEL_ENV === 'production';
-  if (_isProd && !_xorValid) {
-    return res.status(500).send(errPage('Config Error',
-      'CES_XOR_KEY is missing or invalid. ' +
-      'Set it to a 2-digit hex string (e.g. "A3") in Vercel environment variables.'));
-  }
-
-  // 3. Validate AES-256-GCM key ───────────────────────────────────────────────
+  // 2. Validate AES-256-GCM key ───────────────────────────────────────────────
   const keyHex = (process.env.CES_DECRYPT_KEY || '').trim();
   if (!keyHex || keyHex.length !== 64)
     return res.status(500).send(errPage('Config Error', 'CES_DECRYPT_KEY missing or invalid.'));
@@ -175,7 +132,7 @@ module.exports = async function handler(req, res) {
   try { keyBuf = Buffer.from(keyHex, 'hex'); }
   catch (e) { return res.status(500).send(errPage('Key Error', e.message)); }
 
-  // 4. Route to correct .enc file ─────────────────────────────────────────────
+  // 3. Route to correct .enc file ─────────────────────────────────────────────
   const pathname = (req.url || '/').split('?')[0].replace(/\/+$/, '') || '/';
 
   let encFile, baseHref, faviconLinks, pageFilename;
@@ -196,7 +153,7 @@ module.exports = async function handler(req, res) {
     return res.status(404).send('Not found');
   }
 
-  // 5. Read and decrypt .enc ──────────────────────────────────────────────────
+  // 4. Read and decrypt .enc ──────────────────────────────────────────────────
   const encPath = path.join(process.cwd(), 'public', encFile);
   let encData;
   try { encData = fs.readFileSync(encPath, 'utf-8').trim(); }
