@@ -28,15 +28,8 @@ const { createDecipheriv, randomBytes } = require('crypto');
 // ── Bot / crawler UA pattern ──────────────────────────────────────────────────
 const BOT_RE = /googlebot|google-inspectiontool|googleother|bingbot|yandexbot|duckduckbot|baiduspider|applebot|slurp|facebookexternalhit|twitterbot|linkedinbot|whatsapp|telegrambot|slackbot|discordbot/i;
 
-// XOR key — client-side obfuscation layer only (not cryptographic security).
-// Read from CES_XOR_KEY env var (1-byte hex string, e.g. "A3").
-// Falls back to 0x5A only in local dev when the env var is absent.
-// Set CES_XOR_KEY in Vercel environment variables so the value
-// never appears in source code or the public repository.
-const _xorHex = (process.env.CES_XOR_KEY || '').trim();
-const XOR_KEY  = (_xorHex.length === 2 && /^[0-9A-Fa-f]{2}$/.test(_xorHex))
-  ? parseInt(_xorHex, 16)
-  : 0x5A; // dev fallback only — always set CES_XOR_KEY in production
+// XOR key — client-side obfuscation layer only (not cryptographic security)
+const XOR_KEY = 0x5A;
 
 // ── Shared CSP fragments ──────────────────────────────────────────────────────
 // script-src is always set per-request via nonce — never unsafe-inline
@@ -113,7 +106,10 @@ function injectNonces(html, nonce) {
 module.exports = async function handler(req, res) {
 
   // 1. Rate limit ─────────────────────────────────────────────────────────────
-  const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim()
+  // x-vercel-forwarded-for is set by Vercel's edge and cannot be spoofed by
+  // the client, unlike x-forwarded-for which is user-controlled.
+  const ip = req.headers['x-vercel-forwarded-for']
+          || (req.headers['x-forwarded-for'] || '').split(',')[0].trim()
           || req.socket?.remoteAddress
           || 'anon';
 
@@ -279,7 +275,7 @@ module.exports = async function handler(req, res) {
     + `var p="${payload}";`
     + `var b=atob(p);`
     + `var u=new Uint8Array(b.length);`
-    + `for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i)^${XOR_KEY};`
+    + `for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i)^0x5A;`
     + `var h=new TextDecoder("utf-8").decode(u);`
     + `document.open();document.write(h);document.close();`
     + `}catch(e){`
