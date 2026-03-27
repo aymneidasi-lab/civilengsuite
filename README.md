@@ -15,7 +15,7 @@ Professional-grade structural and civil engineering software by **Eng. Aymn Asi*
 
 ## 🏗️ Applications
 
-### [Footing Pro v.2026](https://civilengsuite.is-a.dev/footing-pro/?utm_source=github&utm_medium=readme&utm_campaign=organic) — Combined Footing Design Software
+### [Footing Pro v.2026](https://civilengsuite.is-a.dev/footing-pro/?utm_source=github&utm_medium=readme&utm_campaign=organic) — Combined Footing Design Software ● **Live Now**
 
 The most advanced combined footing design application available for free.
 
@@ -31,32 +31,77 @@ The most advanced combined footing design application available for free.
 
 **Modules include:** Soil pressure distribution · Column load transfer · Shear force diagrams · Bending moment diagrams · One-way shear check · Punching shear check · Flexural reinforcement design · Development length · Footing geometry validation · Load combinations · Boundary constraint checks · RC dimension enforcement · Multi-form live sync · Dual-mode engine · Intelligent validation · Intelligent print system · Personal lock system
 
+### In Development — Coming 2026
+
+| App | Description |
+|---|---|
+| [Beam Pro](https://civilengsuite.is-a.dev/beam-pro/) | ACI 318 RC beam design — shallow beam bending |
+| [Column Pro](https://civilengsuite.is-a.dev/column-pro/) | RC column design — P-M interaction, biaxial bending, slenderness, punching shear (17 sub-modules) |
+| [Deflection Pro](https://civilengsuite.is-a.dev/deflection-pro/) | ACI 318 deflection checks for RC beams & slabs |
+| [Earthquake Pro](https://civilengsuite.is-a.dev/earthquake-pro/) | Seismic design — base shear, lateral load distribution, structural period |
+| [Mur Pro](https://civilengsuite.is-a.dev/mur-pro/) | Ultimate Resistance Moment (Mur) — Egyptian Code (ECP) |
+| [Add Reft Pro](https://civilengsuite.is-a.dev/add-reft-pro/) | Additional reinforcement for flat slab openings |
+| [Section Property Pro](https://civilengsuite.is-a.dev/section-property-pro/) | Cross-section properties — area, centroid, Ix/Iy, section modulus, radius of gyration |
+
 ---
 
 ## 📁 Repository Structure
 
 ```
 /
-├── index.html              ← Civil Engineering Suite landing page
+├── index.html              ← [GITIGNORED] Civil Engineering Suite source (encrypted → pc_suite.enc)
 ├── footing-pro/
-│   └── index.html          ← Footing Pro v.2026 product page
-├── sitemap.xml             ← XML sitemap with image entries + hreflang
+│   └── index.html          ← [GITIGNORED] Footing Pro v.2026 source (encrypted → footing_pro.enc)
+├── beam-pro/
+│   └── index.html          ← Beam Pro marketing/preview page (static)
+├── column-pro/
+│   └── index.html          ← Column Pro marketing/preview page (static)
+├── deflection-pro/
+│   └── index.html          ← Deflection Pro marketing/preview page (static)
+├── earthquake-pro/
+│   └── index.html          ← Earthquake Pro marketing/preview page (static)
+├── mur-pro/
+│   └── index.html          ← Mur Pro marketing/preview page (static)
+├── add-reft-pro/
+│   └── index.html          ← Add Reft Pro marketing/preview page (static)
+├── section-property-pro/
+│   └── index.html          ← Section Property Pro marketing/preview page (static)
+├── public/
+│   ├── pc_suite.enc        ← AES-256-GCM encrypted main page
+│   └── footing_pro.enc     ← AES-256-GCM encrypted Footing Pro page
+├── api/
+│   ├── decrypt.js          ← Serverless: AES-256-GCM decrypt → serve HTML
+│   ├── csp-report.js       ← Serverless: CSP violation report receiver
+│   └── getenc.js           ← Disabled (raw .enc exposure removed)
+├── images/
+│   ├── favicon.ico
+│   ├── apple-touch-icon.png
+│   └── activation-infographic.png
+├── sitemap.xml             ← XML sitemap with image entries + hreflang (9 pages)
 ├── robots.txt              ← Crawler rules (allows search engines, blocks AI scrapers)
+├── 404.html                ← Custom 404 error page
+├── 404.css                 ← Styles for 404 page (external file — strict CSP compatible)
+├── vercel.json             ← Vercel deployment config (headers, rewrites, redirects)
 ├── CNAME                   ← civilengsuite.is-a.dev
 ├── .nojekyll               ← Disables Jekyll on GitHub Pages
-├── 404.html                ← Custom 404 error page
+├── .gitattributes          ← LF line ending normalization
+├── .gitignore              ← Protects raw HTML source and encryption keys
 └── README.md               ← This file
 ```
 
+> ⚠️ The raw `index.html` source files are **never committed**. Only the AES-256-GCM encrypted `.enc` files are in the repository. The encryption key lives in `CES_DECRYPT_KEY` (Vercel environment variable) and is never stored in git.
+
 ---
 
-## 🚀 GitHub Pages Deployment
+## 🚀 Vercel Deployment
 
-1. Go to **Settings → Pages**
-2. Set source to **main branch / root**
+1. Import this repository in [vercel.com](https://vercel.com)
+2. Set environment variables:
+   - `CES_DECRYPT_KEY` — 32-byte AES key as 64-character hex string
+   - `CES_XOR_KEY` *(optional)* — single-byte XOR obfuscation key as 2-character hex
+   - `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` *(optional)* — distributed rate limiting
 3. Custom domain: `civilengsuite.is-a.dev`
 4. Enable **Enforce HTTPS**
-5. Wait ~2 minutes for DNS propagation
 
 ---
 

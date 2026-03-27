@@ -1,7 +1,7 @@
 # ═══════════════════════════════════════════════════════
 #  robots.txt — Civil Engineering Suite
 #  https://civilengsuite.is-a.dev
-#  Updated: 2026-03-19
+#  Updated: 2026-03-28
 # ═══════════════════════════════════════════════════════
 
 # ── Allow all compliant search engine bots ──
@@ -78,6 +78,24 @@ Allow: /
 User-agent: Discordbot
 Allow: /
 
+# ── Perplexity AI Search — Allow (drives organic discovery traffic) ──
+User-agent: PerplexityBot
+Allow: /
+
+# ── SEO Audit Tools — Allow (needed for backlink monitoring & rank tracking) ──
+User-agent: AhrefsBot
+Allow: /
+
+User-agent: SemrushBot
+Allow: /
+
+# ── Other SEO / Link crawlers ──
+User-agent: MJ12bot
+Disallow: /
+
+User-agent: DotBot
+Disallow: /
+
 # ── AI Training Scrapers — Block ──
 User-agent: GPTBot
 Disallow: /
@@ -95,21 +113,6 @@ User-agent: Claude-Web
 Disallow: /
 
 User-agent: cohere-ai
-Disallow: /
-
-User-agent: PerplexityBot
-Disallow: /
-
-User-agent: AhrefsBot
-Disallow: /
-
-User-agent: SemrushBot
-Disallow: /
-
-User-agent: MJ12bot
-Disallow: /
-
-User-agent: DotBot
 Disallow: /
 
 # ── Sitemap ──
