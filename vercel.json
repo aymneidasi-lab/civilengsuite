@@ -13,6 +13,62 @@
       "destination": "/api/decrypt"
     },
     {
+      "source": "/column-pro",
+      "destination": "/api/decrypt"
+    },
+    {
+      "source": "/column-pro/",
+      "destination": "/api/decrypt"
+    },
+    {
+      "source": "/beam-pro",
+      "destination": "/api/decrypt"
+    },
+    {
+      "source": "/beam-pro/",
+      "destination": "/api/decrypt"
+    },
+    {
+      "source": "/deflection-pro",
+      "destination": "/api/decrypt"
+    },
+    {
+      "source": "/deflection-pro/",
+      "destination": "/api/decrypt"
+    },
+    {
+      "source": "/earthquake-pro",
+      "destination": "/api/decrypt"
+    },
+    {
+      "source": "/earthquake-pro/",
+      "destination": "/api/decrypt"
+    },
+    {
+      "source": "/mur-pro",
+      "destination": "/api/decrypt"
+    },
+    {
+      "source": "/mur-pro/",
+      "destination": "/api/decrypt"
+    },
+    {
+      "source": "/add-reft-pro",
+      "destination": "/api/decrypt"
+    },
+    {
+      "source": "/add-reft-pro/",
+      "destination": "/api/decrypt"
+    },
+    {
+      "source": "/section-property-pro",
+      "destination": "/api/decrypt"
+    },
+    {
+      "source": "/section-property-pro/",
+      "destination": "/api/decrypt"
+    },
+    {
       "source": "/.well-known/security.txt",
       "destination": "/security.txt"
     }

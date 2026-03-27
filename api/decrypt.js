@@ -216,25 +216,124 @@ module.exports = async function handler(req, res) {
   }
 
   // 3. Route to correct .enc file ─────────────────────────────────────────────
+  //
+  // Table-driven routing — add a new app by appending one entry to ROUTES.
+  // Each entry:
+  //   prefix      — pathname prefix that triggers this route (startsWith match).
+  //                 Use '/' only for the exact homepage (checked first as special case).
+  //   encFile     — filename inside public/  (must match what the Python encryptor writes)
+  //   baseHref    — injected as <base href="..."> so relative paths resolve correctly
+  //   pageFilename— filename used for the Ctrl+S copyright download (Tier 1/2 save defense)
+  //   faviconLinks— <link> tags injected into the bootstrap shell <head>
+  //
+  // ── IMPORTANT when adding a new app ──────────────────────────────────────────
+  //   1. Add the entry below.
+  //   2. Add a rewrite rule in vercel.json:
+  //        { "source": "/your-app",  "destination": "/api/decrypt" }
+  //        { "source": "/your-app/", "destination": "/api/decrypt" }
+  //   3. Run the Python encryptor to produce the .enc file in public/.
+  //   4. Commit and push — Vercel redeploys in ~30 seconds.
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  const ROUTES = [
+    // ── Homepage / Civil Engineering Suite ───────────────────────────────────
+    {
+      prefix:       '/',            // matched as exact-root special case (see below)
+      encFile:      'pc_suite.enc',
+      baseHref:     '/',
+      pageFilename: 'civil-engineering-suite.html',
+      faviconLinks: '<link rel="icon" type="image/x-icon" href="/images/favicon.ico">'
+                  + '<link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png">',
+    },
+    // ── Footing Pro ───────────────────────────────────────────────────────────
+    {
+      prefix:       '/footing-pro',
+      encFile:      'footing_pro.enc',
+      baseHref:     '/footing-pro/',
+      pageFilename: 'footing-pro.html',
+      faviconLinks: '<link rel="icon" type="image/png" sizes="32x32"   href="/footing-pro/images/favicon-32.png">'
+                  + '<link rel="icon" type="image/png" sizes="192x192" href="/footing-pro/images/favicon-192.png">'
+                  + '<link rel="apple-touch-icon" sizes="180x180"      href="/footing-pro/images/apple-touch-icon.png">',
+    },
+    // ── Column Pro ────────────────────────────────────────────────────────────
+    {
+      prefix:       '/column-pro',
+      encFile:      'column_pro.enc',
+      baseHref:     '/column-pro/',
+      pageFilename: 'column-pro.html',
+      faviconLinks: '<link rel="icon" type="image/x-icon" href="/images/favicon.ico">'
+                  + '<link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png">',
+    },
+    // ── Beam Pro ──────────────────────────────────────────────────────────────
+    {
+      prefix:       '/beam-pro',
+      encFile:      'beam_pro.enc',
+      baseHref:     '/beam-pro/',
+      pageFilename: 'beam-pro.html',
+      faviconLinks: '<link rel="icon" type="image/x-icon" href="/images/favicon.ico">'
+                  + '<link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png">',
+    },
+    // ── Deflection Pro ────────────────────────────────────────────────────────
+    {
+      prefix:       '/deflection-pro',
+      encFile:      'deflection_pro.enc',
+      baseHref:     '/deflection-pro/',
+      pageFilename: 'deflection-pro.html',
+      faviconLinks: '<link rel="icon" type="image/x-icon" href="/images/favicon.ico">'
+                  + '<link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png">',
+    },
+    // ── Earthquake Pro ───────────────────────────────────────────────────────
+    {
+      prefix:       '/earthquake-pro',
+      encFile:      'earthquake_pro.enc',
+      baseHref:     '/earthquake-pro/',
+      pageFilename: 'earthquake-pro.html',
+      faviconLinks: '<link rel="icon" type="image/x-icon" href="/images/favicon.ico">'
+                  + '<link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png">',
+    },
+    // ── Mur Pro ───────────────────────────────────────────────────────────────
+    {
+      prefix:       '/mur-pro',
+      encFile:      'mur_pro.enc',
+      baseHref:     '/mur-pro/',
+      pageFilename: 'mur-pro.html',
+      faviconLinks: '<link rel="icon" type="image/x-icon" href="/images/favicon.ico">'
+                  + '<link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png">',
+    },
+    // ── Add Reft Pro ─────────────────────────────────────────────────────────
+    {
+      prefix:       '/add-reft-pro',
+      encFile:      'add_reft_pro.enc',
+      baseHref:     '/add-reft-pro/',
+      pageFilename: 'add-reft-pro.html',
+      faviconLinks: '<link rel="icon" type="image/x-icon" href="/images/favicon.ico">'
+                  + '<link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png">',
+    },
+    // ── Section Property Pro ─────────────────────────────────────────────────
+    {
+      prefix:       '/section-property-pro',
+      encFile:      'section_property_pro.enc',
+      baseHref:     '/section-property-pro/',
+      pageFilename: 'section-property-pro.html',
+      faviconLinks: '<link rel="icon" type="image/x-icon" href="/images/favicon.ico">'
+                  + '<link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png">',
+    },
+  ];
+
   const pathname = (req.url || '/').split('?')[0].replace(/\/+$/, '') || '/';
 
-  let encFile, baseHref, faviconLinks, pageFilename;
-  if (pathname === '' || pathname === '/' || pathname === '/index.html') {
-    encFile      = 'pc_suite.enc';
-    baseHref     = '/';
-    pageFilename = 'civil-engineering-suite.html';
-    faviconLinks = '<link rel="icon" type="image/x-icon" href="/images/favicon.ico">'
-                 + '<link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png">';
-  } else if (pathname.startsWith('/footing-pro')) {
-    encFile      = 'footing_pro.enc';
-    baseHref     = '/footing-pro/';
-    pageFilename = 'footing-pro.html';
-    faviconLinks = '<link rel="icon" type="image/png" sizes="32x32" href="/footing-pro/images/favicon-32.png">'
-                 + '<link rel="icon" type="image/png" sizes="192x192" href="/footing-pro/images/favicon-192.png">'
-                 + '<link rel="apple-touch-icon" sizes="180x180" href="/footing-pro/images/apple-touch-icon.png">';
-  } else {
+  // Homepage is an exact-root match; all others are prefix matches.
+  // Longer prefixes are matched first naturally because ROUTES is ordered
+  // most-specific → least-specific (no two apps share a prefix).
+  const route = pathname === '' || pathname === '/' || pathname === '/index.html'
+    ? ROUTES[0]
+    : ROUTES.slice(1).find(r => pathname.startsWith(r.prefix));
+
+  if (!route) {
     return sendErr(res, 404, 'Not Found', 'The requested path does not exist.');
   }
+
+  const { encFile, baseHref, faviconLinks, pageFilename } = route;
 
   // 4. Read and decrypt .enc ──────────────────────────────────────────────────
   const encPath = path.join(process.cwd(), 'public', encFile);
