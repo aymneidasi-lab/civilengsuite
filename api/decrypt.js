@@ -659,11 +659,44 @@ module.exports = async function handler(req, res) {
   html = html.replace(/<\/body>/i, protectionBundle + '</body>');
 
   // Minify — normalises all <script …> tags before injectNonces() runs
+  //
+  // FIX v4: Removed the .replace(/\n|\r/g, '') step.
+  //
+  // Root cause of the blank-page bug on all marketing pages:
+  //   The marketing pages (beam-pro, column-pro, deflection-pro, etc.) use
+  //   JavaScript // line comments inside their inline <script> blocks:
+  //
+  //     (function(){
+  //       // Scroll fade
+  //       var obs = new IntersectionObserver(...);   ← these lines
+  //       document.querySelectorAll('.fi')...         ← become dead code
+  //     })();
+  //
+  //   After .replace(/\n|\r/g, ''), all newlines are gone, so the browser sees:
+  //
+  //     (function(){ // Scroll fade var obs = new IntersectionObserver(...)
+  //                  document.querySelectorAll('.fi')... })();
+  //
+  //   In JS, a // comment lasts until end-of-line. With no newlines, the entire
+  //   rest of the function body is one big comment — dead code, never executed.
+  //   The IntersectionObserver was never created. '.fi' elements (opacity:0 by
+  //   default) never received the '.v' class, so every section of the page
+  //   was permanently invisible — only the dark hero background and the
+  //   watermark overlay remained visible, producing the blank-page symptom.
+  //
+  //   PC Suite and Footing Pro were unaffected because their embedded JS is
+  //   already minified (zero // comments). All 7 marketing pages had exactly
+  //   2 // lines each, consistently reproducing the blank page on every route.
+  //
+  //   Removing the newline step is the correct fix:
+  //     - Newline removal was a size-only optimisation with no security value.
+  //     - Removing it has zero effect on HTML rendering or the protection bundle.
+  //     - The XOR+base64 payload grows by <1% (newlines are a tiny fraction).
+  //     - HTML comment removal (step 1) and inter-tag whitespace (step 2) still run.
   html = html
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/>\s+</g,           '><')
     .replace(/\s{2,}/g,          ' ')
-    .replace(/\n|\r/g,           '')
     .trim();
 
   // Stamp nonce on every <script> tag (includes the bundle injected above)
