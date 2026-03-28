@@ -734,6 +734,7 @@ module.exports = async function handler(req, res) {
     + `}`
     + `})();`
     + `\u003c/script>`
+    + `<noscript><div style="font-family:sans-serif;padding:40px;text-align:center;color:#C17B1A;background:#0A1A2E;min-height:100vh;display:flex;align-items:center;justify-content:center;"><div><h2 style="margin-bottom:16px;">JavaScript Required</h2><p style="color:#8AA3C7;line-height:1.8;">Civil Engineering Suite requires JavaScript to run.<br>Please enable JavaScript in your browser settings and refresh the page.</p></div></div></noscript>`
     + `</body></html>`;
 
   res.setHeader('Content-Security-Policy',
