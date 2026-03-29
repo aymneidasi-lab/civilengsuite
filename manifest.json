@@ -1,0 +1,37 @@
+{
+  "name": "Civil Engineering Suite",
+  "short_name": "CivEngSuite",
+  "description": "Free ACI 318-compliant structural engineering tools by Eng. Aymn Asi. Footing Pro, Beam Pro, Column Pro and more — 100% offline.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0A1A2E",
+  "theme_color": "#C17B1A",
+  "lang": "en",
+  "dir": "ltr",
+  "categories": ["education", "productivity", "utilities"],
+  "icons": [
+    {
+      "src": "/images/apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Footing Pro v.2026",
+      "short_name": "Footing Pro",
+      "description": "Combined footing design — ACI 318",
+      "url": "/footing-pro/",
+      "icons": [{ "src": "/images/apple-touch-icon.png", "sizes": "180x180" }]
+    },
+    {
+      "name": "Section Property Pro",
+      "short_name": "Section Pro",
+      "description": "Cross-section properties calculator",
+      "url": "/section-property-pro/",
+      "icons": [{ "src": "/images/apple-touch-icon.png", "sizes": "180x180" }]
+    }
+  ]
+}

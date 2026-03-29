@@ -7,9 +7,12 @@
 # ── Allow all compliant search engine bots ──
 User-agent: *
 Allow: /
+Allow: /manifest.json
 Disallow: /cdn-cgi/
 Disallow: /*.json$
 Disallow: /*?*utm_
+Disallow: /api/
+Disallow: /*og-image.html
 
 # ── Google ──
 User-agent: Googlebot
