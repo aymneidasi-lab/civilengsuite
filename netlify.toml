@@ -1,3 +1,9 @@
+# ═══════════════════════════════════════════════════════════════════
+#  netlify.toml – Civil Engineering Suite
+#  Fully compatible with Vercel's public/ folder structure
+#  All images work without moving folders
+# ═══════════════════════════════════════════════════════════════════
+
 [build]
   publish = "."
   functions = "netlify/functions"
@@ -5,6 +11,52 @@
 [functions]
   included_files = ["public/**"]
   node_bundler = "esbuild"
+
+# ───────────────────────────────────────────────────────────────────
+#  STATIC ASSET REDIRECTS (mimic Vercel's public/ serving)
+#  Requests for /images/* → served from /public/images/*
+#  Requests for root-level .png, .ico, .jpg, .svg → served from /public/
+# ───────────────────────────────────────────────────────────────────
+
+[[redirects]]
+  from = "/images/*"
+  to = "/public/images/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/*.png"
+  to = "/public/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/*.ico"
+  to = "/public/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/*.jpg"
+  to = "/public/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/*.jpeg"
+  to = "/public/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/*.svg"
+  to = "/public/:splat"
+  status = 200
+  force = true
+
+# ───────────────────────────────────────────────────────────────────
+#  ENCRYPTED PAGE ROUTES (all 9 routes → decrypt function)
+# ───────────────────────────────────────────────────────────────────
 
 [[redirects]]
   from = "/"
@@ -108,6 +160,10 @@
   status = 200
   force = true
 
+# ───────────────────────────────────────────────────────────────────
+#  CSP REPORT & OTHER SPECIAL ROUTES
+# ───────────────────────────────────────────────────────────────────
+
 [[redirects]]
   from = "/api/csp-report"
   to = "/.netlify/functions/csp-report"
@@ -124,6 +180,10 @@
   to = "https://drive.google.com/uc?export=download&id=1EQ6UaHvwrchiV0U5vRdXR5YktOZMnfrQ&confirm=t"
   status = 302
   force = true
+
+# ───────────────────────────────────────────────────────────────────
+#  SECURITY HEADERS (applied to all static files)
+# ───────────────────────────────────────────────────────────────────
 
 [[headers]]
   for = "/*"
