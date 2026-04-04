@@ -1,7 +1,5 @@
 # ═══════════════════════════════════════════════════════════════════
-#  netlify.toml – Civil Engineering Suite
-#  Fully compatible with Vercel's public/ folder structure
-#  All images work without moving folders
+#  netlify.toml – Civil Engineering Suite (FINAL – ALL IMAGES FIXED)
 # ═══════════════════════════════════════════════════════════════════
 
 [build]
@@ -14,16 +12,16 @@
 
 # ───────────────────────────────────────────────────────────────────
 #  STATIC ASSET REDIRECTS (mimic Vercel's public/ serving)
-#  Requests for /images/* → served from /public/images/*
-#  Requests for root-level .png, .ico, .jpg, .svg → served from /public/
 # ───────────────────────────────────────────────────────────────────
 
+# Root images (/images/* → /public/images/*)
 [[redirects]]
   from = "/images/*"
   to = "/public/images/:splat"
   status = 200
   force = true
 
+# Root-level image files (favicon.ico, og-image.png, etc.)
 [[redirects]]
   from = "/*.png"
   to = "/public/:splat"
@@ -51,6 +49,55 @@
 [[redirects]]
   from = "/*.svg"
   to = "/public/:splat"
+  status = 200
+  force = true
+
+# ── Sub‑app images (each app has its own images folder inside public/)
+[[redirects]]
+  from = "/footing-pro/images/*"
+  to = "/public/footing-pro/images/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/beam-pro/images/*"
+  to = "/public/beam-pro/images/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/column-pro/images/*"
+  to = "/public/column-pro/images/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/deflection-pro/images/*"
+  to = "/public/deflection-pro/images/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/earthquake-pro/images/*"
+  to = "/public/earthquake-pro/images/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/mur-pro/images/*"
+  to = "/public/mur-pro/images/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/add-reft-pro/images/*"
+  to = "/public/add-reft-pro/images/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/section-property-pro/images/*"
+  to = "/public/section-property-pro/images/:splat"
   status = 200
   force = true
 
@@ -232,6 +279,54 @@
 
 [[headers]]
   for = "/images/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+    Cross-Origin-Resource-Policy = "cross-origin"
+
+[[headers]]
+  for = "/footing-pro/images/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+    Cross-Origin-Resource-Policy = "cross-origin"
+
+[[headers]]
+  for = "/beam-pro/images/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+    Cross-Origin-Resource-Policy = "cross-origin"
+
+[[headers]]
+  for = "/column-pro/images/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+    Cross-Origin-Resource-Policy = "cross-origin"
+
+[[headers]]
+  for = "/deflection-pro/images/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+    Cross-Origin-Resource-Policy = "cross-origin"
+
+[[headers]]
+  for = "/earthquake-pro/images/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+    Cross-Origin-Resource-Policy = "cross-origin"
+
+[[headers]]
+  for = "/mur-pro/images/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+    Cross-Origin-Resource-Policy = "cross-origin"
+
+[[headers]]
+  for = "/add-reft-pro/images/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+    Cross-Origin-Resource-Policy = "cross-origin"
+
+[[headers]]
+  for = "/section-property-pro/images/*"
   [headers.values]
     Cache-Control = "public, max-age=31536000, immutable"
     Cross-Origin-Resource-Policy = "cross-origin"
