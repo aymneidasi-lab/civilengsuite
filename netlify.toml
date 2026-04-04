@@ -1,3 +1,8 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+#  netlify.toml – Civil Engineering Suite (FINAL – ALL IMAGES WORK)
+#  Compatible with Vercel's public/ folder structure – no file moving required
+# ═══════════════════════════════════════════════════════════════════════════════
+
 [build]
   publish = "."
   functions = "netlify/functions"
@@ -6,18 +11,18 @@
   included_files = ["public/**"]
   node_bundler = "esbuild"
 
-# ─────────────────────────────────────────────────────────────
-# 1. STATIC ASSETS (must come FIRST – highest priority)
-# ─────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# 1. STATIC ASSETS (highest priority – before any route redirects)
+# ──────────────────────────────────────────────────────────────────────────────
 
-# Root images folder
+# Root images folder – maps /images/* to /public/images/*
 [[redirects]]
   from = "/images/*"
   to = "/public/images/:splat"
   status = 200
   force = true
 
-# Root-level image files (favicon.ico, og-image.png, hero backgrounds)
+# Root-level image files (favicon, og-image, hero backgrounds, etc.)
 [[redirects]]
   from = "/*.ico"
   to = "/public/:splat"
@@ -48,7 +53,32 @@
   status = 200
   force = true
 
-# Sub‑app images (each app’s own images folder)
+# Explicit redirects for specific background images (defense in depth)
+[[redirects]]
+  from = "/hero-bg.png"
+  to = "/public/images/hero-bg.png"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/images/hero-bg.png"
+  to = "/public/images/hero-bg.png"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/og-image.png"
+  to = "/public/images/og-image.png"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/images/og-image.png"
+  to = "/public/images/og-image.png"
+  status = 200
+  force = true
+
+# Sub‑app images (each app has its own images folder inside public/)
 [[redirects]]
   from = "/footing-pro/images/*"
   to = "/public/footing-pro/images/:splat"
@@ -97,9 +127,9 @@
   status = 200
   force = true
 
-# ─────────────────────────────────────────────────────────────
-# 2. ENCRYPTED PAGE ROUTES
-# ─────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# 2. ENCRYPTED PAGE ROUTES (all 9 routes → decrypt function)
+# ──────────────────────────────────────────────────────────────────────────────
 
 [[redirects]]
   from = "/"
@@ -203,9 +233,9 @@
   status = 200
   force = true
 
-# ─────────────────────────────────────────────────────────────
-# 3. CSP REPORT & OTHER ROUTES
-# ─────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# 3. CSP REPORT & OTHER SPECIAL ROUTES
+# ──────────────────────────────────────────────────────────────────────────────
 
 [[redirects]]
   from = "/api/csp-report"
@@ -224,9 +254,9 @@
   status = 302
   force = true
 
-# ─────────────────────────────────────────────────────────────
-# 4. SECURITY HEADERS (same as before)
-# ─────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# 4. SECURITY HEADERS (applied to all static files)
+# ──────────────────────────────────────────────────────────────────────────────
 
 [[headers]]
   for = "/*"
