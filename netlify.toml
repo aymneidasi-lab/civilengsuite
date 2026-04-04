@@ -1,7 +1,3 @@
-# ═══════════════════════════════════════════════════════════════════
-#  netlify.toml – Civil Engineering Suite (FINAL – ALL IMAGES FIXED)
-# ═══════════════════════════════════════════════════════════════════
-
 [build]
   publish = "."
   functions = "netlify/functions"
@@ -10,26 +6,26 @@
   included_files = ["public/**"]
   node_bundler = "esbuild"
 
-# ───────────────────────────────────────────────────────────────────
-#  STATIC ASSET REDIRECTS (mimic Vercel's public/ serving)
-# ───────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# 1. STATIC ASSETS (must come FIRST – highest priority)
+# ─────────────────────────────────────────────────────────────
 
-# Root images (/images/* → /public/images/*)
+# Root images folder
 [[redirects]]
   from = "/images/*"
   to = "/public/images/:splat"
   status = 200
   force = true
 
-# Root-level image files (favicon.ico, og-image.png, etc.)
+# Root-level image files (favicon.ico, og-image.png, hero backgrounds)
 [[redirects]]
-  from = "/*.png"
+  from = "/*.ico"
   to = "/public/:splat"
   status = 200
   force = true
 
 [[redirects]]
-  from = "/*.ico"
+  from = "/*.png"
   to = "/public/:splat"
   status = 200
   force = true
@@ -52,7 +48,7 @@
   status = 200
   force = true
 
-# ── Sub‑app images (each app has its own images folder inside public/)
+# Sub‑app images (each app’s own images folder)
 [[redirects]]
   from = "/footing-pro/images/*"
   to = "/public/footing-pro/images/:splat"
@@ -101,9 +97,9 @@
   status = 200
   force = true
 
-# ───────────────────────────────────────────────────────────────────
-#  ENCRYPTED PAGE ROUTES (all 9 routes → decrypt function)
-# ───────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# 2. ENCRYPTED PAGE ROUTES
+# ─────────────────────────────────────────────────────────────
 
 [[redirects]]
   from = "/"
@@ -207,9 +203,9 @@
   status = 200
   force = true
 
-# ───────────────────────────────────────────────────────────────────
-#  CSP REPORT & OTHER SPECIAL ROUTES
-# ───────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# 3. CSP REPORT & OTHER ROUTES
+# ─────────────────────────────────────────────────────────────
 
 [[redirects]]
   from = "/api/csp-report"
@@ -228,9 +224,9 @@
   status = 302
   force = true
 
-# ───────────────────────────────────────────────────────────────────
-#  SECURITY HEADERS (applied to all static files)
-# ───────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# 4. SECURITY HEADERS (same as before)
+# ─────────────────────────────────────────────────────────────
 
 [[headers]]
   for = "/*"
