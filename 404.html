@@ -9,25 +9,20 @@
 <meta http-equiv="X-Content-Type-Options" content="nosniff">
 <meta http-equiv="Referrer-Policy" content="strict-origin-when-cross-origin">
 <meta http-equiv="Permissions-Policy" content="camera=(), microphone=(), geolocation=(), payment=()">
-<!-- [FIX] Removed 'unsafe-inline' from script-src — this page has no executable inline scripts.
-     The JSON-LD block below is type="application/ld+json" (a data block, not JS) and does
-     not require unsafe-inline. Added object-src 'none' and worker-src 'none'.
-     [FIX v2] Removed 'unsafe-inline' from style-src — styles moved to external /404.css.
-     Removed 'https:' wildcard from img-src. Added manifest-src/media-src 'none'. -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; object-src 'none'; worker-src 'none'; manifest-src 'none'; media-src 'none'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'">
 
 <!-- ── SEO ── -->
 <title>404 — Page Not Found | Civil Engineering Suite</title>
 <meta name="robots" content="noindex, follow">
 <meta name="description" content="Page not found — Civil Engineering Suite by Eng. Aymn Asi. Return to the homepage or explore Footing Pro v.2026.">
-<link rel="canonical" href="https://civilengsuite.is-a.dev/">
+<link rel="canonical" href="https://civilengsuite.netlify.app/">
 
 <!-- ── Open Graph ── -->
 <meta property="og:type" content="website">
 <meta property="og:title" content="404 — Page Not Found | Civil Engineering Suite">
 <meta property="og:description" content="This page doesn't exist. Return to Civil Engineering Suite — professional structural engineering software by Eng. Aymn Asi.">
-<meta property="og:url" content="https://civilengsuite.is-a.dev/">
-<meta property="og:image" content="https://civilengsuite.is-a.dev/og-image.png">
+<meta property="og:url" content="https://civilengsuite.netlify.app/">
+<meta property="og:image" content="https://civilengsuite.netlify.app/og-image.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="Civil Engineering Suite — by Eng. Aymn Asi">
@@ -37,7 +32,7 @@
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="404 — Page Not Found | Civil Engineering Suite">
 <meta name="twitter:description" content="This page doesn't exist. Return to Civil Engineering Suite by Eng. Aymn Asi.">
-<meta name="twitter:image" content="https://civilengsuite.is-a.dev/og-image.png">
+<meta name="twitter:image" content="https://civilengsuite.netlify.app/og-image.png">
 
 <!-- ── JSON-LD ── -->
 <script type="application/ld+json">
@@ -46,11 +41,11 @@
   "@type": "WebPage",
   "name": "404 — Page Not Found",
   "description": "Error page for Civil Engineering Suite. The requested page does not exist.",
-  "url": "https://civilengsuite.is-a.dev/404",
+  "url": "https://civilengsuite.netlify.app/404",
   "isPartOf": {
     "@type": "WebSite",
     "name": "Civil Engineering Suite",
-    "url": "https://civilengsuite.is-a.dev"
+    "url": "https://civilengsuite.netlify.app"
   },
   "breadcrumb": {
     "@type": "BreadcrumbList",
@@ -59,13 +54,13 @@
         "@type": "ListItem",
         "position": 1,
         "name": "Civil Engineering Suite",
-        "item": "https://civilengsuite.is-a.dev/"
+        "item": "https://civilengsuite.netlify.app/"
       },
       {
         "@type": "ListItem",
         "position": 2,
         "name": "404 — Page Not Found",
-        "item": "https://civilengsuite.is-a.dev/404"
+        "item": "https://civilengsuite.netlify.app/404"
       }
     ]
   }
@@ -83,9 +78,6 @@
 <link rel="icon" type="image/x-icon" href="/images/favicon.ico">
 <link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png">
 
-<!-- FIX: Inline <style> block extracted to /404.css (external file).
-     This removes the requirement for 'unsafe-inline' in style-src CSP.
-     The external file is served with immutable cache headers in vercel.json. -->
 <link rel="stylesheet" href="/404.css">
 </head>
 <body>

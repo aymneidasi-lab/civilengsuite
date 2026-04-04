@@ -1,7 +1,7 @@
 # ═══════════════════════════════════════════════════════
 #  robots.txt — Civil Engineering Suite
-#  https://civilengsuite.is-a.dev
-#  Updated: 2026-03-28
+#  https://civilengsuite.netlify.app
+#  Updated: 2026-04-04
 # ═══════════════════════════════════════════════════════
 
 # ── Allow all compliant search engine bots ──
@@ -119,4 +119,4 @@ User-agent: cohere-ai
 Disallow: /
 
 # ── Sitemap ──
-Sitemap: https://civilengsuite.is-a.dev/sitemap.xml
+Sitemap: https://civilengsuite.netlify.app/sitemap.xml

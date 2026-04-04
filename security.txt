@@ -1,0 +1,11 @@
+Contact: mailto:aymneidasi@gmail.com
+Expires: 2027-03-28T00:00:00.000Z
+Preferred-Languages: en, ar
+Canonical: https://civilengsuite.netlify.app/.well-known/security.txt
+Policy: https://civilengsuite.netlify.app/security-policy
+Acknowledgments: https://civilengsuite.netlify.app/security-acknowledgments
+
+# Civil Engineering Suite — Security Contact
+# If you discover a security vulnerability on civilengsuite.netlify.app,
+# please report it responsibly to the contact above.
+# We appreciate responsible disclosure.
