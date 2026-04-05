@@ -1,0 +1,27 @@
+# _redirects — Civil Engineering Suite (Cloudflare Pages)
+# Remaps URL paths to the actual locations inside public/
+# RULE: specific paths must come BEFORE wildcards (first match wins)
+
+# ── Specific root images (must be before /*.png wildcard) ────────────────────
+/favicon.ico                    /public/images/favicon.ico              200
+/hero-bg.png                    /public/images/hero-bg.png              200
+/og-image.png                   /public/images/og-image.png             200
+/images/hero-bg.png             /public/images/hero-bg.png              200
+/images/og-image.png            /public/images/og-image.png             200
+
+# ── Root images folder ────────────────────────────────────────────────────────
+/images/*                       /public/images/:splat                   200
+
+# ── Sub-app image folders ─────────────────────────────────────────────────────
+/footing-pro/images/*           /public/footing-pro/images/:splat       200
+/beam-pro/images/*              /public/beam-pro/images/:splat          200
+/column-pro/images/*            /public/column-pro/images/:splat        200
+/deflection-pro/images/*        /public/deflection-pro/images/:splat    200
+/earthquake-pro/images/*        /public/earthquake-pro/images/:splat    200
+/mur-pro/images/*               /public/mur-pro/images/:splat           200
+/add-reft-pro/images/*          /public/add-reft-pro/images/:splat      200
+/section-property-pro/images/*  /public/section-property-pro/images/:splat 200
+
+# ── Special routes ────────────────────────────────────────────────────────────
+/.well-known/security.txt       /security.txt                           200
+/download                       https://drive.google.com/uc?export=download&id=1EQ6UaHvwrchiV0U5vRdXR5YktOZMnfrQ&confirm=t 302
