@@ -229,6 +229,10 @@ export async function onRequest(context) {
   const url  = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, '') || '/';
 
+  // ── Always pass through static/SEO files — never intercept these ──────────
+  const STATIC_PASSTHROUGH = /^\/(?:sitemap\.xml|robots\.txt|manifest\.json|favicon\.ico|og-image\.png|google[0-9a-f]+\.html|\.well-known\/.*)$/i;
+  if (STATIC_PASSTHROUGH.test(path)) return context.next();
+
   // ── Route matching: exact app root paths only ─────────────────────────────
   // Strip trailing slashes first (done above), then require the path to be
   // exactly equal to the route prefix — nothing more, nothing less.
