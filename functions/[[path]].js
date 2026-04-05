@@ -121,12 +121,13 @@ function allowRequest(ip) {
   const slot = _ipMap.get(ip);
   if (!slot || now - slot.t > RATE_WINDOW) { _ipMap.set(ip, { t: now, n: 1 }); return true; }
   slot.n += 1;
+  // Clean up stale entries inline (setInterval is not allowed in global scope)
+  if (_ipMap.size > 200) {
+    const cut = now - RATE_WINDOW * 2;
+    for (const [k, s] of _ipMap) if (s.t < cut) _ipMap.delete(k);
+  }
   return slot.n <= RATE_MAX;
 }
-setInterval(() => {
-  const cut = Date.now() - RATE_WINDOW * 2;
-  for (const [ip, s] of _ipMap) if (s.t < cut) _ipMap.delete(ip);
-}, RATE_WINDOW);
 
 // ── Utility helpers ───────────────────────────────────────────────────────────
 function hexToU8(hex) {
