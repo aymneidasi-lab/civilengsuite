@@ -1,6 +1,0 @@
-PUT THESE FILES IN THIS FOLDER:
-- hero-bg.png                   (suite homepage background image)
-- apple-touch-icon.png
-- favicon.ico
-
-- og-image.png                (social share preview image, 1200x630px)
