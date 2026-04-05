@@ -229,10 +229,14 @@ export async function onRequest(context) {
   const url  = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, '') || '/';
 
-  // ── Route matching: exact app root paths only (no sub‑paths like /footing-pro/images) ──
+  // ── Route matching: exact app root paths only ─────────────────────────────
+  // Strip trailing slashes first (done above), then require the path to be
+  // exactly equal to the route prefix — nothing more, nothing less.
+  // This means /footing-pro/images/screenshot.png is NOT matched and falls
+  // through to context.next() so Cloudflare serves it as a static asset.
   const route = (path === '' || path === '/' || path === '/index.html')
     ? ROUTES[0]
-    : ROUTES.slice(1).find(r => path === r.prefix || path === r.prefix + '/');
+    : ROUTES.slice(1).find(r => path === r.prefix);
 
   // Not an encrypted route → serve static file / apply _redirects
   if (!route) return context.next();
