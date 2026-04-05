@@ -1,6 +1,5 @@
 # ═══════════════════════════════════════════════════════════════════════════════
-#  netlify.toml – Civil Engineering Suite (FINAL – ALL IMAGES WORK)
-#  Compatible with Vercel's public/ folder structure – no file moving required
+#  netlify.toml – Civil Engineering Suite (FINAL – NO REDIRECT LOOPS)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 [build]
@@ -12,28 +11,32 @@
   node_bundler = "esbuild"
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1. STATIC ASSETS (highest priority – before any route redirects)
+# 1. STATIC ASSETS
 # ──────────────────────────────────────────────────────────────────────────────
+#
+# WHY NO WILDCARD REDIRECTS (/*.png, /*.ico, etc.):
+#   In Netlify, /*.png matches ANY path ending in .png — including paths that
+#   already start with /public/. This creates an infinite loop:
+#     /images/hero-bg.png → /public/images/hero-bg.png → (matches /*.png again)
+#     → /public/public/images/hero-bg.png → loops → 404
+#   Every loop burns edge requests and function invocations = credit drain.
+#   All real cases are covered by the explicit rules below.
 
-# Root images folder – maps /images/* to /public/images/*
+# /images/* folder — maps /images/anything to /public/images/anything
 [[redirects]]
   from = "/images/*"
   to = "/public/images/:splat"
   status = 200
   force = true
 
-# ── SPECIFIC FILES FIRST (must come before wildcards — wildcards win on first match) ──
-
-# FIX: favicon.ico lives in public/images/, not public/ root.
-# The browser always requests /favicon.ico — this must be explicit and BEFORE /*.ico
+# favicon — browser always requests /favicon.ico at root
 [[redirects]]
   from = "/favicon.ico"
   to = "/public/images/favicon.ico"
   status = 200
   force = true
 
-# FIX: hero-bg.png is referenced as a bare root path by pc_suite (base href = /).
-# Must come BEFORE /*.png or the wildcard catches it and sends it to /public/hero-bg.png (wrong).
+# Root-level images referenced by pc_suite (base href = /)
 [[redirects]]
   from = "/hero-bg.png"
   to = "/public/images/hero-bg.png"
@@ -46,53 +49,7 @@
   status = 200
   force = true
 
-[[redirects]]
-  from = "/images/hero-bg.png"
-  to = "/public/images/hero-bg.png"
-  status = 200
-  force = true
-
-[[redirects]]
-  from = "/images/og-image.png"
-  to = "/public/images/og-image.png"
-  status = 200
-  force = true
-
-# ── WILDCARDS (only reached for files NOT matched by specific rules above) ────
-
-# FIX: *.ico corrected → /public/images/:splat (all .ico files live in images/)
-[[redirects]]
-  from = "/*.ico"
-  to = "/public/images/:splat"
-  status = 200
-  force = true
-
-[[redirects]]
-  from = "/*.png"
-  to = "/public/:splat"
-  status = 200
-  force = true
-
-[[redirects]]
-  from = "/*.jpg"
-  to = "/public/:splat"
-  status = 200
-  force = true
-
-[[redirects]]
-  from = "/*.jpeg"
-  to = "/public/:splat"
-  status = 200
-  force = true
-
-[[redirects]]
-  from = "/*.svg"
-  to = "/public/:splat"
-  status = 200
-  force = true
-
-# ── Sub-app images ─────────────────────────────────────────────────────────────
-
+# Sub-app images — each app has its own images folder inside public/
 [[redirects]]
   from = "/footing-pro/images/*"
   to = "/public/footing-pro/images/:splat"
@@ -142,7 +99,7 @@
   force = true
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2. ENCRYPTED PAGE ROUTES (all 9 routes → decrypt function)
+# 2. ENCRYPTED PAGE ROUTES
 # ──────────────────────────────────────────────────────────────────────────────
 
 [[redirects]]
@@ -248,7 +205,7 @@
   force = true
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3. CSP REPORT & OTHER SPECIAL ROUTES
+# 3. SPECIAL ROUTES
 # ──────────────────────────────────────────────────────────────────────────────
 
 [[redirects]]
