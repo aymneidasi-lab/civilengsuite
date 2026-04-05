@@ -22,10 +22,48 @@
   status = 200
   force = true
 
-# Root-level image files (favicon, og-image, hero backgrounds, etc.)
+# ── SPECIFIC FILES FIRST (must come before wildcards — wildcards win on first match) ──
+
+# FIX: favicon.ico lives in public/images/, not public/ root.
+# The browser always requests /favicon.ico — this must be explicit and BEFORE /*.ico
+[[redirects]]
+  from = "/favicon.ico"
+  to = "/public/images/favicon.ico"
+  status = 200
+  force = true
+
+# FIX: hero-bg.png is referenced as a bare root path by pc_suite (base href = /).
+# Must come BEFORE /*.png or the wildcard catches it and sends it to /public/hero-bg.png (wrong).
+[[redirects]]
+  from = "/hero-bg.png"
+  to = "/public/images/hero-bg.png"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/og-image.png"
+  to = "/public/images/og-image.png"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/images/hero-bg.png"
+  to = "/public/images/hero-bg.png"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/images/og-image.png"
+  to = "/public/images/og-image.png"
+  status = 200
+  force = true
+
+# ── WILDCARDS (only reached for files NOT matched by specific rules above) ────
+
+# FIX: *.ico corrected → /public/images/:splat (all .ico files live in images/)
 [[redirects]]
   from = "/*.ico"
-  to = "/public/:splat"
+  to = "/public/images/:splat"
   status = 200
   force = true
 
@@ -53,32 +91,8 @@
   status = 200
   force = true
 
-# Explicit redirects for specific background images (defense in depth)
-[[redirects]]
-  from = "/hero-bg.png"
-  to = "/public/images/hero-bg.png"
-  status = 200
-  force = true
+# ── Sub-app images ─────────────────────────────────────────────────────────────
 
-[[redirects]]
-  from = "/images/hero-bg.png"
-  to = "/public/images/hero-bg.png"
-  status = 200
-  force = true
-
-[[redirects]]
-  from = "/og-image.png"
-  to = "/public/images/og-image.png"
-  status = 200
-  force = true
-
-[[redirects]]
-  from = "/images/og-image.png"
-  to = "/public/images/og-image.png"
-  status = 200
-  force = true
-
-# Sub‑app images (each app has its own images folder inside public/)
 [[redirects]]
   from = "/footing-pro/images/*"
   to = "/public/footing-pro/images/:splat"
@@ -255,7 +269,7 @@
   force = true
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4. SECURITY HEADERS (applied to all static files)
+# 4. SECURITY HEADERS
 # ──────────────────────────────────────────────────────────────────────────────
 
 [[headers]]
