@@ -1,6 +1,13 @@
 # _redirects — Civil Engineering Suite (Cloudflare Pages)
 # Remaps URL paths to the actual locations inside public/
 # RULE: specific paths must come BEFORE wildcards (first match wins)
+#
+# FIX LOG (2026-04-14):
+# [F1] Added /footing-pro/og-image.png redirect.
+#      The og:image meta tag and sitemap both referenced this path,
+#      but no redirect existed → Google got a 404 for the OG image.
+#      The sitemap.xml has also been updated to use /footing-pro/images/og-image.png
+#      but this redirect is kept as a permanent fallback for any cached references.
 
 # ── Specific root images (must be before /*.png wildcard) ────────────────────
 /favicon.ico                    /public/images/favicon.ico              200
@@ -11,6 +18,9 @@
 
 # ── Root images folder ────────────────────────────────────────────────────────
 /images/*                       /public/images/:splat                   200
+
+# ── [F1] FIX: footing-pro og-image without /images/ was a 404 ────────────────
+/footing-pro/og-image.png       /public/footing-pro/images/og-image.png 200
 
 # ── Sub-app image folders ─────────────────────────────────────────────────────
 /footing-pro/images/*           /public/footing-pro/images/:splat       200

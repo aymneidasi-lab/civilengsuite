@@ -1,7 +1,16 @@
 # ═══════════════════════════════════════════════════════
 #  robots.txt — Civil Engineering Suite
 #  https://civilengsuite.pages.dev
-#  Updated: 2026-04-04
+#  Updated: 2026-04-14
+#
+#  FIX LOG (2026-04-14):
+#  [F1] Removed: Disallow: /*?*utm_
+#       → Was blocking Google from discovering canonical URLs through
+#         shared social/email links that include UTM parameters.
+#         Google ignores UTM params for deduplication — no need to block.
+#  [F2] Added: Disallow: /public/
+#       → Prevents crawlers from reaching encrypted .enc files.
+#  [F3] Kept /manifest.json Allow BEFORE /*.json$ Disallow (order correct).
 # ═══════════════════════════════════════════════════════
 
 # ── Allow all compliant search engine bots ──
@@ -10,7 +19,8 @@ Allow: /
 Allow: /manifest.json
 Disallow: /cdn-cgi/
 Disallow: /*.json$
-Disallow: /*?*utm_
+# [F2] Block encrypted source files from being crawled / indexed
+Disallow: /public/
 Disallow: /api/
 Disallow: /*og-image.html
 
@@ -18,10 +28,13 @@ Disallow: /*og-image.html
 User-agent: Googlebot
 Allow: /
 Disallow: /cdn-cgi/
+Disallow: /public/
 
 User-agent: Googlebot-Image
 Allow: /
 Allow: /images/
+Allow: /footing-pro/images/
+Disallow: /public/
 
 User-agent: Googlebot-News
 Allow: /
@@ -30,6 +43,7 @@ Allow: /
 User-agent: Bingbot
 Allow: /
 Disallow: /cdn-cgi/
+Disallow: /public/
 
 User-agent: MSNBot
 Allow: /

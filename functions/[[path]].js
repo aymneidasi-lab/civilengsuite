@@ -8,10 +8,19 @@
  * Environment variables:
  *   CES_DECRYPT_KEY — 64-character hex AES-256-GCM key (required)
  *   CES_XOR_KEY     — 2-character hex XOR key (optional, default 0x5A)
+ *
+ * SEO FIX LOG (2026-04-14):
+ *   [F1] BOT_RE — added googlebot-image, adsbot-google, perplexitybot, ia_archiver
+ *   [F2] botHtml — strip <noscript><style>body{display:none} before serving to crawlers
+ *   [F3] botHtml — fix /footing-pro/og-image.png → /footing-pro/images/og-image.png
+ *   [F4] bot response — add Vary:User-Agent (prevents CDN cache poisoning)
+ *   [F5] bot response — change Cache-Control to private (safe) + keep max-age for browser
+ *   [F6] both responses — add HSTS, Referrer-Policy, Permissions-Policy headers
  */
 
 // ── Bot / crawler UA pattern ──────────────────────────────────────────────────
-const BOT_RE = /googlebot|google-inspectiontool|googleother|bingbot|yandexbot|duckduckbot|baiduspider|applebot|slurp|facebookexternalhit|twitterbot|linkedinbot|whatsapp|telegrambot|slackbot|discordbot/i;
+// [F1] FIXED: added googlebot-image, adsbot-google, perplexitybot, ia_archiver
+const BOT_RE = /googlebot|googlebot-image|google-inspectiontool|googleother|adsbot-google|bingbot|yandexbot|duckduckbot|baiduspider|applebot|slurp|facebookexternalhit|twitterbot|linkedinbot|whatsapp|telegrambot|slackbot|discordbot|perplexitybot|ia_archiver/i;
 
 // ── Route table — only the app root paths (no sub‑paths like /footing-pro/images) ──
 const ROUTES = [
@@ -108,6 +117,19 @@ const CSP_COMMON = [
   "report-uri /api/csp-report",
 ].join('; ');
 
+// [F6] Shared security headers applied to EVERY response this function emits
+// (Cloudflare _headers does NOT apply to function responses — must be set here)
+const SHARED_SECURITY_HEADERS = {
+  'X-Content-Type-Options':          'nosniff',
+  'X-Frame-Options':                 'DENY',
+  'Strict-Transport-Security':       'max-age=31536000; includeSubDomains; preload',
+  'Referrer-Policy':                 'strict-origin-when-cross-origin',
+  'Permissions-Policy':              'camera=(), microphone=(), geolocation=(), payment=(), accelerometer=(), gyroscope=(), magnetometer=(), usb=(), display-capture=(), screen-wake-lock=(), ambient-light-sensor=(), autoplay=(), clipboard-read=()',
+  'Cross-Origin-Opener-Policy':      'same-origin',
+  'X-DNS-Prefetch-Control':          'off',
+  'X-Permitted-Cross-Domain-Policies': 'none',
+};
+
 // ── Utility helpers ───────────────────────────────────────────────────────────
 function hexToU8(hex) {
   const out = new Uint8Array(hex.length >> 1);
@@ -159,7 +181,8 @@ function errResponse(status, title, message) {
     { status, headers: {
       'Content-Type': 'text/html; charset=utf-8',
       'Content-Security-Policy': `default-src 'none'; style-src 'nonce-${nonce}'`,
-      'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Cache-Control': 'no-store',
+      'Cache-Control': 'no-store',
+      ...SHARED_SECURITY_HEADERS,
     }}
   );
 }
@@ -234,10 +257,6 @@ export async function onRequest(context) {
   if (STATIC_PASSTHROUGH.test(path)) return context.next();
 
   // ── Route matching: exact app root paths only ─────────────────────────────
-  // Strip trailing slashes first (done above), then require the path to be
-  // exactly equal to the route prefix — nothing more, nothing less.
-  // This means /footing-pro/images/screenshot.png is NOT matched and falls
-  // through to context.next() so Cloudflare serves it as a static asset.
   const route = (path === '' || path === '/' || path === '/index.html')
     ? ROUTES[0]
     : ROUTES.slice(1).find(r => path === r.prefix);
@@ -287,22 +306,48 @@ export async function onRequest(context) {
   const ua = request.headers.get('User-Agent') || '';
   if (BOT_RE.test(ua)) {
     const host = url.host;
-    let botHtml = html.replace(
+    let botHtml = html;
+
+    // Fix any noindex directives so crawlers can index properly
+    botHtml = botHtml.replace(
       /<meta\s+name="robots"\s+content="noindex[^"]*"/gi,
       '<meta name="robots" content="index, follow"'
     );
+
+    // Fix og:image / twitter:image host references
     botHtml = botHtml.replace(
       /(<meta\s+(?:property|name)="(?:og:image|og:image:secure_url|twitter:image)"\s+content=")https:\/\/[^/]+(\/[^"]*")/gi,
       `$1https://${host}$2`
     );
+
+    // [F3] FIX: /footing-pro/og-image.png has no _redirects entry → 404.
+    // Rewrite to the correct path that IS covered by the /footing-pro/images/* redirect.
+    botHtml = botHtml.replace(
+      /(https?:\/\/[^"']+)\/footing-pro\/og-image\.png/gi,
+      '$1/footing-pro/images/og-image.png'
+    );
+
+    // [F2] FIX: Strip the body-hiding noscript style that blinds Googlebot's
+    // first-pass HTML-only crawl. Matches both homepage and footing-pro variants.
+    // SECURITY-SAFE: only touches the <noscript> fallback, zero impact on JS paths.
+    botHtml = botHtml.replace(
+      /(<noscript>)\s*<style>[^<]*?body\s*\{[^}]*?display\s*:\s*none[^}]*?\}[^<]*?<\/style>/gi,
+      '$1'
+    );
+
     botHtml = injectNonces(botHtml, cspNonce);
+
     return new Response(botHtml, { status: 200, headers: {
-      'Content-Type': 'text/html; charset=utf-8',
-      'Cache-Control': 'public, max-age=3600, must-revalidate',
-      'X-Robots-Tag': 'index, follow',
+      'Content-Type':            'text/html; charset=utf-8',
+      // [F5] FIX: private prevents CDN from storing the decrypted HTML and
+      // accidentally serving it to human visitors. Browser still caches 1h.
+      'Cache-Control':           'private, max-age=3600, must-revalidate',
+      // [F4] FIX: Vary:User-Agent as a belt-and-suspenders guard so any CDN
+      // layer that ignores Cache-Control=private won't serve bot HTML to humans.
+      'Vary':                    'User-Agent',
+      'X-Robots-Tag':            'index, follow',
       'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}'`,
-      'X-Content-Type-Options': 'nosniff',
-      'X-Frame-Options': 'DENY',
+      ...SHARED_SECURITY_HEADERS,
     }});
   }
 
@@ -355,10 +400,9 @@ export async function onRequest(context) {
     + `</body></html>`;
 
   return new Response(bootstrap, { status: 200, headers: {
-    'Content-Type': 'text/html; charset=utf-8',
-    'Cache-Control': 'no-store',
-    'X-Content-Type-Options': 'nosniff',
-    'X-Frame-Options': 'DENY',
+    'Content-Type':            'text/html; charset=utf-8',
+    'Cache-Control':           'no-store',
     'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}'`,
+    ...SHARED_SECURITY_HEADERS,
   }});
 }

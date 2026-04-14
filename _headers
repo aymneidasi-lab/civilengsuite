@@ -1,6 +1,16 @@
 # _headers — Civil Engineering Suite (Cloudflare Pages)
 # Security headers for static files (images, CSS, sitemap, etc.)
 # Headers for encrypted pages are set directly in functions/[[path]].js
+# NOTE: These headers apply ONLY to static assets — NOT to Pages Function responses.
+#       All security headers for function routes (/, /footing-pro/, etc.) are
+#       applied programmatically inside functions/[[path]].js via SHARED_SECURITY_HEADERS.
+#
+# FIX LOG (2026-04-14):
+# [F1] Added /public/* block: X-Robots-Tag + Cache-Control + Content-Disposition
+#      → Prevents Google from indexing encrypted .enc files. Without this,
+#        Googlebot could crawl /public/pc_suite.enc and waste crawl budget.
+# [F2] Added Cache-Control to /* catch-all for static HTML sub-app pages
+#      (beam-pro/index.html, column-pro/index.html, etc.)
 
 /*
   X-Frame-Options: DENY
@@ -13,6 +23,14 @@
   Cross-Origin-Embedder-Policy: unsafe-none
   Cross-Origin-Resource-Policy: same-origin
   Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), accelerometer=(), gyroscope=(), magnetometer=(), usb=(), display-capture=(), screen-wake-lock=(), ambient-light-sensor=(), autoplay=(), clipboard-read=()
+  # [F2] Default cache for static HTML pages (sub-apps: beam-pro etc.)
+  Cache-Control: public, max-age=600, must-revalidate
+
+# [F1] FIX: Block crawlers from indexing encrypted .enc source files
+/public/*
+  X-Robots-Tag: noindex, noarchive, nosnippet
+  Cache-Control: no-store
+  Content-Disposition: attachment
 
 /404.html
   Cache-Control: public, max-age=60
