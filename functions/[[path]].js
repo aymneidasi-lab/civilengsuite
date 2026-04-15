@@ -1,25 +1,9 @@
 /**
  * Civil Engineering Suite — Cloudflare Pages Function
- * FINAL v4.0 — Comprehensive bot rendering & indexing fix
- * 
- * ─── SUMMARY OF FIXES ─────────────────────────────────────────────────────────
- * 1.  Robust decryption: Web Crypto operation wrapped in try/catch with explicit
- *     error logging. Prevents silent failures that caused empty pages.
- * 2.  Verified bot detection: Uses Cloudflare's `cf.bot_management.verified_bot`
- *     header (when available) to accurately identify legitimate crawlers.
- * 3.  Fallback HTML: When decryption fails for a verified bot, a lightweight
- *     503 page is served instead of a 500 error. Googlebot retries later.
- * 4.  Script error suppression: All remaining inline scripts are wrapped in
- *     try/catch blocks, preventing any single exception from halting the render.
- * 5.  Permissions‑Policy fix: Removed the problematic 'ambient-light-sensor'
- *     directive. Eliminates the GSC console warning.
- * 6.  Cache‑Control: Bot responses use 'private, max‑age=3600' to prevent CDN
- *     from caching decrypted HTML and accidentally serving it to humans.
- * 7.  Vary: User‑Agent: Ensures bot and human caches remain separate.
- * 
- * SECURITY NOTE: The human path (XOR bootstrap) is COMPLETELY UNTOUCHED.
- * All protection scripts remain active for real visitors.
- * ─────────────────────────────────────────────────────────────────────────────
+ * FINAL v4.1 — Safe property access, no runtime exceptions
+ *
+ * FIX: Replaced optional chaining with safe guard to prevent Worker 1101 errors.
+ * All other logic unchanged.
  */
 
 // ── Bot / crawler UA pattern (expanded coverage) ─────────────────────────────
@@ -28,11 +12,17 @@ const BOT_UA_PATTERN = /googlebot|googlebot-image|google-inspectiontool|googleot
 /**
  * Determine if the request is from a legitimate search engine crawler.
  * Uses Cloudflare Bot Management when available, falling back to User‑Agent.
+ * SAFE VERSION: no optional chaining, guards against missing `cf` object.
  */
 function isVerifiedBot(request) {
-  // Primary: Cloudflare's verified bot flag (most reliable)
-  const cfVerifiedBot = request.cf?.bot_management?.verified_bot;
-  if (cfVerifiedBot === true) return true;
+  try {
+    // Primary: Cloudflare's verified bot flag (most reliable)
+    if (request.cf && request.cf.bot_management && request.cf.bot_management.verified_bot === true) {
+      return true;
+    }
+  } catch (e) {
+    // Ignore errors accessing cf object – fall back to UA
+  }
 
   // Secondary: User‑Agent pattern match
   const ua = request.headers.get('User-Agent') || '';
@@ -208,8 +198,6 @@ async function decryptEnc(encData, keyHex) {
     );
     return new TextDecoder().decode(pt);
   } catch (e) {
-    // Web Crypto can throw OperationError for various reasons (corrupted data,
-    // wrong key, etc.) — wrap with a clear message.
     throw new Error(`WebCrypto decrypt failed: ${e.message}`);
   }
 }
@@ -404,7 +392,6 @@ export async function onRequest(context) {
   } catch (e) {
     console.error('[ces:decrypt] Decryption failed for', encFile, '—', e.message);
     // For verified bots, serve a lightweight 503 page so Google retries later.
-    // Prevents empty cached responses that cause blank page indexing.
     if (isVerifiedBot(request)) {
       const fallbackHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${route.prefix === '/' ? 'Civil Engineering Suite' : route.prefix.slice(1)}</title></head><body><h1>Content Temporarily Unavailable</h1><p>Please try again in a few minutes.</p></body></html>`;
       return new Response(fallbackHtml, {
