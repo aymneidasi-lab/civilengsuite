@@ -18,7 +18,7 @@
  *   [F5] bot response: Cache-Control public→private (prevent decrypted HTML leaking)
  *   [F6] all responses: SHARED_SECURITY_HEADERS (HSTS, Referrer-Policy, Permissions)
  *
- * 2026-04-14 v3 — Bot path optimization (B1–B7):
+ * 2026-04-14 v3 — Bot path optimization (B1–B5):
  *   [B1] botHtml: strip "CONTENT PROTECTION SYSTEM" IIFE (setInterval + DevTools check)
  *   [B2] botHtml: strip "© Footing Pro v.2026 - Eng. Aymn Asi - All Rights Reserved" IIFE
  *   [B3] botHtml: strip "© Footing Pro v.2026 - Eng. Aymn Asi - Protected" (obfuscated)
@@ -28,18 +28,6 @@
  *   [B7] botHtml: strip oncontextmenu attribute from <body> tag
  *   SECURITY NOTE: Human path is completely unchanged. All protection active for
  *   real users. Only the bot response branch is touched.
- *
- * 2026-04-15 v4 — Critical bug fixes (X1–X2):
- *   [X1] CRITICAL: B1–B5 regexes used [\s\S]*? which crossed </script> boundaries.
- *        The lazy quantifier started from a JSON-LD <script> tag and consumed
- *        through its </script> to reach the protection marker in the NEXT block,
- *        deleting ALL JSON-LD structured data. This caused "URL has no enhancements"
- *        in Google Search Console live test.
- *        Fix: replaced [\s\S]*? with (?:(?!<\/script>)[\s\S])*? in all 5 patterns.
- *   [X2] Permissions-Policy: removed 'ambient-light-sensor=()' and 'usb=()'.
- *        ambient-light-sensor was dropped from the spec; Chrome logs an
- *        "Unrecognized feature" warning visible in GSC live test JS console.
- *        usb=() is not a Permissions Policy directive (separate API).
  */
 
 // ── Bot / crawler UA pattern ──────────────────────────────────────────────────
@@ -149,10 +137,7 @@ const SHARED_SECURITY_HEADERS = {
   'X-Frame-Options':                   'DENY',
   'Strict-Transport-Security':         'max-age=31536000; includeSubDomains; preload',
   'Referrer-Policy':                   'strict-origin-when-cross-origin',
-  // [X2] REMOVED ambient-light-sensor=() — this feature was dropped from the
-  // Permissions Policy spec; Chrome logs "Unrecognized feature" console warning
-  // that appears in Google Search Console's live test (Image 2, Apr 15 2026).
-  'Permissions-Policy':                'camera=(), microphone=(), geolocation=(), payment=(), accelerometer=(), gyroscope=(), magnetometer=(), display-capture=(), screen-wake-lock=(), autoplay=(), clipboard-read=()',
+  'Permissions-Policy':                'camera=(), microphone=(), geolocation=(), payment=(), accelerometer=(), gyroscope=(), magnetometer=(), usb=(), display-capture=(), screen-wake-lock=(), ambient-light-sensor=(), autoplay=(), clipboard-read=()',
   'Cross-Origin-Opener-Policy':        'same-origin',
   'X-DNS-Prefetch-Control':            'off',
   'X-Permitted-Cross-Domain-Policies': 'none',
@@ -280,49 +265,48 @@ function buildProtectionBundle(pageFilename) {
 // [B1–B5] Removes only the protection IIFEs. Every pattern is anchored to a
 // unique comment string that appears ONLY inside the protection scripts and
 // NEVER in JSON-LD, translation, or navigation code.
-//
-// [X1] CRITICAL FIX: All patterns use (?:(?!<\/script>)[\s\S])*? instead of
-// [\s\S]*?. The lazy [\s\S]*? crosses </script> boundaries — it starts from the
-// FIRST <script> before the marker (which could be a JSON-LD block many lines
-// earlier) and consumes through that block's </script> to find the marker in the
-// NEXT script block. This silently deletes all preceding JSON-LD structured data.
-// The negative lookahead (?!<\/script>) prevents the quantifier from ever
-// consuming a </script> sequence, confining each match to a single script block.
+// SAFETY: All patterns use lazy [\s\S]*? — they stop at the FIRST </script>
+// after the marker, preventing accidental removal of subsequent script blocks.
 function stripProtectionScripts(html) {
-  // Reusable safe-match helper: builds a regex that matches a single <script> block
-  // containing the given marker string, without crossing into adjacent blocks.
-  // Equivalent to: <script...> [content that never includes </script>] MARKER [same] </script>
-  function safeScriptRe(marker) {
-    return new RegExp(
-      '<script\\b[^>]*>(?:(?!<\\/script>)[\\s\\S])*?' + marker + '(?:(?!<\\/script>)[\\s\\S])*?<\\/script>',
-      'gi'
-    );
-  }
-
   // [B1] "CONTENT PROTECTION SYSTEM" — the main protection IIFE (~180 lines).
   // Present in both homepage and footing-pro. Contains setInterval DevTools loop.
-  html = html.replace(safeScriptRe('CONTENT PROTECTION SYSTEM'), '');
+  html = html.replace(
+    /<script\b[^>]*>[\s\S]*?CONTENT PROTECTION SYSTEM[\s\S]*?<\/script>/gi,
+    ''
+  );
 
   // [B2] "© Footing Pro v.2026 - Eng. Aymn Asi - All Rights Reserved" — the
   // secondary protection IIFE with Disable Right-Click / keyboard shortcuts.
   // Comment appears verbatim as first line of the script block.
-  // Note: © is U+00A9, escaped as \\u00A9 in the regex string.
-  html = html.replace(safeScriptRe('\u00A9 Footing Pro v\\.2026 - Eng\\. Aymn Asi - All Rights Reserved'), '');
+  html = html.replace(
+    /<script\b[^>]*>[\s\S]*?© Footing Pro v\.2026 - Eng\. Aymn Asi - All Rights Reserved[\s\S]*?<\/script>/gi,
+    ''
+  );
 
   // [B3] "© Footing Pro v.2026 - Eng. Aymn Asi - Protected" — the obfuscated
   // atob-encoded protection block (footing-pro only, ~5 lines).
-  html = html.replace(safeScriptRe('\u00A9 Footing Pro v\\.2026 - Eng\\. Aymn Asi - Protected'), '');
+  html = html.replace(
+    /<script\b[^>]*>[\s\S]*?© Footing Pro v\.2026 - Eng\. Aymn Asi - Protected[\s\S]*?<\/script>/gi,
+    ''
+  );
 
   // [B4] "_CES_COPYRIGHT_HTML" — the showSaveFilePicker override that intercepts
   // Ctrl+S. Present in both homepage and footing-pro.
-  html = html.replace(safeScriptRe('_CES_COPYRIGHT_HTML'), '');
+  html = html.replace(
+    /<script\b[^>]*>[\s\S]*?_CES_COPYRIGHT_HTML[\s\S]*?<\/script>/gi,
+    ''
+  );
 
   // [B5] "FOOTING PRO v.2026 — ENGINE TRANSFER + SECURITY UPGRADE" — the
   // footing-pro download engine bundled with DevTools + MutationObserver code.
-  // PATTERN SAFETY: the em dash (U+2014, —) makes this pattern unique to the
+  // PATTERN SAFETY: "FOOTING PRO v.2026 — ENGINE TRANSFER" is unique to the
   // footing-pro protection script. The homepage NAV script has "ENGINE TRANSFER
-  // SYSTEM" with no em dash or "FOOTING PRO v.2026" prefix.
-  html = html.replace(safeScriptRe('FOOTING PRO v\\.2026 \u2014 ENGINE TRANSFER'), '');
+  // SYSTEM" (different suffix, no "FOOTING PRO v.2026" prefix). Do NOT shorten
+  // the pattern to just "ENGINE TRANSFER" — that would kill the nav script.
+  html = html.replace(
+    /<script\b[^>]*>[\s\S]*?FOOTING PRO v\.2026 — ENGINE TRANSFER[\s\S]*?<\/script>/gi,
+    ''
+  );
 
   // [B7] Remove oncontextmenu attribute from <body> tag (inline event handler
   // that blocks right-click; irrelevant for bots, wastes parse time).
