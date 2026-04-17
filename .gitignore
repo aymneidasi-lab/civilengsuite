@@ -33,3 +33,4 @@ desktop.ini
 # Node (if you ever add build tools)
 node_modules/
 .vercel/
+PAYMENT_SETUP_GUIDE.md

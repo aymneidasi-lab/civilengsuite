@@ -11,6 +11,17 @@
 #        Googlebot could crawl /public/pc_suite.enc and waste crawl budget.
 # [F2] Added Cache-Control to /* catch-all for static HTML sub-app pages
 #      (beam-pro/index.html, column-pro/index.html, etc.)
+#
+# FIX LOG (2026-04-17): PAYMENT GATEWAY INTEGRATION
+# [P1] Added /payment/* block:
+#      → Overrides CSP to allow Paymob SDK (accept.paymob.com) for script, connect, frame
+#      → Overrides Permissions-Policy to REMOVE payment=() which blocks the payment API
+#      → Sets Cache-Control: no-store (payment pages must never be cached)
+#      → Sets X-Robots-Tag: noindex (payment pages must not be indexed)
+# [P2] NOTE: /api/payment/* routes are Cloudflare Pages Functions — they do NOT
+#      inherit _headers rules. Security headers are applied inside each function file.
+#      Cloudflare `_headers` rules: later (more-specific) path rules override
+#      earlier (less-specific) rules for duplicate headers on the same response.
 
 /*
   X-Frame-Options: DENY
@@ -22,7 +33,7 @@
   Cross-Origin-Opener-Policy: same-origin
   Cross-Origin-Embedder-Policy: unsafe-none
   Cross-Origin-Resource-Policy: same-origin
-  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), accelerometer=(), gyroscope=(), magnetometer=(), usb=(), display-capture=(), screen-wake-lock=(), ambient-light-sensor=(), autoplay=(), clipboard-read=()
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), accelerometer=(), gyroscope=(), magnetometer=(), display-capture=(), screen-wake-lock=(), ambient-light-sensor=(), autoplay=(), clipboard-read=()
   # [F2] Default cache for static HTML pages (sub-apps: beam-pro etc.)
   Cache-Control: public, max-age=600, must-revalidate
 
@@ -91,3 +102,32 @@
 /.well-known/*
   Cache-Control: public, max-age=3600
   Content-Type: text/plain; charset=utf-8
+
+# ════════════════════════════════════════════════════════════════
+# [P1] PAYMENT PAGES — Override CSP and Permissions-Policy
+#      Placed AFTER /* so it takes precedence for /payment/* routes.
+#
+#  CSP changes from global default:
+#   script-src:  adds https://accept.paymob.com  (Paymob SDK: pay.js)
+#   connect-src: adds https://accept.paymob.com  (Paymob API calls from SDK)
+#   frame-src:   adds https://accept.paymob.com  (3DS authentication iframes)
+#   img-src:     adds https://*.paymob.com        (Card brand logos in modal)
+#   style-src:   adds 'unsafe-inline'             (Paymob SDK injects inline styles)
+#   form-action: 'none'                           (all submission via JS fetch only)
+#
+#  Permissions-Policy changes:
+#   payment=() REMOVED  → allows browser Payment Request API used by Paymob/Apple Pay
+#
+#  Cache-Control: no-store  → payment pages must NEVER be cached by any proxy
+#  X-Robots-Tag: noindex    → checkout flow must not be indexed
+# ════════════════════════════════════════════════════════════════
+
+/payment/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://accept.paymob.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://*.paymob.com https://paymob.com; connect-src 'self' https://accept.paymob.com; frame-src https://accept.paymob.com; frame-ancestors 'none'; form-action 'none'; base-uri 'self'; upgrade-insecure-requests; report-uri /api/csp-report
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), accelerometer=(), gyroscope=(), magnetometer=(), display-capture=(), screen-wake-lock=(), autoplay=(), clipboard-read=()
+  Cache-Control: no-store
+  X-Robots-Tag: noindex, nofollow
+  Referrer-Policy: strict-origin-when-cross-origin
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Strict-Transport-Security: max-age=31536000; includeSubDomains; preload

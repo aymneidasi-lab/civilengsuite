@@ -40,6 +40,17 @@
  *        ambient-light-sensor was dropped from the spec; Chrome logs an
  *        "Unrecognized feature" warning visible in GSC live test JS console.
  *        usb=() is not a Permissions Policy directive (separate API).
+ *
+ * 2026-04-17 v5 — Payment gateway integration (P1–P3):
+ *   [P1] STATIC_PASSTHROUGH: added /payment/* and /api/payment/* so this
+ *        catch-all function never intercepts payment routes. Payment pages are
+ *        static HTML; payment API routes are dedicated CF Pages Functions.
+ *   [P2] CSP_COMMON: form-action expanded to include site origin explicitly,
+ *        allowing fetch()-based payment initiation from encrypted app pages.
+ *   [P3] SHARED_SECURITY_HEADERS: removed payment=() from Permissions-Policy.
+ *        This function only serves encrypted app pages — not the payment pages.
+ *        payment=() on app pages is unnecessary; it is correctly absent from
+ *        the /payment/* _headers block which governs the checkout flow.
  */
 
 // ── Bot / crawler UA pattern ──────────────────────────────────────────────────
@@ -124,6 +135,10 @@ const ROUTES = [
 ];
 
 // ── CSP common (matches api/decrypt.js CSP_COMMON exactly) ───────────────────
+// [P2] form-action: added site origin explicitly to support payment initiation
+//      fetch() calls from encrypted app pages (belt-and-suspenders; same-origin
+//      fetch is already permitted by connect-src 'self', but form-action governs
+//      <form> submissions and is declared explicitly for completeness).
 const CSP_COMMON = [
   "default-src 'self'",
   "object-src 'none'",
@@ -136,7 +151,7 @@ const CSP_COMMON = [
   "connect-src 'self'",
   "frame-ancestors 'none'",
   "base-uri 'self'",
-  "form-action 'self'",
+  "form-action 'self' https://civilengsuite.is-a.dev",
   "upgrade-insecure-requests",
   "report-uri /api/csp-report",
 ].join('; ');
@@ -144,15 +159,23 @@ const CSP_COMMON = [
 // [F6] Shared security headers applied to EVERY response this function emits.
 // NOTE: _headers does NOT apply to Cloudflare Pages Function responses —
 // these must be set explicitly here on every returned Response.
+//
+// [X2] REMOVED ambient-light-sensor=() — this feature was dropped from the
+// Permissions Policy spec; Chrome logs "Unrecognized feature" console warning
+// that appears in Google Search Console's live test (Image 2, Apr 15 2026).
+//
+// [P3] REMOVED payment=() — this function only serves encrypted app pages.
+// The payment=() restriction is unnecessary here (the app pages do not invoke
+// the browser Payment Request API). The /payment/* checkout pages are governed
+// by the _headers file which correctly omits payment=(), enabling Apple Pay
+// via the Paymob SDK. Keeping payment=() here would not affect /payment/ pages
+// (different routing path) but is removed for semantic correctness.
 const SHARED_SECURITY_HEADERS = {
   'X-Content-Type-Options':            'nosniff',
   'X-Frame-Options':                   'DENY',
   'Strict-Transport-Security':         'max-age=31536000; includeSubDomains; preload',
   'Referrer-Policy':                   'strict-origin-when-cross-origin',
-  // [X2] REMOVED ambient-light-sensor=() — this feature was dropped from the
-  // Permissions Policy spec; Chrome logs "Unrecognized feature" console warning
-  // that appears in Google Search Console's live test (Image 2, Apr 15 2026).
-  'Permissions-Policy':                'camera=(), microphone=(), geolocation=(), payment=(), accelerometer=(), gyroscope=(), magnetometer=(), display-capture=(), screen-wake-lock=(), autoplay=(), clipboard-read=()',
+  'Permissions-Policy':                'camera=(), microphone=(), geolocation=(), accelerometer=(), gyroscope=(), magnetometer=(), display-capture=(), screen-wake-lock=(), autoplay=(), clipboard-read=()',
   'Cross-Origin-Opener-Policy':        'same-origin',
   'X-DNS-Prefetch-Control':            'off',
   'X-Permitted-Cross-Domain-Policies': 'none',
@@ -360,7 +383,13 @@ export async function onRequest(context) {
   const path = url.pathname.replace(/\/+$/, '') || '/';
 
   // ── Always pass through static/SEO files — never intercept these ──────────
-  const STATIC_PASSTHROUGH = /^\/(?:sitemap\.xml|robots\.txt|manifest\.json|favicon\.ico|og-image\.png|google[0-9a-f]+\.html|\.well-known\/.*)$/i;
+  // [P1] ADDED: payment(?:\/.*)? and api\/payment\/.* — payment checkout pages
+  //      are static HTML served directly by Cloudflare Pages file serving.
+  //      Payment API routes are dedicated CF Pages Functions in
+  //      functions/api/payment/*.js which take routing precedence over this
+  //      catch-all by Cloudflare's function routing rules, but the passthrough
+  //      here is an explicit defensive guard.
+  const STATIC_PASSTHROUGH = /^\/(?:sitemap\.xml|robots\.txt|manifest\.json|favicon\.ico|og-image\.png|google[0-9a-f]+\.html|\.well-known\/.*|payment(?:\/.*)?|api\/payment\/.*)$/i;
   if (STATIC_PASSTHROUGH.test(path)) return context.next();
 
   // ── Route matching: exact app root paths only ─────────────────────────────

@@ -1,7 +1,7 @@
 # ═══════════════════════════════════════════════════════
 #  robots.txt — Civil Engineering Suite
 #  https://civilengsuite.pages.dev
-#  Updated: 2026-04-14
+#  Updated: 2026-04-17
 #
 #  FIX LOG (2026-04-14):
 #  [F1] Removed: Disallow: /*?*utm_
@@ -11,6 +11,14 @@
 #  [F2] Added: Disallow: /public/
 #       → Prevents crawlers from reaching encrypted .enc files.
 #  [F3] Kept /manifest.json Allow BEFORE /*.json$ Disallow (order correct).
+#
+#  FIX LOG (2026-04-17):
+#  [F4] Added: Disallow: /payment/
+#       → Payment checkout flow must never be indexed.
+#         Contains sensitive user-input forms; no SEO value.
+#  [F5] Added: Disallow: /api/payment/
+#       → Server-side payment endpoints must not be crawled.
+#         Crawling these returns 405/400 responses and wastes crawl budget.
 # ═══════════════════════════════════════════════════════
 
 # ── Allow all compliant search engine bots ──
@@ -22,6 +30,8 @@ Disallow: /*.json$
 # [F2] Block encrypted source files from being crawled / indexed
 Disallow: /public/
 Disallow: /api/
+# [F4] Block payment checkout flow from indexing
+Disallow: /payment/
 Disallow: /*og-image.html
 
 # ── Google ──
@@ -29,12 +39,15 @@ User-agent: Googlebot
 Allow: /
 Disallow: /cdn-cgi/
 Disallow: /public/
+Disallow: /payment/
+Disallow: /api/
 
 User-agent: Googlebot-Image
 Allow: /
 Allow: /images/
 Allow: /footing-pro/images/
 Disallow: /public/
+Disallow: /payment/
 
 User-agent: Googlebot-News
 Allow: /
@@ -44,6 +57,8 @@ User-agent: Bingbot
 Allow: /
 Disallow: /cdn-cgi/
 Disallow: /public/
+Disallow: /payment/
+Disallow: /api/
 
 User-agent: MSNBot
 Allow: /

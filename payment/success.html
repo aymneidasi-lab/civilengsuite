@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<meta http-equiv="X-Frame-Options" content="DENY">
+<meta http-equiv="X-Content-Type-Options" content="nosniff">
+<meta http-equiv="Referrer-Policy" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+
+<title>تم الدفع بنجاح — Footing Pro v.2026 | Civil Engineering Suite</title>
+
+<!-- ── Fonts ── -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Playfair+Display:wght@700;900&display=swap" rel="stylesheet">
+
+<link rel="icon" type="image/x-icon" href="/images/favicon.ico">
+
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+:root{
+  --bg:#0A1A2E;--bg-card:#0F2240;--gold:#C17B1A;--gold-glow:rgba(193,123,26,.35);
+  --text:#E6EEF9;--muted:#8AA3C7;--border:rgba(138,163,199,.18);
+  --success:#4CAF50;--success-bg:rgba(76,175,80,.1);--success-border:rgba(76,175,80,.3);
+}
+body{
+  background:var(--bg);color:var(--text);
+  font-family:'Inter',system-ui,sans-serif;
+  min-height:100vh;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;
+  padding:40px 20px;
+  background-image:radial-gradient(ellipse 90% 50% at 50% -5%,rgba(193,123,26,.07) 0%,transparent 70%);
+}
+.card{
+  background:var(--bg-card);border:1px solid var(--border);
+  border-radius:20px;padding:40px 36px;text-align:center;
+  max-width:500px;width:100%;
+  animation:fadeUp .6s ease-out;
+  position:relative;overflow:hidden;
+}
+.card::before{
+  content:'';position:absolute;inset:0 0 auto 0;height:3px;
+  background:linear-gradient(90deg,var(--success),#66bb6a);
+}
+@keyframes fadeUp{from{opacity:0;transform:translateY(20px);}to{opacity:1;transform:translateY(0);}}
+.check-circle{
+  width:80px;height:80px;border-radius:50%;
+  background:var(--success-bg);border:2px solid var(--success-border);
+  display:flex;align-items:center;justify-content:center;
+  margin:0 auto 24px;font-size:2.4rem;
+  animation:popIn .5s .3s both cubic-bezier(.175,.885,.32,1.275);
+}
+@keyframes popIn{from{transform:scale(.4);opacity:0;}to{transform:scale(1);opacity:1;}}
+h1{
+  font-family:'Playfair Display',Georgia,serif;
+  font-size:clamp(1.5rem,5vw,1.9rem);font-weight:700;
+  color:var(--text);margin-bottom:8px;
+}
+.subtitle{color:var(--muted);font-size:.95rem;line-height:1.7;margin-bottom:28px;}
+.order-box{
+  background:rgba(193,123,26,.08);border:1px solid rgba(193,123,26,.2);
+  border-radius:12px;padding:16px 20px;margin-bottom:28px;text-align:start;
+}
+.order-row{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:5px 0;}
+.order-label{font-size:.8rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;}
+.order-val{font-weight:700;color:var(--text);font-size:.9rem;}
+.order-val.order-id{font-family:monospace;color:var(--gold);letter-spacing:.04em;}
+.steps{text-align:start;margin-bottom:28px;}
+.steps h2{font-size:.82rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--gold);margin-bottom:12px;}
+.steps ol{list-style:none;counter-reset:steps;}
+.steps ol li{
+  counter-increment:steps;
+  display:flex;align-items:flex-start;gap:12px;
+  font-size:.88rem;color:var(--muted);line-height:1.6;padding:7px 0;
+  border-bottom:1px solid rgba(138,163,199,.1);
+}
+.steps ol li:last-child{border-bottom:none;}
+.steps ol li::before{
+  content:counter(steps);
+  background:var(--gold);color:#fff;border-radius:50%;
+  width:22px;height:22px;display:flex;align-items:center;justify-content:center;
+  font-size:.72rem;font-weight:700;flex-shrink:0;margin-top:1px;
+}
+.btns{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;}
+.btn{
+  display:inline-flex;align-items:center;gap:8px;
+  padding:13px 26px;border-radius:50px;font-size:.9rem;font-weight:700;
+  text-decoration:none;transition:all .25s;
+}
+.btn-gold{background:var(--gold);color:#fff;box-shadow:0 6px 20px var(--gold-glow);}
+.btn-gold:hover{background:#8F5F0F;transform:translateY(-2px);}
+.btn-out{background:rgba(255,255,255,.07);color:var(--text);border:2px solid rgba(255,255,255,.15);}
+.btn-out:hover{background:rgba(255,255,255,.12);border-color:rgba(255,255,255,.3);transform:translateY(-2px);}
+.contact-note{margin-top:22px;font-size:.78rem;color:rgba(138,163,199,.55);}
+.contact-note a{color:var(--muted);text-decoration:underline;}
+/* Verifying overlay */
+.verifying{color:var(--muted);font-size:.88rem;margin-bottom:16px;}
+.verify-fail{
+  background:rgba(224,82,82,.1);border:1px solid rgba(224,82,82,.25);
+  border-radius:10px;padding:14px 18px;color:#f08080;font-size:.86rem;margin-bottom:20px;display:none;
+}
+</style>
+</head>
+
+<body>
+<div class="card" role="main">
+
+  <div class="check-circle" aria-hidden="true">✓</div>
+
+  <h1 id="main-title">تم الدفع بنجاح!</h1>
+  <p class="subtitle" id="main-subtitle">
+    شكراً لشراء Footing Pro v.2026.<br>
+    ستصلك تعليمات التفعيل على بريدك الإلكتروني.
+  </p>
+
+  <!-- Verification status -->
+  <p class="verifying" id="verifying-msg" aria-live="polite">🔍 جاري التحقق من حالة الدفع…</p>
+  <div class="verify-fail" id="verify-fail-banner" role="alert">
+    ⚠️ تعذّر التحقق من حالة الدفع تلقائياً. إذا كنت قد أتممت الدفع، يُرجى مراسلتنا بمعرّف الطلب.
+    <br>⚠️ Could not verify payment automatically. If you completed payment, please contact us with the order ID below.
+  </div>
+
+  <!-- Order details (populated by script) -->
+  <div class="order-box" id="order-box" role="region" aria-label="Order details" style="display:none">
+    <div class="order-row">
+      <span class="order-label" id="lb-order">رقم الطلب / Order ID</span>
+      <span class="order-val order-id" id="val-order-id">—</span>
+    </div>
+    <div class="order-row">
+      <span class="order-label" id="lb-status">الحالة / Status</span>
+      <span class="order-val" id="val-status" style="color:var(--success)">✓ مدفوع / Paid</span>
+    </div>
+  </div>
+
+  <!-- Next steps -->
+  <div class="steps" role="region" aria-label="Next steps">
+    <h2 id="steps-title">الخطوات التالية / Next Steps</h2>
+    <ol id="steps-list">
+      <li id="step-1">تحقق من بريدك الإلكتروني للحصول على رابط تحميل الملف ورقم الترخيص.<br><em>Check your email for the download link and license key.</em></li>
+      <li id="step-2">قم بتشغيل ملف Excel وأدخل رقم الترخيص عند أول تشغيل.<br><em>Open the Excel file and enter your license key on first launch.</em></li>
+      <li id="step-3">إذا لم يصلك البريد خلال 10 دقائق، تحقق من مجلد الـ Spam.<br><em>If you don't receive the email in 10 minutes, check your Spam folder.</em></li>
+    </ol>
+  </div>
+
+  <!-- Action buttons -->
+  <div class="btns">
+    <a href="/" class="btn btn-gold" rel="noopener">⚙️ العودة للبرنامج</a>
+    <a href="https://civilengsuite.is-a.dev/#contact" class="btn btn-out" rel="noopener">📩 تواصل معنا</a>
+  </div>
+
+  <p class="contact-note" id="contact-note">
+    مشكلة في الترخيص؟
+    <a href="mailto:aymneidasi@gmail.com">aymneidasi@gmail.com</a>
+  </p>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // Extract order_id from URL query string
+  var params  = new URLSearchParams(window.location.search);
+  var orderId = (params.get('order_id') || params.get('id') || '').trim();
+  var verifyEl = document.getElementById('verifying-msg');
+  var failBanner = document.getElementById('verify-fail-banner');
+  var orderBox = document.getElementById('order-box');
+  var valOrderId = document.getElementById('val-order-id');
+
+  if (!orderId || !/^\d{1,20}$/.test(orderId)) {
+    verifyEl.style.display = 'none';
+    orderBox.style.display = 'block';
+    valOrderId.textContent = '—';
+    return;
+  }
+
+  valOrderId.textContent = '#' + orderId;
+
+  // Call verification endpoint
+  fetch('/api/payment/verify?order_id=' + encodeURIComponent(orderId))
+    .then(function (res) { return res.json(); })
+    .then(function (data) {
+      verifyEl.style.display = 'none';
+      orderBox.style.display = 'block';
+
+      if (!data.verified) {
+        failBanner.style.display = 'block';
+        document.getElementById('val-status').textContent = '⚠️ يُحقَّق منه / Verifying';
+        document.getElementById('val-status').style.color = '#f0a030';
+      }
+    })
+    .catch(function () {
+      verifyEl.style.display = 'none';
+      orderBox.style.display = 'block';
+      failBanner.style.display = 'block';
+    });
+})();
+</script>
+</body>
+</html>
