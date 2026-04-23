@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<!-- ── Security Headers (also enforced via _headers) ── -->
+<meta http-equiv="X-Frame-Options" content="DENY">
+<meta http-equiv="X-Content-Type-Options" content="nosniff">
+<meta http-equiv="Referrer-Policy" content="strict-origin-when-cross-origin">
+
+<!-- ── SEO: no-index payment pages ── -->
+<meta name="robots" content="noindex, nofollow">
+
+<title>شراء الترخيص — Footing Pro v.2026 | Civil Engineering Suite</title>
+<meta name="description" content="Purchase your Footing Pro v.2026 personal license — advanced combined footing design software by Eng. Aymn Asi.">
+<link rel="canonical" href="https://civilengsuite.is-a.dev/payment/">
+
+<!-- ── Open Graph ── -->
+<meta property="og:type" content="website">
+<meta property="og:title" content="Purchase License — Footing Pro v.2026">
+<meta property="og:description" content="Secure checkout powered by Paymob. Available for Egypt and Gulf markets.">
+<meta property="og:url" content="https://civilengsuite.is-a.dev/payment/">
+<meta property="og:site_name" content="Civil Engineering Suite">
+
+<!-- ── Fonts ── -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Playfair+Display:wght@700;900&display=swap" rel="stylesheet">
+
+<!-- ── Favicon ── -->
+<link rel="icon" type="image/x-icon" href="/images/favicon.ico">
+<link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png">
+
+<!-- ── Stylesheet (external — CSP compliant) ── -->
+<link rel="stylesheet" href="/payment/checkout.css">
+
+<!-- ── Paymob SDK — must load before checkout.js ── -->
+<script src="https://accept.paymob.com/v1/pay.js" defer></script>
+
+<!-- ── Checkout logic — external file, no inline scripts ── -->
+<script src="/payment/checkout.js" defer></script>
+</head>
+
+<body>
+
+<noscript>
+  <div class="noscript-warn">
+    <strong>JavaScript مطلوب / JavaScript Required</strong><br>
+    يتطلب هذا الصفحة تفعيل JavaScript لإتمام عملية الدفع.<br>
+    This checkout page requires JavaScript to be enabled in your browser.
+  </div>
+</noscript>
+
+<!-- ── Top navigation ────────────────────────────────────────────────────── -->
+<nav class="top-nav" role="navigation">
+  <a href="/" class="nav-logo" rel="noopener">⚙️ Civil Engineering Suite</a>
+  <button id="lang-btn" class="lang-btn" type="button" aria-label="Switch language">EN</button>
+</nav>
+
+<!-- ── Main content ──────────────────────────────────────────────────────── -->
+<main class="page-wrap">
+  <div class="checkout-container">
+
+    <!-- Page heading -->
+    <h1 id="page-title" class="page-title">شراء الترخيص</h1>
+    <p id="page-subtitle" class="page-subtitle">ترخيص شخصي — يعمل على جهاز واحد فقط</p>
+
+    <!-- ── Product card ──────────────────────────────────────────────────── -->
+    <div class="product-card" role="region" aria-label="Product details">
+      <div class="product-header">
+        <span class="product-icon" aria-hidden="true">⚙️</span>
+        <div>
+          <div id="product-name" class="product-name">فوتينج برو v.2026 — ترخيص شخصي</div>
+          <div id="product-sub" class="product-name-sub">برنامج تصميم القواعد المشتركة</div>
+        </div>
+      </div>
+      <ul id="features-list" class="features-list" aria-label="Features">
+        <!-- Populated by checkout.js -->
+      </ul>
+    </div>
+
+    <!-- ── Country & price ───────────────────────────────────────────────── -->
+    <div class="form-card">
+      <div id="section-country" class="section-title">🌍 الدولة والسعر</div>
+
+      <div class="country-row">
+        <div class="field">
+          <label id="label-country" for="country-select">الدولة</label>
+          <select id="country-select" name="country" autocomplete="country">
+            <!-- Options populated by checkout.js -->
+          </select>
+        </div>
+
+        <div class="price-badge" aria-live="polite">
+          <span id="label-price" class="price-label">السعر</span>
+          <span id="price-value" class="price-value">499.00 ج.م</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Customer information ──────────────────────────────────────────── -->
+    <div class="form-card">
+      <div id="section-customer" class="section-title">بيانات العميل</div>
+
+      <!-- Name row -->
+      <div class="field-group">
+        <div class="field">
+          <label id="label-first" for="first-name">الاسم الأول *</label>
+          <input
+            type="text"
+            id="first-name"
+            name="first_name"
+            autocomplete="given-name"
+            maxlength="50"
+            placeholder="محمد"
+            aria-required="true"
+            aria-describedby="err-first"
+          >
+          <span id="err-first" class="field-error" role="alert" aria-live="polite"></span>
+        </div>
+
+        <div class="field">
+          <label id="label-last" for="last-name">الاسم الأخير *</label>
+          <input
+            type="text"
+            id="last-name"
+            name="last_name"
+            autocomplete="family-name"
+            maxlength="50"
+            placeholder="أحمد"
+            aria-required="true"
+            aria-describedby="err-last"
+          >
+          <span id="err-last" class="field-error" role="alert" aria-live="polite"></span>
+        </div>
+      </div>
+
+      <!-- Email -->
+      <div class="field-group full">
+        <div class="field">
+          <label id="label-email" for="email">البريد الإلكتروني *</label>
+          <input
+            type="email"
+            id="email"
+            name="email"
+            autocomplete="email"
+            maxlength="150"
+            inputmode="email"
+            placeholder="example@email.com"
+            aria-required="true"
+            aria-describedby="err-email"
+          >
+          <span id="err-email" class="field-error" role="alert" aria-live="polite"></span>
+        </div>
+      </div>
+
+      <!-- Phone with prefix -->
+      <div class="field-group full">
+        <div class="field">
+          <label id="label-phone" for="phone">رقم الهاتف *</label>
+          <div class="phone-row">
+            <div id="phone-prefix" class="phone-prefix" aria-label="Country code">+20</div>
+            <input
+              type="tel"
+              id="phone"
+              name="phone"
+              autocomplete="tel-national"
+              maxlength="18"
+              inputmode="tel"
+              placeholder="10xxxxxxxx"
+              aria-required="true"
+              aria-describedby="err-phone"
+            >
+          </div>
+          <span id="err-phone" class="field-error" role="alert" aria-live="polite"></span>
+        </div>
+      </div>
+
+      <!-- Error banner (shown on API/network failure) -->
+      <div id="error-banner" class="error-banner" role="alert" aria-live="assertive"></div>
+
+      <!-- Pay button -->
+      <button id="pay-btn" class="pay-btn" type="button" aria-label="Proceed to payment">
+        <div class="spinner" aria-hidden="true"></div>
+        <span id="btn-text">ادفع الآن</span>
+        <span aria-hidden="true">←</span>
+      </button>
+    </div>
+
+    <!-- ── Trust bar ─────────────────────────────────────────────────────── -->
+    <div class="trust-bar" role="contentinfo">
+      <div id="lock-note" class="trust-lock">
+        🔒 مدعوم بـ Paymob — مشفّر بـ TLS 256-bit
+      </div>
+      <div class="trust-methods" aria-label="Accepted payment methods">
+        <span id="methods-badge" class="method-badge">فيزا · ماستركارد · ميزة · فودافون كاش · فوري</span>
+      </div>
+    </div>
+
+  </div><!-- /.checkout-container -->
+</main>
+
+<!-- ── Footer ─────────────────────────────────────────────────────────────── -->
+<footer class="page-footer">
+  <p>
+    © 2026 <a href="/" rel="noopener">Civil Engineering Suite</a> — Eng. Aymn Asi &nbsp;|&nbsp;
+    <a href="https://civilengsuite.is-a.dev/#contact" rel="noopener">اتصل بنا / Contact</a>
+  </p>
+</footer>
+
+</body>
+</html>
