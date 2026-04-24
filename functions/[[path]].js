@@ -52,6 +52,21 @@
  *        payment=() on app pages is unnecessary; it is correctly absent from
  *        the /payment/* _headers block which governs the checkout flow.
  *
+ * 2026-04-25 v8 — Bot-path OG tag injection + favicon guard (V2-BOT, V4-FAV):
+ *   [V2-BOT] Bot path: inject og:image:secure_url / og:image:type / width / height
+ *            into bot-path (decrypted) HTML when absent. Bootstrap ogMetaBlock (v7
+ *            [V2]) already handles non-bot UAs (iMessage iOS). Bot-path HTML comes
+ *            from the encrypted source which may lack these tags. WhatsApp / Telegram
+ *            scrapers match BOT_RE and receive bot-path HTML — they require
+ *            og:image:secure_url to render the image thumbnail. Without it they show
+ *            only text + domain (image blank in chat). Guard prevents duplication.
+ *   [V4-FAV] Inject faviconLinks into decrypted HTML if <link rel="icon"> / apple-
+ *            touch-icon is absent. Human-path document.write replaces the bootstrap
+ *            <head>, discarding the bootstrap favicon links. If the encrypted source
+ *            has no favicon declaration, the browser tab shows no icon. Fix: append
+ *            faviconLinks before </head> in the decrypted HTML when the source lacks
+ *            icon links. Guard prevents duplication when source already has them.
+ *
  * 2026-04-25 v7 — Sitemap + OG image fixes (V1–V3):
  *   [V1] SITEMAP CRITICAL: Removed X-Robots-Tag: noindex from /sitemap.xml response.
  *        Googlebot's sitemap fetcher respects X-Robots-Tag directives. noindex on
@@ -725,6 +740,18 @@ export async function onRequest(context) {
   // ── Inject base href ───────────────────────────────────────────────────────
   html = html.replace(/(<head[^>]*>)/i, `$1<base href="${baseHref}">`);
 
+  // ── [V4-FAV] Inject favicon links into decrypted HTML if absent ────────────
+  // Human path: document.write(decodedHtml) replaces the entire document,
+  // discarding the bootstrap <head> (which already had faviconLinks). If the
+  // encrypted source HTML has no <link rel="icon"> / <link rel="apple-touch-icon">
+  // the browser tab shows no favicon and iOS shows no touch icon after JS runs.
+  // Fix: if the decrypted HTML lacks a favicon link, inject faviconLinks directly
+  // into its <head> so the final rendered page always has correct icon references.
+  // Guard prevents duplication if the source already declares its own icons.
+  if (faviconLinks && !/<link[^>]+rel=["'](?:icon|shortcut icon|apple-touch-icon)["']/i.test(html)) {
+    html = html.replace(/(<\/head>)/i, `${faviconLinks}$1`);
+  }
+
   // ── Per-request nonce ──────────────────────────────────────────────────────
   const cspNonce = generateNonce();
 
@@ -771,6 +798,32 @@ export async function onRequest(context) {
         return `${prefix}images/og-image.png"`;
       }
     );
+
+    // [V2-BOT] WhatsApp and Telegram scrapers match BOT_RE and receive bot-path
+    // (decrypted) HTML — NOT the bootstrap shell. The bootstrap shell ogMetaBlock
+    // (v7 [V2]) added og:image:secure_url + og:image:type for non-bot UA clients
+    // (iMessage iOS). But bot-path HTML originates from the encrypted source which
+    // may not have these tags. WhatsApp's image-fetch pipeline requires BOTH
+    // og:image:secure_url (the HTTPS alias) and og:image:type to render the image
+    // thumbnail in chat previews. Without them, WhatsApp shows only text + domain.
+    // Fix: if og:image:secure_url is absent from the bot HTML, extract the already-
+    // rewritten og:image content value and inject the four companion meta tags
+    // immediately after the og:image tag.
+    if (!/<meta[^>]+property="og:image:secure_url"/i.test(botHtml)) {
+      botHtml = botHtml.replace(
+        /(<meta[^>]+property="og:image"[^>]*\/?>)/i,
+        (m) => {
+          const urlMatch = m.match(/content="([^"]+)"/i);
+          if (!urlMatch) return m;
+          const imgUrl = urlMatch[1];
+          return m
+            + `<meta property="og:image:secure_url" content="${imgUrl}">`
+            + `<meta property="og:image:type" content="image/png">`
+            + `<meta property="og:image:width" content="1200">`
+            + `<meta property="og:image:height" content="630">`;
+        }
+      );
+    }
 
     // [F2] FIX: Strip body-hiding noscript style
     botHtml = botHtml.replace(
