@@ -81,6 +81,21 @@
  *        metadata. The XOR payload, encryption key, and protection bundle are never
  *        referenced. The call is wrapped in a feature-detect guard so it is a no-op
  *        in all browsers that do not implement navigator.modelContext.
+ *   [S1] SITEMAP FIX: sitemap.xml removed from STATIC_PASSTHROUGH and handled
+ *        explicitly in the function with minimal clean headers. Root cause: the
+ *        _headers /*  catch-all was applying Content-Security-Policy to sitemap.xml.
+ *        Cloudflare Pages _headers is additive — all matching rules stack — so
+ *        sitemap.xml received the full CSP header from the /* block. Googlebot's
+ *        sitemap fetcher rejects documents with CSP headers, reporting
+ *        "Couldn't fetch" / "Sitemap could not be read" in Search Console despite
+ *        the file loading correctly in the browser (which ignores CSP on XML).
+ *        Fix: function intercepts /sitemap.xml, fetches raw XML from ASSETS binding,
+ *        and returns with ONLY Content-Type: application/xml and Cache-Control.
+ *        No CSP, no X-Frame-Options, no security headers on the XML response.
+ *   [S2] SITEMAP IMAGE PATHS: 7 of 9 <image:loc> entries referenced /og-image.png
+ *        (root-level, which 404s). Fixed to /images/og-image.png for all sub-app
+ *        pages. Footing Pro retains /footing-pro/images/og-image.png (correct).
+ *        lastmod updated to 2026-04-24 on all pages.
  *   [A7] oauth-authorization-server: /.well-known/oauth-authorization-server added
  *        as a static file (RFC 8414 minimal, honest — no active authorization
  *        server). Satisfies agent-readiness OAuth discovery check. Link header
@@ -556,8 +571,36 @@ export async function onRequest(context) {
   //      functions/api/payment/*.js which take routing precedence over this
   //      catch-all by Cloudflare's function routing rules, but the passthrough
   //      here is an explicit defensive guard.
-  const STATIC_PASSTHROUGH = /^\/(?:sitemap\.xml|robots\.txt|manifest\.json|favicon\.ico|og-image\.png|google[0-9a-f]+\.html|\.well-known\/.*|payment(?:\/.*)?|api\/payment\/.*)$/i;
+  // [S1] NOTE: sitemap.xml is intentionally NOT in STATIC_PASSTHROUGH — it is
+  //      handled explicitly below with controlled headers. See [S1] in changelog.
+  const STATIC_PASSTHROUGH = /^\/(?:robots\.txt|manifest\.json|favicon\.ico|og-image\.png|google[0-9a-f]+\.html|\.well-known\/.*|payment(?:\/.*)?|api\/payment\/.*)$/i;
   if (STATIC_PASSTHROUGH.test(path)) return context.next();
+
+  // ── [S1] Sitemap — explicit handler with clean minimal headers ───────────
+  // The _headers /* catch-all applies Content-Security-Policy to every path
+  // including sitemap.xml (Cloudflare Pages _headers is additive — all matching
+  // rules stack). Googlebot's sitemap parser rejects XML documents that carry
+  // CSP headers, reporting "Couldn't fetch" in Search Console.
+  // Fix: intercept /sitemap.xml here, fetch raw XML from ASSETS, return with
+  // ONLY Content-Type + Cache-Control. No security headers on XML.
+  if (path === '/sitemap.xml') {
+    try {
+      const sitemapResp = await env.ASSETS.fetch(new URL('/sitemap.xml', url.origin));
+      if (!sitemapResp.ok) return new Response('Not Found', { status: 404 });
+      const sitemapXml = await sitemapResp.text();
+      return new Response(sitemapXml, {
+        status: 200,
+        headers: {
+          'Content-Type':  'application/xml; charset=utf-8',
+          'Cache-Control': 'public, max-age=3600, must-revalidate',
+          'X-Robots-Tag':  'noindex',
+        },
+      });
+    } catch (e) {
+      console.error('[ces:sitemap] ASSETS fetch error:', e.message);
+      return new Response('Not Found', { status: 404 });
+    }
+  }
 
   // ── Route matching: exact app root paths only ─────────────────────────────
   const route = (path === '' || path === '/' || path === '/index.html')
