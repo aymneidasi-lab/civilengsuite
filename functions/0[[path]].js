@@ -115,11 +115,6 @@ const ROUTES = [
     pageFilename: 'civil-engineering-suite.html',
     faviconLinks: '<link rel="icon" type="image/x-icon" href="/images/favicon.ico">'
                 + '<link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png">',
-    // [B9] og meta for bootstrap shell — social preview for browser-UA scrapers (iMessage etc.)
-    ogTitle:       'Civil Engineering Suite — 8-App ACI 318 Structural Engineering Software by Eng. Aymn Asi',
-    ogDescription: '8 professional structural engineering apps by Eng. Aymn Asi. Footing Pro (Combined, Trapezoidal, Strap — Live Now) + Beam Pro, Column Pro, Deflection Pro, Earthquake Pro, Mur Pro, Add Reft Pro, Section Property Pro. ACI 318-compliant, 100% offline.',
-    ogImage:       '/images/og-image.png',
-    ogUrl:         'https://civilengsuite.pages.dev/',
   },
   {
     prefix: '/footing-pro',
@@ -129,10 +124,6 @@ const ROUTES = [
     faviconLinks: '<link rel="icon" type="image/png" sizes="32x32"   href="/footing-pro/images/favicon-32.png">'
                 + '<link rel="icon" type="image/png" sizes="192x192" href="/footing-pro/images/favicon-192.png">'
                 + '<link rel="apple-touch-icon" sizes="180x180"      href="/footing-pro/images/apple-touch-icon.png">',
-    ogTitle:       'Footing Pro v.2026 — Free Combined Footing Design Software (ACI 318-19)',
-    ogDescription: 'The most advanced free combined footing design application. 17 engineering modules, ACI 318-19 compliant, 100% offline. Rectangular, Trapezoidal, and Strap footings. By Eng. Aymn Asi.',
-    ogImage:       '/footing-pro/images/og-image.png',
-    ogUrl:         'https://civilengsuite.pages.dev/footing-pro/',
   },
   {
     prefix: '/column-pro',
@@ -141,10 +132,6 @@ const ROUTES = [
     pageFilename: 'column-pro.html',
     faviconLinks: '<link rel="icon" type="image/x-icon" href="/images/favicon.ico">'
                 + '<link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png">',
-    ogTitle:       'Column Pro — RC Column Design Software (ACI 318-19)',
-    ogDescription: 'RC column design per ACI 318-19. P-M interaction, biaxial bending, slenderness checks, punching shear. By Eng. Aymn Asi. Part of Civil Engineering Suite.',
-    ogImage:       '/images/og-image.png',
-    ogUrl:         'https://civilengsuite.pages.dev/column-pro/',
   },
   {
     prefix: '/beam-pro',
@@ -153,10 +140,6 @@ const ROUTES = [
     pageFilename: 'beam-pro.html',
     faviconLinks: '<link rel="icon" type="image/x-icon" href="/images/favicon.ico">'
                 + '<link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png">',
-    ogTitle:       'Beam Pro — RC Beam Design Software (ACI 318-19)',
-    ogDescription: 'ACI 318 reinforced concrete beam design software by Eng. Aymn Asi. Part of Civil Engineering Suite.',
-    ogImage:       '/images/og-image.png',
-    ogUrl:         'https://civilengsuite.pages.dev/beam-pro/',
   },
   {
     prefix: '/deflection-pro',
@@ -165,10 +148,6 @@ const ROUTES = [
     pageFilename: 'deflection-pro.html',
     faviconLinks: '<link rel="icon" type="image/x-icon" href="/images/favicon.ico">'
                 + '<link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png">',
-    ogTitle:       'Deflection Pro — ACI 318 Deflection Checks for RC Beams and Slabs',
-    ogDescription: 'Short and long-term deflection serviceability analysis per ACI 318. By Eng. Aymn Asi. Part of Civil Engineering Suite.',
-    ogImage:       '/images/og-image.png',
-    ogUrl:         'https://civilengsuite.pages.dev/deflection-pro/',
   },
   {
     prefix: '/earthquake-pro',
@@ -177,10 +156,6 @@ const ROUTES = [
     pageFilename: 'earthquake-pro.html',
     faviconLinks: '<link rel="icon" type="image/x-icon" href="/images/favicon.ico">'
                 + '<link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png">',
-    ogTitle:       'Earthquake Pro — Seismic Design Software',
-    ogDescription: 'Seismic design per ACI 318 — base shear, lateral load distribution, structural period. By Eng. Aymn Asi. Part of Civil Engineering Suite.',
-    ogImage:       '/images/og-image.png',
-    ogUrl:         'https://civilengsuite.pages.dev/earthquake-pro/',
   },
   {
     prefix: '/mur-pro',
@@ -189,10 +164,6 @@ const ROUTES = [
     pageFilename: 'mur-pro.html',
     faviconLinks: '<link rel="icon" type="image/x-icon" href="/images/favicon.ico">'
                 + '<link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png">',
-    ogTitle:       'Mur Pro — Ultimate Resistance Moment (ECP)',
-    ogDescription: 'Ultimate Resistance Moment (Mur) calculator per Egyptian Code (ECP) for RC flat and ribbed slabs. By Eng. Aymn Asi.',
-    ogImage:       '/images/og-image.png',
-    ogUrl:         'https://civilengsuite.pages.dev/mur-pro/',
   },
   {
     prefix: '/add-reft-pro',
@@ -201,10 +172,6 @@ const ROUTES = [
     pageFilename: 'add-reft-pro.html',
     faviconLinks: '<link rel="icon" type="image/x-icon" href="/images/favicon.ico">'
                 + '<link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png">',
-    ogTitle:       'Add Reft Pro — Additional Reinforcement for Flat Slab Openings',
-    ogDescription: 'Additional reinforcement design for flat slab openings and penetrations. By Eng. Aymn Asi. Part of Civil Engineering Suite.',
-    ogImage:       '/images/og-image.png',
-    ogUrl:         'https://civilengsuite.pages.dev/add-reft-pro/',
   },
   {
     prefix: '/section-property-pro',
@@ -213,10 +180,6 @@ const ROUTES = [
     pageFilename: 'section-property-pro.html',
     faviconLinks: '<link rel="icon" type="image/x-icon" href="/images/favicon.ico">'
                 + '<link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png">',
-    ogTitle:       'Section Property Pro — Cross-Section Properties Calculator',
-    ogDescription: 'Cross-section properties: area, centroid, Ix/Iy, section modulus, radius of gyration. By Eng. Aymn Asi. Part of Civil Engineering Suite.',
-    ogImage:       '/images/og-image.png',
-    ogUrl:         'https://civilengsuite.pages.dev/section-property-pro/',
   },
 ];
 
@@ -735,22 +698,6 @@ export async function onRequest(context) {
       '$1/footing-pro/images/og-image.png'
     );
 
-    // [B8] FIX: og:image / twitter:image paths missing /images/ prefix.
-    // The encrypted source HTML references /og-image.png (root-level, 404).
-    // The static file is served at /images/og-image.png (from public/images/).
-    // After the host-rewrite above, URLs become https://host/og-image.png — still 404.
-    // This pattern matches any og:image URL ending in /og-image.png that does NOT
-    // already have /images/ or /footing-pro/images/ in the path, and inserts /images/.
-    // Scope: homepage and all sub-app pages that reference the shared og-image asset.
-    botHtml = botHtml.replace(
-      /(content="https?:\/\/[^"]+\/)og-image\.png"/gi,
-      (match, prefix) => {
-        // Already correct paths — leave untouched
-        if (/\/images\//.test(prefix)) return match;
-        return `${prefix}images/og-image.png"`;
-      }
-    );
-
     // [F2] FIX: Strip body-hiding noscript style
     botHtml = botHtml.replace(
       /(<noscript>)\s*<style>[^<]*?body\s*\{[^}]*?display\s*:\s*none[^}]*?\}[^<]*?<\/style>/gi,
@@ -815,32 +762,6 @@ export async function onRequest(context) {
   const titleM    = html.match(/<title>([^<]*)<\/title>/i);
   const pageTitle = titleM ? titleM[1] : 'Civil Engineering Suite';
 
-  // [B9] Build og meta block for bootstrap shell.
-  // iMessage link previews are fetched CLIENT-SIDE by the recipient's phone using
-  // a standard Safari mobile UA — it receives the XOR bootstrap shell, not the bot
-  // path. The document.write runs AFTER the link preview has been computed from the
-  // initial HTML, so og tags inside the encrypted payload are invisible to the
-  // preview renderer. Fix: inject og:image, og:title, og:description, og:url,
-  // twitter:card, and twitter:image directly into the bootstrap <head> so any
-  // client — regardless of UA — gets a valid social preview from the initial HTML.
-  // These tags use absolute URLs with the request host so they're always correct.
-  const ogImageAbsolute = `https://${url.host}${route.ogImage}`;
-  const ogMetaBlock = route.ogTitle ? [
-    `<meta property="og:type" content="website">`,
-    `<meta property="og:site_name" content="Civil Engineering Suite">`,
-    `<meta property="og:title" content="${escHtml(route.ogTitle)}">`,
-    `<meta property="og:description" content="${escHtml(route.ogDescription)}">`,
-    `<meta property="og:url" content="${escHtml(route.ogUrl)}">`,
-    `<meta property="og:image" content="${escHtml(ogImageAbsolute)}">`,
-    `<meta property="og:image:width" content="1200">`,
-    `<meta property="og:image:height" content="630">`,
-    `<meta property="og:image:alt" content="${escHtml(route.ogTitle)}">`,
-    `<meta name="twitter:card" content="summary_large_image">`,
-    `<meta name="twitter:title" content="${escHtml(route.ogTitle)}">`,
-    `<meta name="twitter:description" content="${escHtml(route.ogDescription)}">`,
-    `<meta name="twitter:image" content="${escHtml(ogImageAbsolute)}">`,
-  ].join('') : '';
-
   // Bootstrap shell — tiny XOR wrapper; view-source shows only this, not real HTML
   // [A6] WebMCP is injected as the FIRST script in the bootstrap shell so it fires
   // for every JS-executing client regardless of User-Agent (including scanners whose
@@ -891,7 +812,6 @@ export async function onRequest(context) {
     + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
     + `<meta name="robots" content="noindex">`
     + `<title>${pageTitle}</title>`
-    + ogMetaBlock
     + `${faviconLinks}`
     + `</head><body>`
     + webMCPBootstrap
