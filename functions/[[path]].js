@@ -52,6 +52,28 @@
  *        payment=() on app pages is unnecessary; it is correctly absent from
  *        the /payment/* _headers block which governs the checkout flow.
  *
+ * 2026-04-25 v7 — Sitemap + OG image fixes (V1–V3):
+ *   [V1] SITEMAP CRITICAL: Removed X-Robots-Tag: noindex from /sitemap.xml response.
+ *        Googlebot's sitemap fetcher respects X-Robots-Tag directives. noindex on
+ *        the sitemap.xml URL itself caused the fetcher to abort without reading the
+ *        document — reported as "Couldn't fetch" / "Sitemap could not be read" in
+ *        Google Search Console despite the file loading correctly in browsers.
+ *        The noindex was intended to prevent the sitemap.xml URL from appearing in
+ *        search results (correct intent) but the implementation prevented the sitemap
+ *        from being processed entirely (wrong effect). Fix: removed the header.
+ *        Google has never indexed sitemap.xml URLs regardless of X-Robots-Tag.
+ *   [V2] OG IMAGE — WhatsApp/iMessage: Added og:image:secure_url and og:image:type
+ *        to the ogMetaBlock in the bootstrap shell. WhatsApp's scraper requires
+ *        og:image:secure_url (HTTPS alias of og:image) and og:image:type to reliably
+ *        render the image thumbnail in chat previews. Facebook Sharing Debugger
+ *        confirmed og:image was set correctly — WhatsApp not showing image was caused
+ *        by missing og:image:secure_url + og:image:type declarations.
+ *   [V3] STATIC_PASSTHROUGH: Added /images/*, /footing-pro/images/*, and all
+ *        sub-app /images/* paths plus /sitemap.xsl. These paths were already handled
+ *        correctly via the !route → context.next() fallback, but explicit passthrough
+ *        eliminates the route-matching overhead for every image request and ensures
+ *        the ASSETS binding is never invoked unnecessarily for static media files.
+ *
  * 2026-04-23 v6 — Agent-readiness infrastructure (A1–A7):
  *   [A1] HOMEPAGE_LINK_HEADER: RFC 8288 Link response header — 7 relations:
  *        api-catalog (RFC 9727), agent-skills index, mcp-server-card,
@@ -610,7 +632,7 @@ export async function onRequest(context) {
   //      here is an explicit defensive guard.
   // [S1] NOTE: sitemap.xml is intentionally NOT in STATIC_PASSTHROUGH — it is
   //      handled explicitly below with controlled headers. See [S1] in changelog.
-  const STATIC_PASSTHROUGH = /^\/(?:robots\.txt|manifest\.json|favicon\.ico|og-image\.png|google[0-9a-f]+\.html|\.well-known\/.*|payment(?:\/.*)?|api\/payment\/.*)$/i;
+  const STATIC_PASSTHROUGH = /^\/(?:robots\.txt|manifest\.json|favicon\.ico|og-image\.png|images\/.*|footing-pro\/images\/.*|beam-pro\/images\/.*|column-pro\/images\/.*|deflection-pro\/images\/.*|earthquake-pro\/images\/.*|mur-pro\/images\/.*|add-reft-pro\/images\/.*|section-property-pro\/images\/.*|google[0-9a-f]+\.html|sitemap\.xsl|\.well-known\/.*|payment(?:\/.*)?|api\/payment\/.*)$/i;
   if (STATIC_PASSTHROUGH.test(path)) return context.next();
 
   // ── [S1] Sitemap — explicit handler with clean minimal headers ───────────
@@ -630,7 +652,6 @@ export async function onRequest(context) {
         headers: {
           'Content-Type':  'application/xml; charset=utf-8',
           'Cache-Control': 'public, max-age=3600, must-revalidate',
-          'X-Robots-Tag':  'noindex',
         },
       });
     } catch (e) {
@@ -832,6 +853,8 @@ export async function onRequest(context) {
     `<meta property="og:description" content="${escHtml(route.ogDescription)}">`,
     `<meta property="og:url" content="${escHtml(route.ogUrl)}">`,
     `<meta property="og:image" content="${escHtml(ogImageAbsolute)}">`,
+    `<meta property="og:image:secure_url" content="${escHtml(ogImageAbsolute)}">`,
+    `<meta property="og:image:type" content="image/png">`,
     `<meta property="og:image:width" content="1200">`,
     `<meta property="og:image:height" content="630">`,
     `<meta property="og:image:alt" content="${escHtml(route.ogTitle)}">`,
