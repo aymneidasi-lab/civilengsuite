@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agentskills.io/schemas/index/v0.2.0.json",
+  "name": "Civil Engineering Suite — Agent Skills Index",
+  "description": "Agent discovery index for civilengsuite.pages.dev — structural engineering tools by Eng. Aymn Asi.",
+  "updated": "2026-04-23T00:00:00.000Z",
+  "skills": [
+    {
+      "name": "api-catalog",
+      "type": "api-catalog",
+      "description": "RFC 9727 API catalog listing all Civil Engineering Suite product endpoints and documentation URLs.",
+      "url": "https://civilengsuite.pages.dev/.well-known/api-catalog",
+      "sha256": "7fc6a36e4b9686d8c9d0a3c05f33d47f7bcdb578b6d5d80e2f0433e764661ebc"
+    },
+    {
+      "name": "mcp-server-card",
+      "type": "mcp-server-card",
+      "description": "SEP-1649 MCP Server Card for Civil Engineering Suite. Currently informational; no MCP transport endpoint is active.",
+      "url": "https://civilengsuite.pages.dev/.well-known/mcp/server-card.json",
+      "sha256": "68194976ad7d9f68f6e12ad23bf4ed35d7fead1456a6729671db92a907afe434"
+    },
+    {
+      "name": "oauth-protected-resource",
+      "type": "oauth-protected-resource",
+      "description": "RFC 9728 OAuth Protected Resource Metadata for Civil Engineering Suite.",
+      "url": "https://civilengsuite.pages.dev/.well-known/oauth-protected-resource",
+      "sha256": "3b9760d7aaca20a0f8612a084c8ccc9f9a192285032430ad071167b7b93b2239"
+    }
+  ]
+}

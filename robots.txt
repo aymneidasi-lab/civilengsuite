@@ -1,7 +1,7 @@
 # ═══════════════════════════════════════════════════════
 #  robots.txt — Civil Engineering Suite
 #  https://civilengsuite.pages.dev
-#  Updated: 2026-04-17
+#  Updated: 2026-04-23
 #
 #  FIX LOG (2026-04-14):
 #  [F1] Removed: Disallow: /*?*utm_
@@ -19,7 +19,20 @@
 #  [F5] Added: Disallow: /api/payment/
 #       → Server-side payment endpoints must not be crawled.
 #         Crawling these returns 405/400 responses and wastes crawl budget.
+#
+#  FIX LOG (2026-04-23): AGENT READINESS
+#  [A1] Added: Content-Signal directives (https://contentsignals.org/)
+#       → Declares AI usage preferences per draft-romm-aipref-contentsignals.
+#         ai-train=no  — content must not be used to train AI/ML models.
+#         search=yes   — content may be indexed and surfaced in search results.
+#         ai-input=no  — content must not be used as direct AI system input.
+#       These directives supplement (do not replace) the per-bot User-agent
+#       rules below. Compliant AI systems should honour both.
 # ═══════════════════════════════════════════════════════
+
+# ── Content Signals — AI usage preferences (https://contentsignals.org/) ──────
+# [A1] Proprietary engineering software. Training and direct AI input disallowed.
+Content-Signal: ai-train=no, search=yes, ai-input=no
 
 # ── Allow all compliant search engine bots ──
 User-agent: *

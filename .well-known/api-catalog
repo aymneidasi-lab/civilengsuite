@@ -1,0 +1,67 @@
+{
+  "linkset": [
+    {
+      "anchor": "https://civilengsuite.pages.dev/",
+      "service-doc": [
+        {
+          "href": "https://civilengsuite.pages.dev/",
+          "type": "text/html",
+          "title": "Civil Engineering Suite — Documentation & Product Index"
+        }
+      ],
+      "describedby": [
+        {
+          "href": "https://civilengsuite.pages.dev/sitemap.xml",
+          "type": "application/xml",
+          "title": "XML Sitemap"
+        }
+      ],
+      "status": [
+        {
+          "href": "https://civilengsuite.pages.dev/",
+          "title": "Homepage health check"
+        }
+      ]
+    },
+    {
+      "anchor": "https://civilengsuite.pages.dev/footing-pro/",
+      "service-doc": [
+        {
+          "href": "https://civilengsuite.pages.dev/footing-pro/",
+          "type": "text/html",
+          "title": "Footing Pro v.2026 — Combined Footing Design (ACI 318-19)"
+        }
+      ]
+    },
+    {
+      "anchor": "https://civilengsuite.pages.dev/beam-pro/",
+      "service-doc": [
+        {
+          "href": "https://civilengsuite.pages.dev/beam-pro/",
+          "type": "text/html",
+          "title": "Beam Pro — RC Beam Design (ACI 318-19)"
+        }
+      ]
+    },
+    {
+      "anchor": "https://civilengsuite.pages.dev/column-pro/",
+      "service-doc": [
+        {
+          "href": "https://civilengsuite.pages.dev/beam-pro/",
+          "type": "text/html",
+          "title": "Column Pro — RC Column Design (ACI 318-19)"
+        }
+      ]
+    },
+    {
+      "anchor": "https://civilengsuite.pages.dev/section-property-pro/",
+      "service-doc": [
+        {
+          "href": "https://civilengsuite.pages.dev/section-property-pro/",
+          "type": "text/html",
+          "title": "Section Property Pro — Cross-Section Properties Calculator"
+        }
+      ]
+    }
+  ]
+}

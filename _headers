@@ -101,7 +101,36 @@
 
 /.well-known/*
   Cache-Control: public, max-age=3600
+
+# ── Agent-discovery files — correct Content-Type per RFC / spec ──
+# api-catalog:              application/linkset+json (RFC 9264 §4.2)
+# agent-skills/index.json:  application/json
+# mcp/server-card.json:     application/json
+# oauth-protected-resource: application/json (RFC 9728)
+# security.txt:             text/plain (RFC 9116)
+/.well-known/api-catalog
+  Content-Type: application/linkset+json; charset=utf-8
+  Cache-Control: public, max-age=3600
+  Access-Control-Allow-Origin: *
+
+/.well-known/agent-skills/index.json
+  Content-Type: application/json; charset=utf-8
+  Cache-Control: public, max-age=3600
+  Access-Control-Allow-Origin: *
+
+/.well-known/mcp/server-card.json
+  Content-Type: application/json; charset=utf-8
+  Cache-Control: public, max-age=3600
+  Access-Control-Allow-Origin: *
+
+/.well-known/oauth-protected-resource
+  Content-Type: application/json; charset=utf-8
+  Cache-Control: public, max-age=3600
+  Access-Control-Allow-Origin: *
+
+/.well-known/security.txt
   Content-Type: text/plain; charset=utf-8
+  Cache-Control: public, max-age=86400
 
 # ════════════════════════════════════════════════════════════════
 # [P1] PAYMENT PAGES — Override CSP and Permissions-Policy

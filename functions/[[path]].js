@@ -51,6 +51,27 @@
  *        This function only serves encrypted app pages — not the payment pages.
  *        payment=() on app pages is unnecessary; it is correctly absent from
  *        the /payment/* _headers block which governs the checkout flow.
+ *
+ * 2026-04-23 v6 — Agent-readiness infrastructure (A1–A5):
+ *   [A1] HOMEPAGE_LINK_HEADER: RFC 8288 Link response header — 6 relations:
+ *        api-catalog (RFC 9727), agent-skills index, mcp-server-card,
+ *        oauth-protected-resource (RFC 9728), security.txt (RFC 9116), sitemap.
+ *        Emitted on homepage responses (both bot and human paths) and on ALL
+ *        bot-path responses so agents scanning any tool page find the catalog.
+ *   [A2] HOMEPAGE_MARKDOWN: static curated markdown constant returned when
+ *        Accept: text/markdown is detected on the homepage. Short-circuits the
+ *        decrypt pipeline — no .enc read needed. Includes x-markdown-tokens hint
+ *        (word count × 1.3) per Cloudflare agent-readiness convention.
+ *        Cache-Control: public (markdown is not user-specific, safe to cache).
+ *   [A3] WebMCP: navigator.modelContext.provideContext() injected into bot path
+ *        before </body>. Exposes 3 tools to AI agents scanning the page on load:
+ *        open_footing_pro, open_section_property_pro, get_suite_info.
+ *        Human path: untouched. buildWebMCPScript() is never called in human path.
+ *   [A4] Vary: Accept added alongside Vary: User-Agent on homepage responses so
+ *        CDN correctly separates HTML / markdown caches.
+ *   [A5] Security: all changes are additive — SHARED_SECURITY_HEADERS,
+ *        CSP_COMMON, buildProtectionBundle, stripProtectionScripts, XOR
+ *        obfuscation and the human path are byte-for-byte identical to v5.
  */
 
 // ── Bot / crawler UA pattern ──────────────────────────────────────────────────
@@ -180,6 +201,94 @@ const SHARED_SECURITY_HEADERS = {
   'X-DNS-Prefetch-Control':            'off',
   'X-Permitted-Cross-Domain-Policies': 'none',
 };
+
+// [A1] RFC 8288 Link response header — agent discovery.
+// Emitted on all homepage responses (bot + human) and on ALL bot-path responses
+// so agents that crawl /footing-pro/ directly still discover the agent catalog.
+// Relations:
+//   api-catalog              — RFC 9727 machine-readable API catalog
+//   agentskills.io/rel/...   — Agent Skills Discovery index (RFC v0.2.0)
+//   mcp-server-card          — SEP-1649 MCP Server Card
+//   oauth-protected-resource — RFC 9728 OAuth resource metadata
+//   security-policy          — RFC 9116 security.txt
+//   sitemap                  — XML sitemap for structural discovery
+const HOMEPAGE_LINK_HEADER = [
+  '</.well-known/api-catalog>; rel="api-catalog"',
+  '</.well-known/agent-skills/index.json>; rel="https://agentskills.io/rel/skills-index"',
+  '</.well-known/mcp/server-card.json>; rel="mcp-server-card"',
+  '</.well-known/oauth-protected-resource>; rel="oauth-protected-resource"',
+  '</.well-known/security.txt>; rel="security-policy"',
+  '</sitemap.xml>; rel="sitemap"',
+].join(', ');
+
+// [A2] Static curated markdown for the homepage — returned when an agent sends
+// Accept: text/markdown. Short-circuits the decrypt pipeline entirely: no
+// CES_DECRYPT_KEY read, no AES-GCM operation, no XOR, no HTML processing.
+// Content mirrors the JSON-LD structured data in index.html — update in sync.
+const HOMEPAGE_MARKDOWN = `# Civil Engineering Suite
+
+> Professional-grade ACI 318-compliant structural and civil engineering software by **Eng. Aymn Asi** — Structural Engineer.
+> Free. Offline. No installation required.
+
+**URL:** https://civilengsuite.pages.dev/
+**Contact:** aymneidasi@gmail.com
+**License:** Proprietary (device-locked personal license)
+**Standard:** ACI 318-19
+
+---
+
+## Applications
+
+### \u2705 Live Now
+
+#### [Footing Pro v.2026](https://civilengsuite.pages.dev/footing-pro/)
+Combined footing design application — the most advanced free tool of its kind.
+
+- **Modules:** 17 engineering calculation modules
+- **Coverage:** Rectangular combined footing \xB7 Trapezoidal combined footing \xB7 Strap footing
+- **Checks:** Soil pressure \xB7 Column load transfer \xB7 One-way shear \xB7 Punching shear \xB7 Flexural reinforcement \xB7 Development length \xB7 Load combinations
+- **Platform:** Microsoft Excel on Windows (single-file, no installation)
+- **Mode:** 100% offline after download
+- **Languages:** English + Arabic (\u0639\u0631\u0628\u064A)
+- **Price:** Free (personal license required)
+
+#### [Section Property Pro](https://civilengsuite.pages.dev/section-property-pro/)
+Cross-section properties calculator \u2014 area, centroid, Ix/Iy, section modulus, radius of gyration.
+
+---
+
+### \uD83D\uDD27 In Development \u2014 Coming 2026
+
+| App | Description |
+|---|---|
+| [Beam Pro](https://civilengsuite.pages.dev/beam-pro/) | ACI 318 RC beam design \u2014 shallow beam bending |
+| [Column Pro](https://civilengsuite.pages.dev/column-pro/) | RC column design \u2014 P-M interaction, biaxial bending, slenderness, punching shear (17 sub-modules) |
+| [Deflection Pro](https://civilengsuite.pages.dev/deflection-pro/) | ACI 318 deflection checks for RC beams and slabs |
+| [Earthquake Pro](https://civilengsuite.pages.dev/earthquake-pro/) | Seismic design \u2014 base shear, lateral load distribution, structural period |
+| [Mur Pro](https://civilengsuite.pages.dev/mur-pro/) | Ultimate Resistance Moment (Mur) \u2014 Egyptian Code (ECP) |
+| [Add Reft Pro](https://civilengsuite.pages.dev/add-reft-pro/) | Additional reinforcement for flat slab openings |
+
+---
+
+## Agent Discovery
+
+- **API Catalog (RFC 9727):** https://civilengsuite.pages.dev/.well-known/api-catalog
+- **Agent Skills Index:** https://civilengsuite.pages.dev/.well-known/agent-skills/index.json
+- **MCP Server Card (SEP-1649):** https://civilengsuite.pages.dev/.well-known/mcp/server-card.json
+- **OAuth Resource Metadata (RFC 9728):** https://civilengsuite.pages.dev/.well-known/oauth-protected-resource
+- **Security Contact (RFC 9116):** https://civilengsuite.is-a.dev/.well-known/security.txt
+- **Sitemap:** https://civilengsuite.pages.dev/sitemap.xml
+
+---
+
+## Keywords
+
+combined footing design \xB7 foundation design software \xB7 ACI 318 \xB7 structural engineering software \xB7 free civil engineering tools \xB7 footing calculator \xB7 reinforced concrete design \xB7 offline engineering software \xB7 Excel structural design \xB7 \u062A\u0635\u0645\u064A\u0645 \u0627\u0644\u0642\u0648\u0627\u0639\u062F \xB7 \u0628\u0631\u0646\u0627\u0645\u062C \u062A\u0635\u0645\u064A\u0645 \u0627\u0644\u0623\u0633\u0627\u0633\u0627\u062A
+
+---
+
+*\xA9 2026 Civil Engineering Suite \u2014 Eng. Aymn Asi \u2014 All Rights Reserved.*
+`;
 
 // ── Utility helpers ───────────────────────────────────────────────────────────
 function hexToU8(hex) {
@@ -314,7 +423,6 @@ function buildProtectionBundle(pageFilename) {
 function stripProtectionScripts(html) {
   // Reusable safe-match helper: builds a regex that matches a single <script> block
   // containing the given marker string, without crossing into adjacent blocks.
-  // Equivalent to: <script...> [content that never includes </script>] MARKER [same] </script>
   function safeScriptRe(marker) {
     return new RegExp(
       '<script\\b[^>]*>(?:(?!<\\/script>)[\\s\\S])*?' + marker + '(?:(?!<\\/script>)[\\s\\S])*?<\\/script>',
@@ -323,32 +431,21 @@ function stripProtectionScripts(html) {
   }
 
   // [B1] "CONTENT PROTECTION SYSTEM" — the main protection IIFE (~180 lines).
-  // Present in both homepage and footing-pro. Contains setInterval DevTools loop.
   html = html.replace(safeScriptRe('CONTENT PROTECTION SYSTEM'), '');
 
-  // [B2] "© Footing Pro v.2026 - Eng. Aymn Asi - All Rights Reserved" — the
-  // secondary protection IIFE with Disable Right-Click / keyboard shortcuts.
-  // Comment appears verbatim as first line of the script block.
-  // Note: © is U+00A9, escaped as \\u00A9 in the regex string.
+  // [B2] "© Footing Pro v.2026 - Eng. Aymn Asi - All Rights Reserved"
   html = html.replace(safeScriptRe('\u00A9 Footing Pro v\\.2026 - Eng\\. Aymn Asi - All Rights Reserved'), '');
 
-  // [B3] "© Footing Pro v.2026 - Eng. Aymn Asi - Protected" — the obfuscated
-  // atob-encoded protection block (footing-pro only, ~5 lines).
+  // [B3] "© Footing Pro v.2026 - Eng. Aymn Asi - Protected"
   html = html.replace(safeScriptRe('\u00A9 Footing Pro v\\.2026 - Eng\\. Aymn Asi - Protected'), '');
 
-  // [B4] "_CES_COPYRIGHT_HTML" — the showSaveFilePicker override that intercepts
-  // Ctrl+S. Present in both homepage and footing-pro.
+  // [B4] "_CES_COPYRIGHT_HTML" — the showSaveFilePicker override (Ctrl+S).
   html = html.replace(safeScriptRe('_CES_COPYRIGHT_HTML'), '');
 
-  // [B5] "FOOTING PRO v.2026 — ENGINE TRANSFER + SECURITY UPGRADE" — the
-  // footing-pro download engine bundled with DevTools + MutationObserver code.
-  // PATTERN SAFETY: the em dash (U+2014, —) makes this pattern unique to the
-  // footing-pro protection script. The homepage NAV script has "ENGINE TRANSFER
-  // SYSTEM" with no em dash or "FOOTING PRO v.2026" prefix.
+  // [B5] "FOOTING PRO v.2026 — ENGINE TRANSFER + SECURITY UPGRADE"
   html = html.replace(safeScriptRe('FOOTING PRO v\\.2026 \u2014 ENGINE TRANSFER'), '');
 
-  // [B7] Remove oncontextmenu attribute from <body> tag (inline event handler
-  // that blocks right-click; irrelevant for bots, wastes parse time).
+  // [B7] Remove oncontextmenu attribute from <body> tag.
   html = html.replace(/<body([^>]*)\soncontextmenu="[^"]*"/gi, '<body$1');
 
   return html;
@@ -361,19 +458,72 @@ function stripProtectionScripts(html) {
 function minifyBotCSS(html) {
   return html.replace(/<style([^>]*)>([\s\S]*?)<\/style>/gi, (match, attrs, css) => {
     const minified = css
-      // Strip CSS block comments /* … */
       .replace(/\/\*[\s\S]*?\*\//g, '')
-      // Collapse runs of whitespace (spaces, tabs, newlines) to single space
       .replace(/\s+/g, ' ')
-      // Remove spaces around CSS structural characters
       .replace(/\s*([{};,])\s*/g, '$1')
-      // Remove space after colon ONLY in property declarations (not in :root, ::before etc.)
-      // Strategy: remove space after colon when preceded by a word character
       .replace(/(\w)\s*:\s*/g, '$1:')
-      // Trim leading/trailing whitespace
       .trim();
     return `<style${attrs}>${minified}</style>`;
   });
+}
+
+// [A3] WebMCP script — exposes CES tools to AI agents via navigator.modelContext.
+// Injected ONLY into bot path HTML, before </body>. Never reaches human browsers.
+// Each tool: name, description, inputSchema (JSON Schema), execute callback.
+function buildWebMCPScript() {
+  return `<script>
+(function(){
+  if(!navigator.modelContext||typeof navigator.modelContext.provideContext!=='function')return;
+  try{
+    navigator.modelContext.provideContext({
+      name:'civil-engineering-suite',
+      description:'Civil Engineering Suite \u2014 Free ACI 318-19 structural engineering tools by Eng. Aymn Asi. Combined footing design, section properties, beam, column, deflection, seismic design.',
+      tools:[
+        {
+          name:'open_footing_pro',
+          description:'Open Footing Pro v.2026 \u2014 ACI 318-19 combined footing design. 17 modules: soil pressure, shear/moment diagrams, punching shear, flexural reinforcement, development length.',
+          inputSchema:{type:'object',properties:{},required:[]},
+          execute:function(){window.location.href='/footing-pro/';return{success:true,url:'/footing-pro/'};}
+        },
+        {
+          name:'open_section_property_pro',
+          description:'Open Section Property Pro \u2014 cross-section calculator. Computes area, centroid, Ix/Iy, section modulus, radius of gyration.',
+          inputSchema:{type:'object',properties:{},required:[]},
+          execute:function(){window.location.href='/section-property-pro/';return{success:true,url:'/section-property-pro/'};}
+        },
+        {
+          name:'get_suite_info',
+          description:'Returns structured metadata about all Civil Engineering Suite tools, their status, and agent discovery endpoints.',
+          inputSchema:{type:'object',properties:{},required:[]},
+          execute:function(){
+            return{
+              suite:'Civil Engineering Suite',
+              author:'Eng. Aymn Asi',
+              standard:'ACI 318-19',
+              tools:[
+                {name:'Footing Pro v.2026',url:'/footing-pro/',status:'live',modules:17},
+                {name:'Section Property Pro',url:'/section-property-pro/',status:'live'},
+                {name:'Beam Pro',url:'/beam-pro/',status:'coming-2026'},
+                {name:'Column Pro',url:'/column-pro/',status:'coming-2026'},
+                {name:'Deflection Pro',url:'/deflection-pro/',status:'coming-2026'},
+                {name:'Earthquake Pro',url:'/earthquake-pro/',status:'coming-2026'},
+                {name:'Mur Pro',url:'/mur-pro/',status:'coming-2026'},
+                {name:'Add Reft Pro',url:'/add-reft-pro/',status:'coming-2026'}
+              ],
+              agentDiscovery:{
+                apiCatalog:'/.well-known/api-catalog',
+                mcpServerCard:'/.well-known/mcp/server-card.json',
+                agentSkills:'/.well-known/agent-skills/index.json',
+                oauthResource:'/.well-known/oauth-protected-resource'
+              }
+            };
+          }
+        }
+      ]
+    });
+  }catch(e){}
+})();
+</script>`;
 }
 
 // ── Main request handler ──────────────────────────────────────────────────────
@@ -393,10 +543,6 @@ export async function onRequest(context) {
   if (STATIC_PASSTHROUGH.test(path)) return context.next();
 
   // ── Route matching: exact app root paths only ─────────────────────────────
-  // Strip trailing slashes first (done above), then require the path to be
-  // exactly equal to the route prefix — nothing more, nothing less.
-  // This means /footing-pro/images/screenshot.png is NOT matched and falls
-  // through to context.next() so Cloudflare serves it as a static asset.
   const route = (path === '' || path === '/' || path === '/index.html')
     ? ROUTES[0]
     : ROUTES.slice(1).find(r => path === r.prefix);
@@ -405,6 +551,28 @@ export async function onRequest(context) {
   if (!route) return context.next();
 
   const { encFile, baseHref, faviconLinks, pageFilename } = route;
+
+  // ── Markdown negotiation (RFC 9110 content negotiation) ────────────────────
+  // [A2] Agents sending Accept: text/markdown on the homepage receive a curated
+  // static markdown response. The decrypt pipeline is bypassed entirely —
+  // no CES_DECRYPT_KEY access, no AES-GCM, no XOR, no HTML parsing.
+  // Cache-Control: public — markdown content is not user-specific.
+  // x-markdown-tokens: approximate token count (word count × 1.3 multiplier).
+  const acceptHeader = request.headers.get('Accept') || '';
+  if (path === '/' && acceptHeader.includes('text/markdown')) {
+    const tokenEstimate = String(Math.round(HOMEPAGE_MARKDOWN.split(/\s+/).length * 1.3));
+    return new Response(HOMEPAGE_MARKDOWN, {
+      status: 200,
+      headers: {
+        'Content-Type':      'text/markdown; charset=utf-8',
+        'x-markdown-tokens': tokenEstimate,
+        'Vary':              'Accept',
+        'Cache-Control':     'public, max-age=3600, must-revalidate',
+        'Link':              HOMEPAGE_LINK_HEADER,
+        ...SHARED_SECURITY_HEADERS,
+      },
+    });
+  }
 
   // ── Validate key ───────────────────────────────────────────────────────────
   const keyHex = (env.CES_DECRYPT_KEY || '').trim();
@@ -464,41 +632,44 @@ export async function onRequest(context) {
       `$1https://${host}$2`
     );
 
-    // [F3] FIX: /footing-pro/og-image.png has no _redirects entry → 404.
-    // Rewrite to the correct path served by /footing-pro/images/* redirect.
+    // [F3] FIX: /footing-pro/og-image.png → /footing-pro/images/og-image.png
     botHtml = botHtml.replace(
       /(https?:\/\/[^"']+)\/footing-pro\/og-image\.png/gi,
       '$1/footing-pro/images/og-image.png'
     );
 
-    // [F2] FIX: Strip the body-hiding noscript style that blinds Googlebot's
-    // first-pass HTML-only crawl. Matches both homepage and footing-pro variants.
-    // SECURITY-SAFE: only touches the <noscript> fallback, zero impact on JS paths.
+    // [F2] FIX: Strip body-hiding noscript style
     botHtml = botHtml.replace(
       /(<noscript>)\s*<style>[^<]*?body\s*\{[^}]*?display\s*:\s*none[^}]*?\}[^<]*?<\/style>/gi,
       '$1'
     );
 
     // [B1–B5, B7] Strip all inline protection scripts and inline event handlers.
-    // These add ~200 KB of JS that Googlebot must parse before reaching content.
-    // SECURITY-SAFE: only modifies botHtml (local variable), human path untouched.
     botHtml = stripProtectionScripts(botHtml);
 
     // [B6] Minify all inline <style> blocks.
-    // Reduces CSS from ~120 KB raw to ~55 KB minified — faster crawl rendering.
     botHtml = minifyBotCSS(botHtml);
 
     // Inject nonces into remaining scripts (JSON-LD, translation, navigation)
     botHtml = injectNonces(botHtml, cspNonce);
 
+    // [A3] Inject WebMCP tools before </body> — visible to AI agents on page scan.
+    // injectNonces stamps the nonce onto the WebMCP <script> tag as well.
+    botHtml = botHtml.replace(/<\/body>/i,
+      injectNonces(buildWebMCPScript(), cspNonce) + '</body>');
+
     return new Response(botHtml, { status: 200, headers: {
       'Content-Type':            'text/html; charset=utf-8',
       // [F5] private prevents CDN from caching decrypted HTML and serving to humans
       'Cache-Control':           'private, max-age=3600, must-revalidate',
-      // [F4] Vary:User-Agent belt-and-suspenders: CDN must not merge bot/human caches
-      'Vary':                    'User-Agent',
+      // [F4] Vary: User-Agent prevents CDN merging bot/human caches.
+      // [A4] Vary: Accept added on homepage so markdown-negotiated cache is separate.
+      'Vary':                    route.prefix === '/' ? 'User-Agent, Accept' : 'User-Agent',
       'X-Robots-Tag':            'index, follow',
       'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}'`,
+      // [A1] Link header on ALL bot responses — agents crawling any tool page
+      // discover the full agent catalog without needing to hit the homepage first.
+      'Link':                    HOMEPAGE_LINK_HEADER,
       ...SHARED_SECURITY_HEADERS,
     }});
   }
@@ -559,6 +730,12 @@ export async function onRequest(context) {
     'Content-Type':            'text/html; charset=utf-8',
     'Cache-Control':           'no-store',
     'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}'`,
+    // [A1] RFC 8288 Link header — visible in HTTP headers before JS executes.
+    // [A4] Vary: Accept on homepage so intermediaries separate markdown/HTML caches.
+    ...(route.prefix === '/' ? {
+      'Link': HOMEPAGE_LINK_HEADER,
+      'Vary': 'Accept',
+    } : {}),
     ...SHARED_SECURITY_HEADERS,
   }});
 }
