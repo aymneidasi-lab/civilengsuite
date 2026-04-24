@@ -2,7 +2,7 @@
   "$schema": "https://agentskills.io/schemas/index/v0.2.0.json",
   "name": "Civil Engineering Suite — Agent Skills Index",
   "description": "Agent discovery index for civilengsuite.pages.dev — structural engineering tools by Eng. Aymn Asi.",
-  "updated": "2026-04-23T00:00:00.000Z",
+  "updated": "2026-04-24T00:00:00.000Z",
   "skills": [
     {
       "name": "api-catalog",
@@ -17,6 +17,13 @@
       "description": "SEP-1649 MCP Server Card for Civil Engineering Suite. Currently informational; no MCP transport endpoint is active.",
       "url": "https://civilengsuite.pages.dev/.well-known/mcp/server-card.json",
       "sha256": "68194976ad7d9f68f6e12ad23bf4ed35d7fead1456a6729671db92a907afe434"
+    },
+    {
+      "name": "oauth-authorization-server",
+      "type": "oauth-authorization-server",
+      "description": "RFC 8414 OAuth Authorization Server Metadata for Civil Engineering Suite. No active authorization server — all public tools are freely accessible without authentication.",
+      "url": "https://civilengsuite.pages.dev/.well-known/oauth-authorization-server",
+      "sha256": "a7862fa556579024d08fc0d44746ed19c0a4b4e37f692df8f9da479df97fa8bc"
     },
     {
       "name": "oauth-protected-resource",

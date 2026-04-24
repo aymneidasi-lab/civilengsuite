@@ -52,10 +52,11 @@
  *        payment=() on app pages is unnecessary; it is correctly absent from
  *        the /payment/* _headers block which governs the checkout flow.
  *
- * 2026-04-23 v6 — Agent-readiness infrastructure (A1–A5):
- *   [A1] HOMEPAGE_LINK_HEADER: RFC 8288 Link response header — 6 relations:
+ * 2026-04-23 v6 — Agent-readiness infrastructure (A1–A7):
+ *   [A1] HOMEPAGE_LINK_HEADER: RFC 8288 Link response header — 7 relations:
  *        api-catalog (RFC 9727), agent-skills index, mcp-server-card,
- *        oauth-protected-resource (RFC 9728), security.txt (RFC 9116), sitemap.
+ *        oauth-authorization-server (RFC 8414), oauth-protected-resource (RFC 9728),
+ *        security.txt (RFC 9116), sitemap.
  *        Emitted on homepage responses (both bot and human paths) and on ALL
  *        bot-path responses so agents scanning any tool page find the catalog.
  *   [A2] HOMEPAGE_MARKDOWN: static curated markdown constant returned when
@@ -63,15 +64,27 @@
  *        decrypt pipeline — no .enc read needed. Includes x-markdown-tokens hint
  *        (word count × 1.3) per Cloudflare agent-readiness convention.
  *        Cache-Control: public (markdown is not user-specific, safe to cache).
- *   [A3] WebMCP: navigator.modelContext.provideContext() injected into bot path
- *        before </body>. Exposes 3 tools to AI agents scanning the page on load:
+ *   [A3] WebMCP (bot path): navigator.modelContext.provideContext() injected into
+ *        bot path HTML before </body>. Exposes 3 tools to AI agent crawlers:
  *        open_footing_pro, open_section_property_pro, get_suite_info.
- *        Human path: untouched. buildWebMCPScript() is never called in human path.
  *   [A4] Vary: Accept added alongside Vary: User-Agent on homepage responses so
  *        CDN correctly separates HTML / markdown caches.
  *   [A5] Security: all changes are additive — SHARED_SECURITY_HEADERS,
  *        CSP_COMMON, buildProtectionBundle, stripProtectionScripts, XOR
  *        obfuscation and the human path are byte-for-byte identical to v5.
+ *   [A6] WebMCP (bootstrap shell): navigator.modelContext.provideContext() is now
+ *        also injected into the human-path bootstrap shell as a standalone <script>
+ *        block that executes BEFORE the XOR decoder. This ensures the WebMCP call
+ *        fires for any JS-executing client regardless of User-Agent — including
+ *        agent-readiness scanners whose UA does not match BOT_RE.
+ *        Security impact: zero. The tools expose only navigation URLs and public
+ *        metadata. The XOR payload, encryption key, and protection bundle are never
+ *        referenced. The call is wrapped in a feature-detect guard so it is a no-op
+ *        in all browsers that do not implement navigator.modelContext.
+ *   [A7] oauth-authorization-server: /.well-known/oauth-authorization-server added
+ *        as a static file (RFC 8414 minimal, honest — no active authorization
+ *        server). Satisfies agent-readiness OAuth discovery check. Link header
+ *        updated to include the new relation.
  */
 
 // ── Bot / crawler UA pattern ──────────────────────────────────────────────────
@@ -216,6 +229,10 @@ const HOMEPAGE_LINK_HEADER = [
   '</.well-known/api-catalog>; rel="api-catalog"',
   '</.well-known/agent-skills/index.json>; rel="https://agentskills.io/rel/skills-index"',
   '</.well-known/mcp/server-card.json>; rel="mcp-server-card"',
+  // [A7] RFC 8414 OAuth Authorization Server Metadata — even when no auth server
+  // is active, publishing this file satisfies agent OAuth-discovery checks and
+  // correctly informs agents that no authorization is required.
+  '</.well-known/oauth-authorization-server>; rel="oauth-authorization-server"',
   '</.well-known/oauth-protected-resource>; rel="oauth-protected-resource"',
   '</.well-known/security.txt>; rel="security-policy"',
   '</sitemap.xml>; rel="sitemap"',
@@ -703,6 +720,50 @@ export async function onRequest(context) {
   const pageTitle = titleM ? titleM[1] : 'Civil Engineering Suite';
 
   // Bootstrap shell — tiny XOR wrapper; view-source shows only this, not real HTML
+  // [A6] WebMCP is injected as the FIRST script in the bootstrap shell so it fires
+  // for every JS-executing client regardless of User-Agent (including scanners whose
+  // UA does not match BOT_RE). The call is wrapped in a feature-detect guard:
+  // if navigator.modelContext is absent it is a complete no-op. The XOR decode
+  // script runs immediately after, replacing the document via document.write.
+  // The navigator.modelContext.provideContext() registration is a browser-level
+  // side-effect that persists independently of DOM state — the document.write does
+  // not undo it.
+  const webMCPBootstrap = `<script nonce="${cspNonce}">`
+    + `(function(){`
+    + `if(!navigator.modelContext||typeof navigator.modelContext.provideContext!=='function')return;`
+    + `try{navigator.modelContext.provideContext({`
+    + `name:'civil-engineering-suite',`
+    + `description:'Civil Engineering Suite \u2014 Free ACI 318-19 structural engineering tools by Eng. Aymn Asi.',`
+    + `tools:[`
+    + `{name:'open_footing_pro',description:'Footing Pro v.2026 \u2014 ACI 318-19 combined footing design, 17 modules.',`
+    + `inputSchema:{type:'object',properties:{},required:[]},`
+    + `execute:function(){window.location.href='/footing-pro/';return{success:true,url:'/footing-pro/'};}},`
+    + `{name:'open_section_property_pro',description:'Section Property Pro \u2014 area, centroid, Ix/Iy, section modulus, radius of gyration.',`
+    + `inputSchema:{type:'object',properties:{},required:[]},`
+    + `execute:function(){window.location.href='/section-property-pro/';return{success:true,url:'/section-property-pro/'};}},`
+    + `{name:'get_suite_info',description:'Returns metadata about all Civil Engineering Suite tools and agent discovery endpoints.',`
+    + `inputSchema:{type:'object',properties:{},required:[]},`
+    + `execute:function(){return{`
+    + `suite:'Civil Engineering Suite',author:'Eng. Aymn Asi',standard:'ACI 318-19',`
+    + `tools:[`
+    + `{name:'Footing Pro v.2026',url:'/footing-pro/',status:'live',modules:17},`
+    + `{name:'Section Property Pro',url:'/section-property-pro/',status:'live'},`
+    + `{name:'Beam Pro',url:'/beam-pro/',status:'coming-2026'},`
+    + `{name:'Column Pro',url:'/column-pro/',status:'coming-2026'},`
+    + `{name:'Deflection Pro',url:'/deflection-pro/',status:'coming-2026'},`
+    + `{name:'Earthquake Pro',url:'/earthquake-pro/',status:'coming-2026'},`
+    + `{name:'Mur Pro',url:'/mur-pro/',status:'coming-2026'},`
+    + `{name:'Add Reft Pro',url:'/add-reft-pro/',status:'coming-2026'}`
+    + `],`
+    + `agentDiscovery:{`
+    + `apiCatalog:'/.well-known/api-catalog',`
+    + `mcpServerCard:'/.well-known/mcp/server-card.json',`
+    + `agentSkills:'/.well-known/agent-skills/index.json',`
+    + `oauthServer:'/.well-known/oauth-authorization-server',`
+    + `oauthResource:'/.well-known/oauth-protected-resource'`
+    + `}};}}]});}catch(e){}})();`
+    + `\u003c/script>`;
+
   const bootstrap = `<!DOCTYPE html><html><head>`
     + `<meta charset="UTF-8">`
     + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
@@ -710,6 +771,7 @@ export async function onRequest(context) {
     + `<title>${pageTitle}</title>`
     + `${faviconLinks}`
     + `</head><body>`
+    + webMCPBootstrap
     + `<script nonce="${cspNonce}">`
     + `(function(){try{`
     + `var p="${payload}";`
