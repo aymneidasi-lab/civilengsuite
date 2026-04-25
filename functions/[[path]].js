@@ -853,7 +853,7 @@ export async function onRequest(context) {
       // [A4] Vary: Accept added on homepage so markdown-negotiated cache is separate.
       'Vary':                    route.prefix === '/' ? 'User-Agent, Accept' : 'User-Agent',
       'X-Robots-Tag':            'index, follow',
-      'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}'`,
+      'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'unsafe-inline'`,
       // [A1] Link header on ALL bot responses — agents crawling any tool page
       // discover the full agent catalog without needing to hit the homepage first.
       'Link':                    HOMEPAGE_LINK_HEADER,
@@ -962,13 +962,23 @@ export async function onRequest(context) {
     + `}};}}]});}catch(e){}})();`
     + `\u003c/script>`;
 
+  // [PERF] Route-specific LCP preload: hero-bg.png for footing-pro must start
+  // downloading before JS runs. Without this, the browser can't discover the
+  // CSS background-image until the XOR decoder completes + CSS is parsed.
+  const lcpPreload = route.prefix === '/footing-pro'
+    ? `<link rel="preload" as="image" href="/footing-pro/images/hero-bg.png" fetchpriority="high">`
+    : '';
+
   const bootstrap = `<!DOCTYPE html><html><head>`
     + `<meta charset="UTF-8">`
     + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
-    + `<meta name="robots" content="noindex">`
+    + (route.ogDescription ? `<meta name="description" content="${escHtml(route.ogDescription)}">` : \`\`)
+    + `<link rel="preconnect" href="https://fonts.googleapis.com">`
+    + `<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>`
+    + lcpPreload
     + `<title>${pageTitle}</title>`
     + ogMetaBlock
-    + `${faviconLinks}`
+    + `\${faviconLinks}`
     + `</head><body>`
     + webMCPBootstrap
     + `<script nonce="${cspNonce}">`
@@ -990,7 +1000,7 @@ export async function onRequest(context) {
   return new Response(bootstrap, { status: 200, headers: {
     'Content-Type':            'text/html; charset=utf-8',
     'Cache-Control':           'no-store',
-    'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}'`,
+    'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'unsafe-inline'`,
     // [A1] RFC 8288 Link header — visible in HTTP headers before JS executes.
     // [A4] Vary: Accept on homepage so intermediaries separate markdown/HTML caches.
     ...(route.prefix === '/' ? {

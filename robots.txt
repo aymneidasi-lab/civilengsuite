@@ -32,7 +32,6 @@
 
 # ── Content Signals — AI usage preferences (https://contentsignals.org/) ──────
 # [A1] Proprietary engineering software. Training and direct AI input disallowed.
-Content-Signal: ai-train=no, search=yes, ai-input=no
 
 # ── Allow all compliant search engine bots ──
 User-agent: *
