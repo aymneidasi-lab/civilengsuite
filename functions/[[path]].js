@@ -972,13 +972,13 @@ export async function onRequest(context) {
   const bootstrap = `<!DOCTYPE html><html><head>`
     + `<meta charset="UTF-8">`
     + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
-    + (route.ogDescription ? `<meta name="description" content="${escHtml(route.ogDescription)}">` : \`\`)
+    + (route.ogDescription ? `<meta name="description" content="${escHtml(route.ogDescription)}">` : '')
     + `<link rel="preconnect" href="https://fonts.googleapis.com">`
     + `<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>`
     + lcpPreload
     + `<title>${pageTitle}</title>`
     + ogMetaBlock
-    + `\${faviconLinks}`
+    + faviconLinks
     + `</head><body>`
     + webMCPBootstrap
     + `<script nonce="${cspNonce}">`
