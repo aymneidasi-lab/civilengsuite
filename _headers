@@ -80,11 +80,6 @@
   Cache-Control: public, max-age=86400
   Access-Control-Allow-Origin: *
 
-/fonts/*
-  Cache-Control: public, max-age=31536000, immutable
-  Cross-Origin-Resource-Policy: cross-origin
-  Access-Control-Allow-Origin: *
-
 /images/*
   Cache-Control: public, max-age=31536000, immutable
   Cross-Origin-Resource-Policy: cross-origin
@@ -179,7 +174,7 @@
 # ════════════════════════════════════════════════════════════════
 
 /payment/*
-  Content-Security-Policy: default-src 'self'; script-src 'self' https://accept.paymob.com; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: https://*.paymob.com https://paymob.com; connect-src 'self' https://accept.paymob.com; frame-src https://accept.paymob.com; frame-ancestors 'none'; form-action 'none'; base-uri 'self'; upgrade-insecure-requests; report-uri /api/csp-report
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://accept.paymob.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://*.paymob.com https://paymob.com; connect-src 'self' https://accept.paymob.com; frame-src https://accept.paymob.com; frame-ancestors 'none'; form-action 'none'; base-uri 'self'; upgrade-insecure-requests; report-uri /api/csp-report
   Permissions-Policy: camera=(), microphone=(), geolocation=(), accelerometer=(), gyroscope=(), magnetometer=(), display-capture=(), screen-wake-lock=(), autoplay=(), clipboard-read=()
   Cache-Control: no-store
   X-Robots-Tag: noindex, nofollow
