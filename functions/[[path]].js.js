@@ -52,6 +52,17 @@
  *        payment=() on app pages is unnecessary; it is correctly absent from
  *        the /payment/* _headers block which governs the checkout flow.
  *
+ * 2026-04-26 v9 — PageSpeed 100 fixes (PS1–PS5):
+ *   [PS1] Bootstrap shell: removed Google Fonts preconnect links → replaced with
+ *         self-hosted woff2 font preloads (cairo-400, cairo-700).
+ *   [PS2] CSP_COMMON: removed fonts.googleapis.com from style-src, removed
+ *         fonts.gstatic.com from font-src. Self-hosted fonts only need 'self'.
+ *   [PS3] CSP_COMMON: added require-trusted-types-for 'script' + trusted-types
+ *         default. Fixes Best Practices Trusted Types audit.
+ *   [PS4] lcpPreload: updated to WebP with AVIF imagesrcset (LCP savings ~800ms).
+ *   [PS5] HTML sources (index.html, footing-pro/index.html): all pagespeed fixes
+ *         applied externally per pagespeed-100-fix-prompt.txt.
+ *
  * 2026-04-25 v8 — Bot-path OG tag injection + favicon guard (V2-BOT, V4-FAV):
  *   [V2-BOT] Bot path: inject og:image:secure_url / og:image:type / width / height
  *            into bot-path (decrypted) HTML when absent. Bootstrap ogMetaBlock (v7
@@ -968,18 +979,16 @@ export async function onRequest(context) {
   // downloading before JS runs. Without this, the browser can't discover the
   // CSS background-image until the XOR decoder completes + CSS is parsed.
   const lcpPreload = route.prefix === '/footing-pro'
-    ? `<link rel="preload" as="image" href="/footing-pro/images/hero-bg.webp" imagesrcset="/footing-pro/images/hero-bg.avif" fetchpriority="high" type="image/webp">`
+    ? `<link rel="preload" as="image" href="/footing-pro/images/hero-bg.webp" fetchpriority="high" imagesrcset="/footing-pro/images/hero-bg.avif 1x" type="image/webp">`
     : '';
 
   const bootstrap = `<!DOCTYPE html><html><head>`
     + `<meta charset="UTF-8">`
     + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
     + (route.ogDescription ? `<meta name="description" content="${escHtml(route.ogDescription)}">` : '')
-    /* Google Fonts preconnects removed — fonts are now self-hosted */
+    + `<link rel="preload" href="/fonts/cairo-700.woff2" as="font" type="font/woff2" crossorigin>`
+    + `<link rel="preload" href="/fonts/cairo-400.woff2" as="font" type="font/woff2" crossorigin>`
     + lcpPreload
-    + `<link rel="preload" href="/fonts/inter-400.woff2" as="font" type="font/woff2" crossorigin>`
-    + `<link rel="preload" href="/fonts/inter-700.woff2" as="font" type="font/woff2" crossorigin>`
-    + `<link rel="preload" href="/fonts/playfair-700.woff2" as="font" type="font/woff2" crossorigin>`
     + `<title>${pageTitle}</title>`
     + ogMetaBlock
     + faviconLinks
