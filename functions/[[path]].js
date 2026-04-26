@@ -268,8 +268,8 @@ const CSP_COMMON = [
   "worker-src 'none'",
   "manifest-src 'none'",
   "media-src 'none'",
-  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-  "font-src 'self' https://fonts.gstatic.com",
+  "style-src 'self' 'unsafe-inline',"
+  "font-src 'self',"
   "img-src 'self' data:",
   "connect-src 'self'",
   "frame-ancestors 'none'",
@@ -966,16 +966,19 @@ export async function onRequest(context) {
   // downloading before JS runs. Without this, the browser can't discover the
   // CSS background-image until the XOR decoder completes + CSS is parsed.
   const lcpPreload = route.prefix === '/footing-pro'
-    ? `<link rel="preload" as="image" href="/footing-pro/images/hero-bg.png" fetchpriority="high">`
+    ? `<link rel="preload" as="image" href="/footing-pro/images/hero-bg.webp" imagesrcset="/footing-pro/images/hero-bg.avif" fetchpriority="high" type="image/webp">`
     : '';
 
   const bootstrap = `<!DOCTYPE html><html><head>`
     + `<meta charset="UTF-8">`
     + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
     + (route.ogDescription ? `<meta name="description" content="${escHtml(route.ogDescription)}">` : '')
-    + `<link rel="preconnect" href="https://fonts.googleapis.com">`
-    + `<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>`
     + lcpPreload
+    + `<link rel="preload" href="/fonts/inter-400.woff2" as="font" type="font/woff2" crossorigin>`
+    + `<link rel="preload" href="/fonts/inter-700.woff2" as="font" type="font/woff2" crossorigin>`
+    + `<link rel="preload" href="/fonts/playfair-700.woff2" as="font" type="font/woff2" crossorigin>`
+    + `<link rel="preload" href="/fonts/cairo-700.woff2" as="font" type="font/woff2" crossorigin>`
+    + `<link rel="preload" href="/fonts/cairo-400.woff2" as="font" type="font/woff2" crossorigin>`
     + `<title>${pageTitle}</title>`
     + ogMetaBlock
     + faviconLinks
