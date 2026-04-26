@@ -268,8 +268,8 @@ const CSP_COMMON = [
   "worker-src 'none'",
   "manifest-src 'none'",
   "media-src 'none'",
-  "style-src 'self' 'unsafe-inline'",
-  "font-src 'self'",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src 'self' https://fonts.gstatic.com",
   "img-src 'self' data:",
   "connect-src 'self'",
   "frame-ancestors 'none'",
@@ -277,8 +277,6 @@ const CSP_COMMON = [
   "form-action 'self' https://civilengsuite.is-a.dev",
   "upgrade-insecure-requests",
   "report-uri /api/csp-report",
-  "require-trusted-types-for 'script'",
-  "trusted-types default",
 ].join('; ');
 
 // [F6] Shared security headers applied to EVERY response this function emits.
@@ -968,18 +966,16 @@ export async function onRequest(context) {
   // downloading before JS runs. Without this, the browser can't discover the
   // CSS background-image until the XOR decoder completes + CSS is parsed.
   const lcpPreload = route.prefix === '/footing-pro'
-    ? `<link rel="preload" as="image" href="/footing-pro/images/hero-bg.webp" imagesrcset="/footing-pro/images/hero-bg.avif" fetchpriority="high" type="image/webp">`
+    ? `<link rel="preload" as="image" href="/footing-pro/images/hero-bg.png" fetchpriority="high">`
     : '';
 
   const bootstrap = `<!DOCTYPE html><html><head>`
     + `<meta charset="UTF-8">`
     + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
     + (route.ogDescription ? `<meta name="description" content="${escHtml(route.ogDescription)}">` : '')
-    /* Google Fonts preconnects removed — fonts are now self-hosted */
+    + `<link rel="preconnect" href="https://fonts.googleapis.com">`
+    + `<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>`
     + lcpPreload
-    + `<link rel="preload" href="/fonts/inter-400.woff2" as="font" type="font/woff2" crossorigin>`
-    + `<link rel="preload" href="/fonts/inter-700.woff2" as="font" type="font/woff2" crossorigin>`
-    + `<link rel="preload" href="/fonts/playfair-700.woff2" as="font" type="font/woff2" crossorigin>`
     + `<title>${pageTitle}</title>`
     + ogMetaBlock
     + faviconLinks
