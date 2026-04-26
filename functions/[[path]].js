@@ -268,8 +268,8 @@ const CSP_COMMON = [
   "worker-src 'none'",
   "manifest-src 'none'",
   "media-src 'none'",
-  "style-src 'self' 'unsafe-inline',"
-  "font-src 'self',"
+  "style-src 'self' 'unsafe-inline'",
+  "font-src 'self'",
   "img-src 'self' data:",
   "connect-src 'self'",
   "frame-ancestors 'none'",
