@@ -880,6 +880,12 @@ export async function onRequest(context) {
   // Stamp nonce on every <script> tag
   html = injectNonces(html, cspNonce);
 
+  // [PSI-09] Minify inline <style> blocks before XOR encoding.
+  // Reduces encrypted payload size (~2.9 KiB savings). Uses the same
+  // minifyBotCSS function already applied on the bot path. Safe: does not
+  // touch <style> blocks inside <noscript> or <script> tags.
+  html = minifyBotCSS(html);
+
   // XOR + base64 obfuscation (same algorithm as api/decrypt.js)
   const raw   = new TextEncoder().encode(html);
   const xored = new Uint8Array(raw.length);
