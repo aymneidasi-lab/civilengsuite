@@ -85,6 +85,11 @@
   Cross-Origin-Resource-Policy: cross-origin
   Access-Control-Allow-Origin: *
 
+/public/fonts/*
+  Cache-Control: public, max-age=31536000, immutable
+  Cross-Origin-Resource-Policy: cross-origin
+  Access-Control-Allow-Origin: *
+
 /images/*
   Cache-Control: public, max-age=31536000, immutable
   Cross-Origin-Resource-Policy: cross-origin

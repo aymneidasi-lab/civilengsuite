@@ -1,37 +1,25 @@
 # _redirects — Civil Engineering Suite (Cloudflare Pages)
-# Remaps URL paths to the actual locations inside public/
-# RULE: specific paths must come BEFORE wildcards (first match wins)
+# Static path rewrites: public/* files served at clean URLs
+# 200 = silent rewrite (no URL change in browser)
+# Must be placed BEFORE any catch-all rules.
 #
-# FIX LOG (2026-04-14):
-# [F1] Added /footing-pro/og-image.png redirect.
-#      The og:image meta tag and sitemap both referenced this path,
-#      but no redirect existed → Google got a 404 for the OG image.
-#      The sitemap.xml has also been updated to use /footing-pro/images/og-image.png
-#      but this redirect is kept as a permanent fallback for any cached references.
+# FIX 3A — Fonts: /fonts/* → /public/fonts/:splat
+#   Physical location: public/fonts/*.woff2
+#   Browser requests:  /fonts/*.woff2
+#   Without this rewrite, all font requests 404.
+#
+# FIX 3B — Images: /footing-pro/images/* and /images/*
+#   Physical location: public/footing-pro/images/* and public/images/*
+#   Browser requests:  /footing-pro/images/* and /images/*
+#   These rewrites must exist for images to load at all.
 
-# ── Specific root images (must be before /*.png wildcard) ────────────────────
-/favicon.ico                    /public/images/favicon.ico              200
-/hero-bg.png                    /public/images/hero-bg.png              200
-/og-image.png                   /public/images/og-image.png             200
-/images/hero-bg.png             /public/images/hero-bg.png              200
-/images/og-image.png            /public/images/og-image.png             200
-
-# ── Root images folder ────────────────────────────────────────────────────────
-/images/*                       /public/images/:splat                   200
-
-# ── [F1] FIX: footing-pro og-image without /images/ was a 404 ────────────────
-/footing-pro/og-image.png       /public/footing-pro/images/og-image.png 200
-
-# ── Sub-app image folders ─────────────────────────────────────────────────────
-/footing-pro/images/*           /public/footing-pro/images/:splat       200
-/beam-pro/images/*              /public/beam-pro/images/:splat          200
-/column-pro/images/*            /public/column-pro/images/:splat        200
-/deflection-pro/images/*        /public/deflection-pro/images/:splat    200
-/earthquake-pro/images/*        /public/earthquake-pro/images/:splat    200
-/mur-pro/images/*               /public/mur-pro/images/:splat           200
-/add-reft-pro/images/*          /public/add-reft-pro/images/:splat      200
-/section-property-pro/images/*  /public/section-property-pro/images/:splat 200
-
-# ── Special routes ────────────────────────────────────────────────────────────
-/.well-known/security.txt       /security.txt                           200
-/download                       https://drive.google.com/uc?export=download&id=1EQ6UaHvwrchiV0U5vRdXR5YktOZMnfrQ&confirm=t 302
+/fonts/*                    /public/fonts/:splat                    200
+/images/*                   /public/images/:splat                   200
+/footing-pro/images/*       /public/footing-pro/images/:splat       200
+/beam-pro/images/*          /public/beam-pro/images/:splat          200
+/column-pro/images/*        /public/column-pro/images/:splat        200
+/deflection-pro/images/*    /public/deflection-pro/images/:splat    200
+/earthquake-pro/images/*    /public/earthquake-pro/images/:splat    200
+/mur-pro/images/*           /public/mur-pro/images/:splat           200
+/add-reft-pro/images/*      /public/add-reft-pro/images/:splat      200
+/section-property-pro/images/* /public/section-property-pro/images/:splat 200

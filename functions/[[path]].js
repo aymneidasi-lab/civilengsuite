@@ -439,7 +439,11 @@ function escHtml(s) {
                   .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 function injectNonces(html, nonce) {
-  return html.replace(/<script(?=[\s>])/g, `<script nonce="${nonce}"`);
+  // Case-insensitive; skips scripts that already carry a nonce attribute
+  return html.replace(/<script(\b[^>]*?)>/gi, (match, attrs) => {
+    if (/\bnonce\s*=/.test(attrs)) return match; // already has nonce
+    return `<script${attrs} nonce="${nonce}">`;
+  });
 }
 
 // ── AES-256-GCM decrypt using Web Crypto ─────────────────────────────────────
@@ -870,7 +874,7 @@ export async function onRequest(context) {
       // [A4] Vary: Accept added on homepage so markdown-negotiated cache is separate.
       'Vary':                    route.prefix === '/' ? 'User-Agent, Accept' : 'User-Agent',
       'X-Robots-Tag':            'index, follow',
-      'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'unsafe-inline'`,
+      'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ='`,
       // [A1] Link header on ALL bot responses — agents crawling any tool page
       // discover the full agent catalog without needing to hit the homepage first.
       'Link':                    HOMEPAGE_LINK_HEADER,
@@ -989,9 +993,9 @@ export async function onRequest(context) {
   // downloading before JS runs. Without this, the browser can't discover the
   // CSS background-image until the XOR decoder completes + CSS is parsed.
   const lcpPreload = route.prefix === '/footing-pro'
-    ? '<link rel="preload" as="image" href="/footing-pro/images/hero-bg.webp"'
-      + ' imagesrcset="/footing-pro/images/hero-bg.avif" imagesizes="100vw"'
-      + ' fetchpriority="high">'
+    ? '<link rel="preload" as="image" href="/footing-pro/images/hero-bg.avif"'
+      + ' imagesrcset="/footing-pro/images/hero-bg.avif 1x,/footing-pro/images/hero-bg.webp 1x"'
+      + ' imagesizes="100vw" fetchpriority="high">'
     : '';
 
   const bootstrap = `<!DOCTYPE html><html><head>`
@@ -1031,7 +1035,7 @@ export async function onRequest(context) {
   return new Response(bootstrap, { status: 200, headers: {
     'Content-Type':            'text/html; charset=utf-8',
     'Cache-Control':           'no-store',
-    'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}'`,
+    'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ='`,
     // [A1] RFC 8288 Link header — visible in HTTP headers before JS executes.
     // [A4] Vary: Accept on homepage so intermediaries separate markdown/HTML caches.
     ...(route.prefix === '/' ? {
