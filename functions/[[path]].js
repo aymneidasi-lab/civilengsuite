@@ -52,6 +52,23 @@
  *        payment=() on app pages is unnecessary; it is correctly absent from
  *        the /payment/* _headers block which governs the checkout flow.
  *
+ * 2026-04-28 v9 — PSI font + LCP + CSP fixes (F1–F3):
+ *   [F1] STATIC_PASSTHROUGH: added fonts\.* — eliminates function invocation
+ *        overhead for every font request. Previously fonts fell through to
+ *        context.next() via the !route fallback, adding unnecessary routing
+ *        overhead on every woff2 request.
+ *   [F2] Human-path bootstrap CSP: removed 'unsafe-inline' from script-src.
+ *        Per CSP Level 3 spec, 'unsafe-inline' is ignored when a nonce is
+ *        present. Its presence caused browsers to log nonce violations for
+ *        inline event handlers in the decoded HTML. Removal eliminates two
+ *        console errors per page load, restoring Best Practices to 100.
+ *   [F3] lcpPreload: removed type="image/webp", added imagesizes="100vw".
+ *        type attribute caused preload skip on some user agents. imagesizes
+ *        is required for correct preload width computation on responsive views.
+ *        Bootstrap font preloads updated: replaced inter-400/inter-700/playfair-700
+ *        with inter-500/inter-600/playfair-400/playfair-900/jetbrains-mono-400/
+ *        jetbrains-mono-600 (8 fonts total, ordered by first-viewport priority).
+ *
  * 2026-04-25 v8 — Bot-path OG tag injection + favicon guard (V2-BOT, V4-FAV):
  *   [V2-BOT] Bot path: inject og:image:secure_url / og:image:type / width / height
  *            into bot-path (decrypted) HTML when absent. Bootstrap ogMetaBlock (v7
@@ -647,7 +664,7 @@ export async function onRequest(context) {
   //      here is an explicit defensive guard.
   // [S1] NOTE: sitemap.xml is intentionally NOT in STATIC_PASSTHROUGH — it is
   //      handled explicitly below with controlled headers. See [S1] in changelog.
-  const STATIC_PASSTHROUGH = /^\/(?:robots\.txt|manifest\.json|favicon\.ico|og-image\.png|images\/.*|footing-pro\/images\/.*|beam-pro\/images\/.*|column-pro\/images\/.*|deflection-pro\/images\/.*|earthquake-pro\/images\/.*|mur-pro\/images\/.*|add-reft-pro\/images\/.*|section-property-pro\/images\/.*|google[0-9a-f]+\.html|sitemap\.xsl|\.well-known\/.*|payment(?:\/.*)?|api\/payment\/.*)$/i;
+  const STATIC_PASSTHROUGH = /^\/(?:robots\.txt|manifest\.json|favicon\.ico|og-image\.png|images\/.*|footing-pro\/images\/.*|beam-pro\/images\/.*|column-pro\/images\/.*|deflection-pro\/images\/.*|earthquake-pro\/images\/.*|mur-pro\/images\/.*|add-reft-pro\/images\/.*|section-property-pro\/images\/.*|google[0-9a-f]+\.html|sitemap\.xsl|fonts\/.*|\.well-known\/.*|payment(?:\/.*)?|api\/payment\/.*)$/i;
   if (STATIC_PASSTHROUGH.test(path)) return context.next();
 
   // ── [S1] Sitemap — explicit handler with clean minimal headers ───────────
@@ -972,7 +989,9 @@ export async function onRequest(context) {
   // downloading before JS runs. Without this, the browser can't discover the
   // CSS background-image until the XOR decoder completes + CSS is parsed.
   const lcpPreload = route.prefix === '/footing-pro'
-    ? `<link rel="preload" as="image" href="/footing-pro/images/hero-bg.webp" imagesrcset="/footing-pro/images/hero-bg.avif" fetchpriority="high" type="image/webp">`
+    ? '<link rel="preload" as="image" href="/footing-pro/images/hero-bg.webp"'
+      + ' imagesrcset="/footing-pro/images/hero-bg.avif" imagesizes="100vw"'
+      + ' fetchpriority="high">'
     : '';
 
   const bootstrap = `<!DOCTYPE html><html><head>`
@@ -980,11 +999,14 @@ export async function onRequest(context) {
     + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
     + (route.ogDescription ? `<meta name="description" content="${escHtml(route.ogDescription)}">` : '')
     + lcpPreload
-    + `<link rel="preload" href="/fonts/inter-400.woff2" as="font" type="font/woff2" crossorigin>`
-    + `<link rel="preload" href="/fonts/inter-700.woff2" as="font" type="font/woff2" crossorigin>`
-    + `<link rel="preload" href="/fonts/playfair-700.woff2" as="font" type="font/woff2" crossorigin>`
     + `<link rel="preload" href="/fonts/cairo-700.woff2" as="font" type="font/woff2" crossorigin>`
     + `<link rel="preload" href="/fonts/cairo-400.woff2" as="font" type="font/woff2" crossorigin>`
+    + `<link rel="preload" href="/fonts/inter-500.woff2" as="font" type="font/woff2" crossorigin>`
+    + `<link rel="preload" href="/fonts/inter-600.woff2" as="font" type="font/woff2" crossorigin>`
+    + `<link rel="preload" href="/fonts/playfair-400.woff2" as="font" type="font/woff2" crossorigin>`
+    + `<link rel="preload" href="/fonts/playfair-900.woff2" as="font" type="font/woff2" crossorigin>`
+    + `<link rel="preload" href="/fonts/jetbrains-mono-400.woff2" as="font" type="font/woff2" crossorigin>`
+    + `<link rel="preload" href="/fonts/jetbrains-mono-600.woff2" as="font" type="font/woff2" crossorigin>`
     + `<title>${pageTitle}</title>`
     + ogMetaBlock
     + faviconLinks
@@ -1009,7 +1031,7 @@ export async function onRequest(context) {
   return new Response(bootstrap, { status: 200, headers: {
     'Content-Type':            'text/html; charset=utf-8',
     'Cache-Control':           'no-store',
-    'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'unsafe-inline'`,
+    'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}'`,
     // [A1] RFC 8288 Link header — visible in HTTP headers before JS executes.
     // [A4] Vary: Accept on homepage so intermediaries separate markdown/HTML caches.
     ...(route.prefix === '/' ? {
