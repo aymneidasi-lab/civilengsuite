@@ -37,6 +37,7 @@
 User-agent: *
 Allow: /
 Allow: /manifest.json
+Content-Signal: ai-train=no, search=yes, ai-input=no
 Disallow: /cdn-cgi/
 Disallow: /*.json$
 # [F2] Block encrypted source files from being crawled / indexed
