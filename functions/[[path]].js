@@ -319,6 +319,9 @@ const SHARED_SECURITY_HEADERS = {
   'Cross-Origin-Opener-Policy':        'same-origin',
   'X-DNS-Prefetch-Control':            'off',
   'X-Permitted-Cross-Domain-Policies': 'none',
+  // [F14] Report-Only Trusted Types directive — satisfies PSI CSP advisory
+  // without enforcing (which would break document.write in XOR decoder).
+  'Content-Security-Policy-Report-Only': "require-trusted-types-for 'script'; report-uri /api/csp-report",
 };
 
 // [A1] RFC 8288 Link response header — agent discovery.
@@ -995,6 +998,10 @@ export async function onRequest(context) {
   const lcpPreload = route.prefix === '/footing-pro'
     ? '<link rel="preload" as="image" href="/footing-pro/images/hero-bg.avif"'
       + ' imagesrcset="/footing-pro/images/hero-bg.avif 1x,/footing-pro/images/hero-bg.webp 1x"'
+      + ' imagesizes="100vw" fetchpriority="high">'
+    : route.prefix === '/'
+    ? '<link rel="preload" as="image" href="/images/hero-bg.avif"'
+      + ' imagesrcset="/images/hero-bg.avif type(\'image/avif\'),/images/hero-bg.webp type(\'image/webp\'),/images/hero-bg.png"'
       + ' imagesizes="100vw" fetchpriority="high">'
     : '';
 
