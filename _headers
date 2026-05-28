@@ -10,28 +10,37 @@
 #
 # FIX LOG (2026-04-14):
 # [F1] Added /public/* block: X-Robots-Tag + Cache-Control + Content-Disposition
+#      → Prevents Google from indexing encrypted .enc files. Without this,
+#        Googlebot could crawl /public/pc_suite.enc and waste crawl budget.
 # [F2] Added Cache-Control to /* catch-all for static HTML sub-app pages
+#      (beam-pro/index.html, column-pro/index.html, etc.)
 #
 # FIX LOG (2026-04-17): PAYMENT GATEWAY INTEGRATION
-# [P1] Added /payment/* block (CSP override for Paymob SDK, no-store, noindex)
-# [P2] NOTE: /api/payment/* routes are CF Pages Functions — _headers does not apply.
+# [P1] Added /payment/* block:
+#      → Overrides CSP to allow Paymob SDK (accept.paymob.com) for script, connect, frame
+#      → Overrides Permissions-Policy to REMOVE payment=() which blocks the payment API
+#      → Sets Cache-Control: no-store (payment pages must never be cached)
+#      → Sets X-Robots-Tag: noindex (payment pages must not be indexed)
+# [P2] NOTE: /api/payment/* routes are Cloudflare Pages Functions — they do NOT
+#      inherit _headers rules. Security headers are applied inside each function file.
+#      Cloudflare `_headers` rules: later (more-specific) path rules override
+#      earlier (less-specific) rules for duplicate headers on the same response.
 #
 # FIX LOG (2026-04-25):
-# [H1] SYNTAX FIX: Removed inline comments from inside header blocks.
-# [H2] DEAD CODE REMOVAL: Removed /sitemap.xml block (handled by [[path]].js).
-#
-# FIX LOG (2026-05-28): LANDING PAGE INTEGRATION
-# [L1] Added /footing-pro/engineers/* cache + robots rules
-# [L2] Added /footing-pro/offices/* cache + robots rules
-# [L3] Added /footing-pro/students/* cache + robots rules
-#      These are static HTML pages — _headers applies directly (no Function intercept).
-#      Cache-Control: public, max-age=86400 (daily revalidation — marketing copy changes
-#      less frequently than the encrypted app pages at 600s).
-#      No X-Robots-Tag override — default Allow from robots.txt is correct.
-#      No CSP override — font-src 'self' from /* is satisfied: Google Fonts CDN
-#      removed from these files; self-hosted /fonts/*.woff2 used instead.
+# [H1] SYNTAX FIX: Removed inline comment (  # [F2] Default cache...) from inside
+#      the /* block. Cloudflare Pages _headers does not define support for indented
+#      comments within header blocks. An indented line starting with # is not a valid
+#      header name:value pair — the parser behavior is undefined. The comment was
+#      moved to the file header above. Cache-Control line is unchanged; it now
+#      immediately follows the last header directive with no intervening comment.
+# [H2] DEAD CODE REMOVAL: Removed /sitemap.xml block. The functions/[[path]].js
+#      handler intercepts /sitemap.xml before static file serving and returns a
+#      clean response directly. Cloudflare Pages confirms _headers NEVER applies
+#      to Function responses. This block had zero effect on any actual sitemap
+#      response — it was not setting any headers on the URL Googlebot fetches.
+#      Removing it eliminates false confidence and parser ambiguity.
 
-# [F2] Default cache + security for all static HTML pages
+# [F2] Default cache for static HTML pages (sub-apps: beam-pro/index.html etc.)
 /*
   X-Frame-Options: DENY
   X-Content-Type-Options: nosniff
@@ -42,7 +51,7 @@
   Cross-Origin-Opener-Policy: same-origin
   Cross-Origin-Embedder-Policy: unsafe-none
   Cross-Origin-Resource-Policy: same-origin
-  Permissions-Policy: camera=(), microphone=(), geolocation=(), accelerometer=(), gyroscope=(), magnetometer=(), display-capture=(), screen-wake-lock=(), autoplay=(), clipboard-read=()
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), accelerometer=(), gyroscope=(), magnetometer=(), display-capture=(), screen-wake-lock=(), autoplay=(), clipboard-read=()
   Cache-Control: public, max-age=600, must-revalidate
 
 # [F1] FIX: Block crawlers from indexing encrypted .enc source files
@@ -57,6 +66,10 @@
 /404.css
   Cache-Control: public, max-age=31536000, immutable
   Content-Type: text/css; charset=utf-8
+
+# NOTE: /sitemap.xml block intentionally absent — handled exclusively by
+# functions/[[path]].js which returns only Content-Type + Cache-Control.
+# _headers never applies to Function responses (Cloudflare Pages official docs).
 
 /robots.txt
   Cache-Control: public, max-age=86400
@@ -84,18 +97,6 @@
 /footing-pro/images/*
   Cache-Control: public, max-age=31536000, immutable
   Cross-Origin-Resource-Policy: cross-origin
-
-# [L1] Engineers landing page — longer cache (stable marketing copy)
-/footing-pro/engineers/*
-  Cache-Control: public, max-age=86400, must-revalidate
-
-# [L2] Offices landing page — longer cache (stable marketing copy)
-/footing-pro/offices/*
-  Cache-Control: public, max-age=86400, must-revalidate
-
-# [L3] Students landing page — longer cache (stable marketing copy)
-/footing-pro/students/*
-  Cache-Control: public, max-age=86400, must-revalidate
 
 /beam-pro/images/*
   Cache-Control: public, max-age=31536000, immutable
@@ -128,6 +129,12 @@
 /.well-known/*
   Cache-Control: public, max-age=3600
 
+# ── Agent-discovery files — correct Content-Type per RFC / spec ──
+# api-catalog:              application/linkset+json (RFC 9264 §4.2)
+# agent-skills/index.json:  application/json
+# mcp/server-card.json:     application/json
+# oauth-protected-resource: application/json (RFC 9728)
+# security.txt:             text/plain (RFC 9116)
 /.well-known/api-catalog
   Content-Type: application/linkset+json; charset=utf-8
   Cache-Control: public, max-age=3600
@@ -156,6 +163,25 @@
 /.well-known/security.txt
   Content-Type: text/plain; charset=utf-8
   Cache-Control: public, max-age=86400
+
+# ════════════════════════════════════════════════════════════════
+# [P1] PAYMENT PAGES — Override CSP and Permissions-Policy
+#      Placed AFTER /* so it takes precedence for /payment/* routes.
+#
+#  CSP changes from global default:
+#   script-src:  adds https://accept.paymob.com  (Paymob SDK: pay.js)
+#   connect-src: adds https://accept.paymob.com  (Paymob API calls from SDK)
+#   frame-src:   adds https://accept.paymob.com  (3DS authentication iframes)
+#   img-src:     adds https://*.paymob.com        (Card brand logos in modal)
+#   style-src:   adds 'unsafe-inline'             (Paymob SDK injects inline styles)
+#   form-action: 'none'                           (all submission via JS fetch only)
+#
+#  Permissions-Policy changes:
+#   payment=() REMOVED  → allows browser Payment Request API used by Paymob/Apple Pay
+#
+#  Cache-Control: no-store  → payment pages must NEVER be cached by any proxy
+#  X-Robots-Tag: noindex    → checkout flow must not be indexed
+# ════════════════════════════════════════════════════════════════
 
 /payment/*
   Content-Security-Policy: default-src 'self'; script-src 'self' https://accept.paymob.com; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: https://*.paymob.com https://paymob.com; connect-src 'self' https://accept.paymob.com; frame-src https://accept.paymob.com; frame-ancestors 'none'; form-action 'none'; base-uri 'self'; upgrade-insecure-requests; report-uri /api/csp-report
