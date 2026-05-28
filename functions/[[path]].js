@@ -668,7 +668,18 @@ export async function onRequest(context) {
   //      here is an explicit defensive guard.
   // [S1] NOTE: sitemap.xml is intentionally NOT in STATIC_PASSTHROUGH — it is
   //      handled explicitly below with controlled headers. See [S1] in changelog.
-  const STATIC_PASSTHROUGH = /^\/(?:robots\.txt|manifest\.json|favicon\.ico|og-image\.png|images\/.*|footing-pro\/images\/.*|beam-pro\/images\/.*|column-pro\/images\/.*|deflection-pro\/images\/.*|earthquake-pro\/images\/.*|mur-pro\/images\/.*|add-reft-pro\/images\/.*|section-property-pro\/images\/.*|google[0-9a-f]+\.html|sitemap\.xsl|fonts\/.*|\.well-known\/.*|payment(?:\/.*)?|api\/payment\/.*)$/i;
+  // [L1] ADDED: footing-pro\/engineers\/? footing-pro\/offices\/?
+  //      footing-pro\/students\/? — persona landing pages are static HTML files
+  //      deployed at footing-pro/{engineers,offices,students}/index.html.
+  //      Without explicit passthrough they fall to the !route → context.next()
+  //      fallback which is functionally correct but adds unnecessary route-match
+  //      overhead on every landing page request. Explicit passthrough here
+  //      short-circuits the ROUTES loop entirely, matching the same pattern used
+  //      for all other static sub-paths (images, fonts, .well-known).
+  //      These paths MUST NOT be in ROUTES — they are plain static files with no
+  //      .enc decryption required. _headers rules for /footing-pro/engineers/*
+  //      apply directly (Cloudflare Pages _headers applies to static responses).
+  const STATIC_PASSTHROUGH = /^\/(?:robots\.txt|manifest\.json|favicon\.ico|og-image\.png|images\/.*|footing-pro\/images\/.*|footing-pro\/engineers\/?.*|footing-pro\/offices\/?.*|footing-pro\/students\/?.*|beam-pro\/images\/.*|column-pro\/images\/.*|deflection-pro\/images\/.*|earthquake-pro\/images\/.*|mur-pro\/images\/.*|add-reft-pro\/images\/.*|section-property-pro\/images\/.*|google[0-9a-f]+\.html|sitemap\.xsl|fonts\/.*|\.well-known\/.*|payment(?:\/.*)?|api\/payment\/.*)$/i;
   if (STATIC_PASSTHROUGH.test(path)) return context.next();
 
   // ── [S1] Sitemap — explicit handler with clean minimal headers ───────────
