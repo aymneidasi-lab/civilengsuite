@@ -193,4 +193,54 @@
     </image:image>
   </url>
 
+  <!-- ═══ Footing Pro — Engineers Landing Page ═══ -->
+  <url>
+    <loc>https://civilengsuite.is-a.dev/footing-pro/engineers/</loc>
+    <lastmod>2026-05-28</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="ar"
+      href="https://civilengsuite.is-a.dev/footing-pro/engineers/"/>
+    <xhtml:link rel="alternate" hreflang="x-default"
+      href="https://civilengsuite.is-a.dev/footing-pro/engineers/"/>
+    <image:image>
+      <image:loc>https://civilengsuite.is-a.dev/images/og-image.png</image:loc>
+      <image:title>Footing Pro للمهندسين المستقلين — 249 جنيه/سنة</image:title>
+    </image:image>
+  </url>
+
+  <!-- ═══ Footing Pro — Offices Landing Page ═══ -->
+  <url>
+    <loc>https://civilengsuite.is-a.dev/footing-pro/offices/</loc>
+    <lastmod>2026-05-28</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="ar"
+      href="https://civilengsuite.is-a.dev/footing-pro/offices/"/>
+    <xhtml:link rel="alternate" hreflang="x-default"
+      href="https://civilengsuite.is-a.dev/footing-pro/offices/"/>
+    <image:image>
+      <image:loc>https://civilengsuite.is-a.dev/images/og-image.png</image:loc>
+      <image:title>Footing Pro لمكاتب الهندسة — توحيد تصميم الأساسات</image:title>
+    </image:image>
+  </url>
+
+  <!-- ═══ Footing Pro — Students Landing Page ═══ -->
+  <url>
+    <loc>https://civilengsuite.is-a.dev/footing-pro/students/</loc>
+    <lastmod>2026-05-28</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="ar"
+      href="https://civilengsuite.is-a.dev/footing-pro/students/"/>
+    <xhtml:link rel="alternate" hreflang="x-default"
+      href="https://civilengsuite.is-a.dev/footing-pro/students/"/>
+    <image:image>
+      <image:loc>https://civilengsuite.is-a.dev/images/og-image.png</image:loc>
+      <image:title>Footing Pro للطلاب والمحاضرين — تعلم تصميم الأساسات</image:title>
+    </image:image>
+  </url>
+
+
+
 </urlset>
