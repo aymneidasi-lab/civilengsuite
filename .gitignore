@@ -2,11 +2,22 @@
 #  Civil Engineering Suite — .gitignore
 #  IMPORTANT: The raw HTML files must NEVER be
 #  committed to GitHub. Only the .enc files go up.
+#
+#  FIX (2026-05-29):
+#  [F1] Changed bare 'index.html' → '/index.html'
+#       Changed bare 'footing-pro/index.html' → '/footing-pro/index.html'
+#       Without a leading slash, git matches index.html in EVERY
+#       subdirectory — which was silently blocking:
+#         footing-pro/engineers/index.html
+#         footing-pro/offices/index.html
+#         footing-pro/students/index.html
+#         beam-pro/index.html (and all other app pages)
+#       Leading slash anchors the pattern to the repo root only.
 # ══════════════════════════════════════════════════
 
-# Raw HTML source — NEVER commit these
-index.html
-footing-pro/index.html
+# Raw HTML source — NEVER commit these (anchored to repo root)
+/index.html
+/footing-pro/index.html
 
 # Encryption key file — NEVER commit this
 ENCRYPTION_KEY.txt
