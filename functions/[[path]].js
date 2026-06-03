@@ -53,6 +53,16 @@
  *        the /payment/* _headers block which governs the checkout flow.
  *
  *
+ * 2026-06-03 v11 — /download redirect (D1):
+ *   [D1] /download route: 302 redirect to the Google Drive direct-download URL for
+ *        the Civil Engineering Suite Activation Tool installer (.exe). Previously
+ *        the path was unhandled — !route → context.next() → Cloudflare static
+ *        file serving found no file → 404. Fix: explicit handler before the route
+ *        matcher issues a 302 Found with Cache-Control: no-store so the redirect
+ *        destination can be swapped at any time without stale browser caches.
+ *        SHARED_SECURITY_HEADERS applied to avoid stripping existing protections.
+ *        No CSP needed: 302 responses carry no body.
+ *
  * 2026-06-03 v10 — Inline handler CSP fix + landing page 404 fix (H1–H2):
  *   [H1] CRITICAL BUG FIX: script-src now includes 'unsafe-hashes' + SHA-256 hashes
  *        for all 9 inline event handlers in the decrypted HTML. Change [F2] (v9)
@@ -732,6 +742,22 @@ export async function onRequest(context) {
       console.error('[ces:sitemap] ASSETS fetch error:', e.message);
       return new Response('Not Found', { status: 404 });
     }
+  }
+
+  // ── [D1] /download — 302 redirect to activation tool installer ───────────
+  // Google Drive direct-download URL for CivEngSuite Activation Tool (.exe).
+  // 302 (not 301) so the destination can change without browser cache lock-in.
+  // Cache-Control: no-store prevents any CDN or browser from caching this
+  // redirect; every click fetches the freshest destination from this handler.
+  if (path === '/download') {
+    return new Response(null, {
+      status: 302,
+      headers: {
+        'Location':      'https://drive.google.com/uc?export=download&id=1EQ6UaHvwrchiV0U5vRdXR5YktOZMnfrQ&confirm=t',
+        'Cache-Control': 'no-store',
+        ...SHARED_SECURITY_HEADERS,
+      },
+    });
   }
 
   // ── Route matching: exact app root paths only ─────────────────────────────
