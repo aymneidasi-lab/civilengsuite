@@ -1,5 +1,5 @@
 /**
- * Civil Engineering Suite — Font Downloader  v2
+ * Civil Engineering Suite — Font Downloader  v3
  * Run: node download-fonts.js
  * Output: creates public/fonts/ directory with all required woff2 files
  *
@@ -8,6 +8,14 @@
  *   Inter:            400, 500, 600, 700
  *   Playfair Display: 400, 700, 900
  *   JetBrains Mono:   400, 600
+ *   Amiri:            400, 700            (Arabic display — headings/hero in AR mode)
+ *   Tajawal:          300, 400, 500, 700, 800 (Arabic body/UI in AR mode)
+ *
+ * CHANGELOG v3 (2026):
+ *   [F5] Amiri 400 + 700 added — calligraphic Arabic display font for h1-h4/hero.
+ *   [F6] Tajawal 300/400/500/700/800 added — geometric Arabic body/UI font.
+ *        Both match the new @font-face declarations:
+ *        src: url('/fonts/amiri-400.woff2'), url('/fonts/tajawal-*.woff2')
  *
  * CHANGELOG v2 (2026-04-26):
  *   [F1] JetBrains Mono weight 600 added (was missing; @font-face references it).
@@ -28,19 +36,25 @@ const FONTS_DIR = path.join(__dirname, 'public', 'fonts');
 if (!fs.existsSync(FONTS_DIR)) fs.mkdirSync(FONTS_DIR, { recursive: true });
 
 // [F4] Fixed: JetBrains Mono now requests weight 400+600; Playfair requests 400+700+900
+// [F5][F6] v3: Amiri and Tajawal added for Arabic beautiful font support
 const FONT_CSS_URLS = [
   'https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap',
   'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap',
   'https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700;900&display=swap',
   'https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap',
+  'https://fonts.googleapis.com/css2?family=Amiri:wght@400;700&display=swap',
+  'https://fonts.googleapis.com/css2?family=Tajawal:wght@300;400;500;700;800&display=swap',
 ];
 
 // [F1][F2][F3] Weight map — output filenames match @font-face src urls in HTML
+// [F5][F6] v3: Amiri and Tajawal entries added
 const WEIGHT_NAMES = {
   'Cairo':            { '400': 'cairo-400', '600': 'cairo-600', '700': 'cairo-700', '800': 'cairo-800' },
   'Inter':            { '400': 'inter-400', '500': 'inter-500', '600': 'inter-600', '700': 'inter-700' },
   'Playfair Display': { '400': 'playfair-400', '700': 'playfair-700', '900': 'playfair-900' },
   'JetBrains Mono':   { '400': 'jetbrains-mono-400', '600': 'jetbrains-mono-600' },
+  'Amiri':            { '400': 'amiri-400', '700': 'amiri-700' },
+  'Tajawal':          { '300': 'tajawal-300', '400': 'tajawal-400', '500': 'tajawal-500', '700': 'tajawal-700', '800': 'tajawal-800' },
 };
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36';
