@@ -11,6 +11,16 @@
  *   Amiri:            400, 700            (Arabic display — headings/hero in AR mode)
  *   Tajawal:          300, 400, 500, 700, 800 (Arabic body/UI in AR mode)
  *
+ * CHANGELOG v4 (2026):
+ *   [F7] Cormorant Garamond 300/400/500/600/700 added — calligraphic classical EN display font.
+ *        EN counterpart to Amiri. Used as --font-serif primary for h1-h4/hero in EN mode.
+ *        Output files: cormorant-{300,400,500,600,700}.woff2
+ *        Matches new @font-face src:url('/fonts/cormorant-*.woff2')
+ *   [F8] DM Sans 300/400/500/600/700/800 added — geometric modern EN body/UI font.
+ *        EN counterpart to Tajawal. Used as --font-sans primary in EN mode.
+ *        Output files: dmsans-{300,400,500,600,700,800}.woff2
+ *        Matches new @font-face src:url('/fonts/dmsans-*.woff2')
+ *
  * CHANGELOG v3 (2026):
  *   [F5] Amiri 400 + 700 added — calligraphic Arabic display font for h1-h4/hero.
  *   [F6] Tajawal 300/400/500/700/800 added — geometric Arabic body/UI font.
@@ -44,6 +54,10 @@ const FONT_CSS_URLS = [
   'https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap',
   'https://fonts.googleapis.com/css2?family=Amiri:wght@400;700&display=swap',
   'https://fonts.googleapis.com/css2?family=Tajawal:wght@300;400;500;700;800&display=swap',
+  // [F7] v4: Cormorant Garamond — EN calligraphic display (counterpart to Amiri)
+  'https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;500;600;700&display=swap',
+  // [F8] v4: DM Sans — EN geometric body/UI (counterpart to Tajawal)
+  'https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700;800&display=swap',
 ];
 
 // [F1][F2][F3] Weight map — output filenames match @font-face src urls in HTML
@@ -55,6 +69,10 @@ const WEIGHT_NAMES = {
   'JetBrains Mono':   { '400': 'jetbrains-mono-400', '600': 'jetbrains-mono-600' },
   'Amiri':            { '400': 'amiri-400', '700': 'amiri-700' },
   'Tajawal':          { '300': 'tajawal-300', '400': 'tajawal-400', '500': 'tajawal-500', '700': 'tajawal-700', '800': 'tajawal-800' },
+  // [F7] v4: EN display font — calligraphic classical counterpart to Amiri
+  'Cormorant Garamond': { '300': 'cormorant-300', '400': 'cormorant-400', '500': 'cormorant-500', '600': 'cormorant-600', '700': 'cormorant-700' },
+  // [F8] v4: EN body/UI font — geometric modern counterpart to Tajawal
+  'DM Sans':          { '300': 'dmsans-300', '400': 'dmsans-400', '500': 'dmsans-500', '600': 'dmsans-600', '700': 'dmsans-700', '800': 'dmsans-800' },
 };
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36';
