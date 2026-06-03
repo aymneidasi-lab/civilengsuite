@@ -52,6 +52,33 @@
  *        payment=() on app pages is unnecessary; it is correctly absent from
  *        the /payment/* _headers block which governs the checkout flow.
  *
+ *
+ * 2026-06-03 v10 — Inline handler CSP fix + landing page 404 fix (H1–H2):
+ *   [H1] CRITICAL BUG FIX: script-src now includes 'unsafe-hashes' + SHA-256 hashes
+ *        for all 9 inline event handlers in the decrypted HTML. Change [F2] (v9)
+ *        removed 'unsafe-inline' from script-src to silence console noise. Per CSP
+ *        Level 3, nonces bypass unsafe-inline ONLY for <script> elements, not for
+ *        inline event handlers (onclick, etc.). Removing unsafe-inline therefore
+ *        blocked every onclick attribute in the page — specifically:
+ *          · onclick="openSegModal()" on the Hero "Buy License — 249 EGP" button
+ *          · onclick="openSegModal()" on the World-First "Subscribe Now" button
+ *          · onclick="openSegModal()" on the bottom CTA "Buy License — 249 EGP" button
+ *          · onclick="segModalDismiss()" on the modal ✕ close button
+ *          · onclick="segModalDismiss()" on the modal Skip button
+ *          · onclick="segModalTrack('engineers'|'offices'|'students')" on modal cards
+ *          · onclick="window.open('/footing-pro/{segment}/','_self')" on segment cards
+ *          · onclick="event.stopPropagation()" on inner anchor tags
+ *        All these handlers fired silently into void — the user saw no response.
+ *        Fix: 'unsafe-hashes' + explicit SHA-256 hashes for each handler value allows
+ *        ONLY those 9 specific handlers. Nonce security for <script> elements is
+ *        unchanged. Lighthouse Best Practices score unaffected ('unsafe-hashes' is
+ *        not penalized; 'unsafe-inline' was). Applied to BOTH bot and human CSP.
+ *   [H2] _redirects BUG FIX (documented here for change log completeness):
+ *        The landing page rewrite rules pointed to /public/footing-pro/{segment}/:splat
+ *        but the files live at /footing-pro/{segment}/index.html (repo root, not public/).
+ *        This mismatch caused 404 on /footing-pro/offices/ and /footing-pro/students/.
+ *        Fix is in _redirects: the 3 incorrect rules are removed; Cloudflare Pages
+ *        file serving finds the files directly without any redirect rule.
  * 2026-04-28 v9 — PSI font + LCP + CSP fixes (F1–F3):
  *   [F1] STATIC_PASSTHROUGH: added fonts\.* — eliminates function invocation
  *        overhead for every font request. Previously fonts fell through to
@@ -885,7 +912,7 @@ export async function onRequest(context) {
       // [A4] Vary: Accept added on homepage so markdown-negotiated cache is separate.
       'Vary':                    route.prefix === '/' ? 'User-Agent, Accept' : 'User-Agent',
       'X-Robots-Tag':            'index, follow',
-      'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ='`,
+      'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ=' 'unsafe-hashes' 'sha256-nAiI7XK5Mt/SgNQUZPqTuikvwxIVHV3se6mHGQue+88=' 'sha256-Jag+ZHPii6iUmMQWlnwms/mnjM8gRPTOJA2KIyTQQRk=' 'sha256-uLUdJIdD3+8SpL4nHNFN9YmyHRRmrseSQKwzj3ECn2I=' 'sha256-akyHNuxwVvvLQ11iHoDrpca0qH3TU3LfGbtdQ8kNdwI=' 'sha256-UOhLo4NRrWG89b3vpgtU0dc/C8aWLS+MQ2Lf9vW/4Fk=' 'sha256-jHF5hTIlMDyGZRAsNK0HO/WFYrwPvI2I1q0o1xKKB6I=' 'sha256-wflfhEeJWTAjAK0hnm9/OICxAQ8fVnj3168JrJ/m91k=' 'sha256-oTzV9+pQ7IAxC4NoAc7dH4+0Is4KloZ9u7cMJC7UDrE=' 'sha256-bTpi/7w0Cd8ihAWpwcZJIdz49sMq0d73fWWDzp5Ju2Q='`,
       // [A1] Link header on ALL bot responses — agents crawling any tool page
       // discover the full agent catalog without needing to hit the homepage first.
       'Link':                    HOMEPAGE_LINK_HEADER,
@@ -1049,7 +1076,7 @@ export async function onRequest(context) {
   return new Response(bootstrap, { status: 200, headers: {
     'Content-Type':            'text/html; charset=utf-8',
     'Cache-Control':           'no-store',
-    'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ='`,
+    'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ=' 'unsafe-hashes' 'sha256-nAiI7XK5Mt/SgNQUZPqTuikvwxIVHV3se6mHGQue+88=' 'sha256-Jag+ZHPii6iUmMQWlnwms/mnjM8gRPTOJA2KIyTQQRk=' 'sha256-uLUdJIdD3+8SpL4nHNFN9YmyHRRmrseSQKwzj3ECn2I=' 'sha256-akyHNuxwVvvLQ11iHoDrpca0qH3TU3LfGbtdQ8kNdwI=' 'sha256-UOhLo4NRrWG89b3vpgtU0dc/C8aWLS+MQ2Lf9vW/4Fk=' 'sha256-jHF5hTIlMDyGZRAsNK0HO/WFYrwPvI2I1q0o1xKKB6I=' 'sha256-wflfhEeJWTAjAK0hnm9/OICxAQ8fVnj3168JrJ/m91k=' 'sha256-oTzV9+pQ7IAxC4NoAc7dH4+0Is4KloZ9u7cMJC7UDrE=' 'sha256-bTpi/7w0Cd8ihAWpwcZJIdz49sMq0d73fWWDzp5Ju2Q='`,
     // [A1] RFC 8288 Link header — visible in HTTP headers before JS executes.
     // [A4] Vary: Accept on homepage so intermediaries separate markdown/HTML caches.
     ...(route.prefix === '/' ? {

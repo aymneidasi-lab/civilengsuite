@@ -13,20 +13,21 @@
 #   Browser requests:  /footing-pro/images/* and /images/*
 #   These rewrites must exist for images to load at all.
 #
-# FIX L1 — Landing pages: /footing-pro/{engineers,offices,students}/*
-#   Physical location: public/footing-pro/{engineers,offices,students}/index.html
-#   Browser requests:  /footing-pro/engineers/  /footing-pro/offices/  /footing-pro/students/
-#   Root cause of 404: landing HTML files live inside public/ (same pattern as all
-#   other static assets) but no rewrite rule existed to map the clean URL to the
-#   physical path. Without this rule, Cloudflare Pages file serving never finds the
-#   files — it only looks at the literal request path, not inside public/.
-#   These rules MUST appear BEFORE /footing-pro/images/* to prevent order ambiguity.
-#   The [[path]].js STATIC_PASSTHROUGH also updated to explicitly pass these paths
-#   through without entering the ROUTES encrypted-app matching loop.
-
-/footing-pro/engineers/*    /public/footing-pro/engineers/:splat    200
-/footing-pro/offices/*      /public/footing-pro/offices/:splat      200
-/footing-pro/students/*     /public/footing-pro/students/:splat     200
+# FIX L1 — Landing pages: /footing-pro/{engineers,offices,students}/
+#   Physical location: footing-pro/{engineers,offices,students}/index.html
+#   (lives at the REPO ROOT — NOT inside public/)
+#   Root cause of 404 (fixed 2026-06-03):
+#     The previous _redirects had rewrite rules pointing these paths to
+#     /public/footing-pro/{segment}/:splat. That /public/ subdirectory does
+#     NOT contain the landing HTML files — they live at repo root under
+#     footing-pro/{segment}/index.html (committed directly, not encrypted).
+#     When [[path]].js calls context.next() for these paths, Cloudflare
+#     applies _redirects first. The incorrect /public/ rewrite sent the
+#     request to a path that doesn't exist → 404.
+#   Fix: removed the 3 incorrect /public/ rewrite rules entirely. Without
+#   those rules, Cloudflare's static file serving finds footing-pro/
+#   {segment}/index.html directly at the repo-root location. No redirect
+#   rule is needed because the files are already at the correct serving path.
 
 /fonts/*                    /public/fonts/:splat                    200
 /images/*                   /public/images/:splat                   200
