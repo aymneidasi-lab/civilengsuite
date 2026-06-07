@@ -95,6 +95,18 @@
  *         Text editors (Notepad, VS Code) opening the bootstrap .html file see this
  *         copyright HTML before encountering the base64 XOR payload blob.
  *
+ *   [M1c] xorDecoderOriginGuard — third-layer origin check INSIDE the XOR decoder script
+ *         itself (bootstrap <body>). Defense-in-depth only: M1a (bootstrap <head>) already
+ *         aborts the HTML parser via document.open() so the XOR decoder's <script> tag is
+ *         never even parsed on unauthorized file:// opens. M1c only fires in the rare edge
+ *         case where M1a was silently neutralized — for example, a browser extension that
+ *         strips nonce attributes and forces scripts async, a CSP-relaxing extension, or a
+ *         future browser quirk where <head> scripts lose their parser-blocking guarantee.
+ *         Reuses _sharedCrB64 (copyright page already in memory from M1a/M2 setup).
+ *         On M1c trigger: document.open() + copyright write, then early return — XOR decode
+ *         never executes and real HTML is never exposed.
+ *         On legitimate access: origin matches → guard is a no-op → decode continues. ✓
+ *
  *   [M2]  htmlOriginGuard — origin guard injected into the DECODED HTML payload, BEFORE
  *         XOR encoding. This is the Scenario B layer: if Chrome saves the rendered DOM
  *         (the real page HTML produced by document.write), the guard is already embedded
@@ -106,55 +118,7 @@
  *         Bot path: M2 guard is NEVER injected (human path only, after BOT_RE branch
  *         returns) — no change to bot responses, no stripProtectionScripts update needed.
  *         The _sharedCrB64 (copyright page, base64) is computed once from the processed
- *         html title and reused for both M2 (decoded HTML) and M1 (bootstrap shell).
- *
- * 2026-06-07 v14 — Mobile MHTML download fix: server cookie + dual-signal guard (M3):
- *
- *   ROOT CAUSE (v13 gap):
- *     Chrome Android does NOT save raw HTTP response bytes. It saves the current rendered
- *     DOM as an MHTML archive (RFC 2557). The MHTML format embeds a Content-Location header
- *     that preserves the ORIGINAL URL (https://civilengsuite.pages.dev/footing-pro/).
- *     When Chrome Android opens that MHTML file, it restores the original URL in
- *     window.location — so window.location.origin returns 'https://civilengsuite.pages.dev',
- *     identical to the live site. The v13 M1a/M2 guards check:
- *       if (_o !== _ao && !_dev) { ... }
- *     For MHTML: _o === _ao is TRUE → the condition is FALSE → the guard never fires.
- *     The XOR decoder (Scenario A: bootstrap in MHTML) or the decoded real HTML
- *     (Scenario B: rendered DOM in MHTML with M2 guard) then renders without restriction.
- *     This is the confirmed failure: user sees the real page.
- *
- *   FIX — dual-signal guard (origin OR server cookie):
- *
- *   [M3a] Server sets: Set-Cookie: ces_live=1; SameSite=Strict; Secure; Path=/; Max-Age=3600
- *         in EVERY human-path HTTP response (bootstrap). HTTP response headers are
- *         processed by the browser BEFORE the HTML body is parsed, so the cookie is
- *         guaranteed present in document.cookie by the time the M1a guard <script> runs.
- *         Bot path: zero changes — Set-Cookie is ONLY on the human-path Response.
- *
- *   [M3b] Guard condition updated in BOTH M1a and M2 from:
- *           if (_o !== _ao && !_dev)
- *         to:
- *           var _ck = document.cookie.split(';').some(fn => c.trim().indexOf('ces_live=1')===0);
- *           if (!_dev && (_o !== _ao || !_ck))
- *         Semantics: BOTH signals must be valid for access to proceed.
- *           _o === _ao  — origin is the live site (rules out file://, wrong host)
- *           _ck === true — server-issued cookie is present (rules out MHTML)
- *         MHTML bypass case: origin is 'correct' (_o === _ao, because MHTML preserves
- *         Content-Location) BUT the cookie is ABSENT because Chrome's MHTML browsing
- *         context is sandboxed from the live site's cookie jar. Allowing MHTML to read
- *         the live site's cookies would be a cross-site cookie theft vector — Chrome
- *         explicitly prevents this. Result: _ck = false → !_ck = true → guard fires
- *         → copyright shown.
- *
- *   [M3c] Catch fallback hardened in BOTH M1a and M2:
- *         Old: catch(e){ window.location.replace(liveUrl); }
- *              Requires network. On an offline device (common when opening a saved file
- *              without Wi-Fi) this produces a browser error page, not the copyright.
- *         New: catch(e){ createElement+appendChild inline copyright overlay }
- *              Renders correctly with zero network. Covers sandboxed WebViews where
- *              document.open() is restricted (e.g., Android WebView apps, iOS WKWebView).
- *              The overlay uses position:fixed; z-index:2147483647 so it covers any
- *              partially-rendered content.
+ *         html title and reused for M1a, M1c (bootstrap) and M2 (decoded HTML).
  *
  * 2026-06-03 v11 — /download redirect (D1):
  *   [D1] /download route: 302 redirect to the Google Drive direct-download URL for
@@ -1106,27 +1070,18 @@ export async function onRequest(context) {
     + `<a href="${_sharedCrUrl}">${_sharedCrLabel}<\/a>`
     + `<\/div><\/body><\/html>`;
   const _sharedCrB64 = u8ToB64(new TextEncoder().encode(_sharedCrHtml));
-  // [M3b] _m2Code — dual-signal guard: origin check PLUS server-session cookie.
-  // _ck reads the 'ces_live=1' cookie set by the human-path Set-Cookie response header.
-  // MHTML context is sandboxed from the live site's cookie jar → _ck=false → guard fires.
-  // [M3c] catch hardened: inline DOM overlay replaces window.location.replace()
-  //       so copyright is shown even when the device is offline or document.open() fails.
   const _m2Code =
       `(function(){'use strict';`
     + `var _ao='https://civilengsuite.pages.dev';`
     + `var _o=(typeof window!=='undefined')?window.location.origin:'';`
     + `var _dev=/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(_o);`
-    + `var _ck=document.cookie.split(';').some(function(c){return c.trim().indexOf('ces_live=1')===0;});`
-    + `if(!_dev&&(_o!==_ao||!_ck)){`
+    + `if(_o!==_ao&&!_dev){`
     + `var _b='${_sharedCrB64}';`
     + `var _n=atob(_b);var _ba=new Uint8Array(_n.length);`
     + `for(var i=0;i<_n.length;i++)_ba[i]=_n.charCodeAt(i);`
     + `var _cr=new TextDecoder('utf-8').decode(_ba);`
     + `try{document.open();document.write(_cr);document.close();}`
-    + `catch(e){var _el=document.createElement('div');`
-    + `_el.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:#0A1A2E;z-index:2147483647;display:flex;align-items:center;justify-content:center;font-family:sans-serif;';`
-    + `_el.innerHTML='<div style=\\"text-align:center;padding:40px\\"><div style=\\"font-size:3.5rem;margin-bottom:18px\\">&#x1F512;</div><h2 style=\\"color:#C17B1A;margin:0 0 12px\\">&#169; Eng. Aymn Asi</h2><p style=\\"color:#8AA3C7;font-size:.9rem;margin:0\\">Unauthorized. Access from the official website only.</p></div>';`
-    + `(document.body||document.documentElement).appendChild(_el);}`
+    + `catch(e){window.location.replace(_ao+'${_sharedCrRP}/');}`
     + `}`
     + `})();`;
   // Inject right after <meta charset="UTF-8"> — injectNonces below stamps the nonce
@@ -1163,25 +1118,19 @@ export async function onRequest(context) {
   //        position:fixed / z-index:2147483647 covers partial-render edge cases.
   //        Text editors (Notepad, VS Code) see this copyright HTML before
   //        encountering the base64 XOR payload blob.
-  // [M3b+c] bootstrapOriginGuard — M1a updated with dual-signal guard and hardened catch.
-  // Mirrors the _m2Code changes above. Protects Scenario A (bootstrap saved as MHTML).
   const bootstrapOriginGuard =
     `<script nonce="${cspNonce}">`
     + `(function(){'use strict';`
     + `var _ao='https://civilengsuite.pages.dev';`
     + `var _o=(typeof window!=='undefined')?window.location.origin:'';`
     + `var _dev=/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(_o);`
-    + `var _ck=document.cookie.split(';').some(function(c){return c.trim().indexOf('ces_live=1')===0;});`
-    + `if(!_dev&&(_o!==_ao||!_ck)){`
+    + `if(_o!==_ao&&!_dev){`
     + `var _b='${_sharedCrB64}';`
     + `var _n=atob(_b);var _ba=new Uint8Array(_n.length);`
     + `for(var i=0;i<_n.length;i++)_ba[i]=_n.charCodeAt(i);`
     + `var _cr=new TextDecoder('utf-8').decode(_ba);`
     + `try{document.open();document.write(_cr);document.close();}`
-    + `catch(e){var _el=document.createElement('div');`
-    + `_el.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:#0A1A2E;z-index:2147483647;display:flex;align-items:center;justify-content:center;font-family:sans-serif;';`
-    + `_el.innerHTML='<div style=\\"text-align:center;padding:40px\\"><div style=\\"font-size:3.5rem;margin-bottom:18px\\">&#x1F512;</div><h2 style=\\"color:#C17B1A;margin:0 0 12px\\">&#169; Eng. Aymn Asi</h2><p style=\\"color:#8AA3C7;font-size:.9rem;margin:0\\">Unauthorized. Access from the official website only.</p></div>';`
-    + `(document.body||document.documentElement).appendChild(_el);}`
+    + `catch(e){window.location.replace(_ao+'${_sharedCrRP}/');}`
     + `}`
     + `})();`
     + `\u003c/script>`;
@@ -1312,6 +1261,19 @@ export async function onRequest(context) {
     + webMCPBootstrap
     + `<script nonce="${cspNonce}">`
     + `(function(){try{`
+    // [M1c] Defense-in-depth: origin check INSIDE XOR decoder.
+    // Runs only if M1a (parser-blocking <head> guard) was somehow bypassed.
+    // On unauthorized origin: writes copyright page, then returns — XOR decode never runs.
+    + `var _xao='https://civilengsuite.pages.dev';`
+    + `var _xo=window.location.origin;`
+    + `var _xd=/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(_xo);`
+    + `if(_xo!==_xao&&!_xd){`
+    + `var _xb='${_sharedCrB64}';`
+    + `var _xn=atob(_xb);var _xba=new Uint8Array(_xn.length);`
+    + `for(var xi=0;xi<_xn.length;xi++)_xba[xi]=_xn.charCodeAt(xi);`
+    + `var _xcr=new TextDecoder('utf-8').decode(_xba);`
+    + `try{document.open();document.write(_xcr);document.close();}catch(_xe){window.location.replace(_xao+'${_sharedCrRP}/');}`
+    + `return;}`
     + `var p="${payload}";`
     + `var b=atob(p);`
     + `var u=new Uint8Array(b.length);`
@@ -1328,12 +1290,6 @@ export async function onRequest(context) {
   return new Response(bootstrap, { status: 200, headers: {
     'Content-Type':            'text/html; charset=utf-8',
     'Cache-Control':           'no-store',
-    // [M3a] Session cookie — processed by the browser BEFORE HTML body parsing begins.
-    // Guards (M1a, M2) read document.cookie synchronously. Cookie is always present
-    // on legitimate access. MHTML contexts are sandboxed from this cookie jar → _ck=false.
-    // No HttpOnly: the guard must read it via document.cookie (JS-side read).
-    // SameSite=Strict: defence-in-depth; does not affect document.cookie reads.
-    'Set-Cookie':              'ces_live=1; SameSite=Strict; Secure; Path=/; Max-Age=3600',
     'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ=' 'unsafe-hashes' 'sha256-nAiI7XK5Mt/SgNQUZPqTuikvwxIVHV3se6mHGQue+88=' 'sha256-Jag+ZHPii6iUmMQWlnwms/mnjM8gRPTOJA2KIyTQQRk=' 'sha256-uLUdJIdD3+8SpL4nHNFN9YmyHRRmrseSQKwzj3ECn2I=' 'sha256-akyHNuxwVvvLQ11iHoDrpca0qH3TU3LfGbtdQ8kNdwI=' 'sha256-UOhLo4NRrWG89b3vpgtU0dc/C8aWLS+MQ2Lf9vW/4Fk=' 'sha256-jHF5hTIlMDyGZRAsNK0HO/WFYrwPvI2I1q0o1xKKB6I=' 'sha256-wflfhEeJWTAjAK0hnm9/OICxAQ8fVnj3168JrJ/m91k=' 'sha256-oTzV9+pQ7IAxC4NoAc7dH4+0Is4KloZ9u7cMJC7UDrE=' 'sha256-bTpi/7w0Cd8ihAWpwcZJIdz49sMq0d73fWWDzp5Ju2Q='`,
     // [A1] RFC 8288 Link header — visible in HTTP headers before JS executes.
     // [A4] Vary: Accept on homepage so intermediaries separate markdown/HTML caches.
