@@ -865,6 +865,14 @@ export async function onRequest(context) {
     return errResponse(500, 'Server Error', 'A configuration error occurred. Please try again later.');
   }
 
+  // Extract page title immediately after decryption — must be defined here because
+  // [M2] decryptedOriginGuard (built ~15 lines below) embeds pageTitle in its
+  // copyright HTML, and [M2] runs before the bot/human path split. Declaring
+  // pageTitle later (as originally written) creates a JS Temporal Dead Zone error
+  // (ReferenceError) that causes Cloudflare Error 1101 on every request.
+  const titleM    = html.match(/<title>([^<]*)<\/title>/i);
+  const pageTitle = titleM ? titleM[1] : 'Civil Engineering Suite';
+
   // ═══════════════════════════════════════════════════════════════════════════
   // [M2] MOBILE DOWNLOAD PROTECTION: DECRYPTED HTML ORIGIN GUARD
   // Mobile browsers (e.g., Safari "Save to Files") often save the fully
@@ -1056,8 +1064,8 @@ export async function onRequest(context) {
   for (let i = 0; i < raw.length; i++) xored[i] = raw[i] ^ XOR_KEY;
   const payload = u8ToB64(xored);   // chunked — safe for 500KB+ payloads
 
-  const titleM    = html.match(/<title>([^<]*)<\/title>/i);
-  const pageTitle = titleM ? titleM[1] : 'Civil Engineering Suite';
+  // pageTitle is declared earlier (right after decryption) so it is available
+  // to both the [M2] decryptedOriginGuard and the bootstrap shell below.
 
   // [B9] Build og meta block for bootstrap shell.
   // iMessage link previews are fetched CLIENT-SIDE by the recipient's phone using
