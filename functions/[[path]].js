@@ -53,6 +53,18 @@
  *        the /payment/* _headers block which governs the checkout flow.
  *
  *
+ * 2026-06-07 v13 — Decrypted HTML origin guard (M2):
+ *   [M2] Inject a synchronous origin guard into the decrypted HTML itself,
+ *        complementing the bootstrap shell guard (M1a). Mobile browsers such as
+ *        Safari "Save to Files" save the fully rendered, decrypted DOM — the
+ *        bootstrap shell (and its M1a guard) is never part of that saved file.
+ *        The guard fires on file:// protocol or origin === 'null', base64-decodes
+ *        and document.write()s the full copyright page. Fallback: sets
+ *        document.body.innerHTML to a minimal copyright block if document.open()
+ *        is unavailable. Injected immediately after <head> alongside <base href>.
+ *        Bot path is unaffected: stripProtectionScripts removes unnonce-d inline
+ *        scripts, so crawlers never receive the guard.
+ *
  * 2026-06-07 v12 — Mobile download button protection (M1):
  *   [M1] Bootstrap shell hardening against Chrome Android toolbar Download button.
  *        The native browser download button issues a raw HTTP GET that bypasses ALL
@@ -853,8 +865,44 @@ export async function onRequest(context) {
     return errResponse(500, 'Server Error', 'A configuration error occurred. Please try again later.');
   }
 
-  // ── Inject base href ───────────────────────────────────────────────────────
-  html = html.replace(/(<head[^>]*>)/i, `$1<base href="${baseHref}">`);
+  // ═══════════════════════════════════════════════════════════════════════════
+  // [M2] MOBILE DOWNLOAD PROTECTION: DECRYPTED HTML ORIGIN GUARD
+  // Mobile browsers (e.g., Safari "Save to Files") often save the fully
+  // rendered, decrypted DOM, completely bypassing the bootstrap shell.
+  // We inject a synchronous origin guard into the decrypted HTML itself
+  // to catch this scenario and force the copyright page on local file opening.
+  // ═══════════════════════════════════════════════════════════════════════════
+  const _crPageHtml =
+    `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>© Protected</title>` +
+    `<style>body{background:#0A1A2E;display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:sans-serif;text-align:center;padding:24px;margin:0}` +
+    `.card{max-width:440px}.icon{font-size:3.5rem;margin-bottom:18px}.title{color:#C17B1A;font-size:1.35rem;font-weight:700;margin-bottom:12px;line-height:1.4}` +
+    `.msg{color:#8AA3C7;font-size:0.9rem;line-height:1.8;margin-bottom:22px}a{color:#C17B1A;font-size:0.88rem;text-decoration:none}a:hover{text-decoration:underline}</style></head>` +
+    `<body><div class="card"><div class="icon">&#x1F512;</div>` +
+    `<div class="title">&#169; Eng. Aymn Asi &#8212; ${escHtml(pageTitle)}</div>` +
+    `<div class="msg">Unauthorized copying is prohibited.<br>This page must be accessed from the official website.</div>` +
+    `<a href="https://civilengsuite.pages.dev${route.prefix === '/' ? '' : route.prefix}/">civilengsuite.pages.dev${route.prefix === '/' ? '' : route.prefix}/</a></div></body></html>`;
+
+  const _crB64 = u8ToB64(new TextEncoder().encode(_crPageHtml));
+
+  const decryptedOriginGuard =
+    `<script>(function(){'use strict';` +
+    `var _o=(typeof window!=='undefined')?window.location.origin:'';` +
+    `var _p=(typeof window!=='undefined')?window.location.protocol:'';` +
+    `if(_o==='null'||_p==='file:'){` +
+      `try{` +
+        `var _b='${_crB64}';` +
+        `var _n=atob(_b);var _ba=new Uint8Array(_n.length);` +
+        `for(var i=0;i<_n.length;i++)_ba[i]=_n.charCodeAt(i);` +
+        `var _cr=new TextDecoder('utf-8').decode(_ba);` +
+        `document.open();document.write(_cr);document.close();` +
+      `}catch(e){` +
+        `document.body.innerHTML='<div style="background:#0A1A2E;color:#C17B1A;font-family:sans-serif;text-align:center;padding:40px;"><h2 style="font-size:1.5rem;margin-bottom:12px;">&#169; Protected</h2><p style="color:#8AA3C7;">Unauthorized copying is prohibited.<br>This page must be accessed from the official website.</p></div>';` +
+      `}` +
+    `}` +
+    `})();<\/script>`;
+
+  // ── Inject the [M2] guard AND base href immediately after <head> ───────────
+  html = html.replace(/(<head[^>]*>)/i, `$1${decryptedOriginGuard}<base href="${baseHref}">`);
 
   // ── [V4-FAV] Inject favicon links into decrypted HTML if absent ────────────
   // Human path: document.write(decodedHtml) replaces the entire document,
