@@ -52,74 +52,6 @@
  *        payment=() on app pages is unnecessary; it is correctly absent from
  *        the /payment/* _headers block which governs the checkout flow.
  *
- *
- * 2026-06-07 v12 — Mobile download button protection (M1):
- *   [M1] Bootstrap shell hardening against Chrome Android toolbar Download button.
- *        The native browser download button issues a raw HTTP GET that bypasses ALL
- *        JS event handlers on the page (contextmenu, keydown, navigator.share, etc.)
- *        and saves the bootstrap shell HTML (~330 KB) directly to disk.
- *        Desktop protection (v7 [B4]) intercepted Ctrl+S via showSaveFilePicker —
- *        that API does not exist on Android; the toolbar button has no JS surface.
- *        Two additions to the bootstrap shell close this gap:
- *
- *   [M1a] bootstrapOriginGuard — synchronous parser-blocking <script> in <head>:
- *         Fires before the XOR decoder. Checks window.location.origin. For any
- *         file:// load (origin === 'null') or unauthorized host, base64-decodes and
- *         document.write()s the full copyright page immediately. Mirrors the identical
- *         guard already embedded in the encrypted source HTML (footing-pro-v7-FIXED),
- *         but running one step earlier in the bootstrap shell itself so copyright
- *         is shown even if the XOR decoder never executes.
- *         Fallback: window.location.replace() for hypothetical sandboxed WebViews
- *         where document.open() is restricted.
- *
- *   [M1b] bootstrapCopyrightBody — hidden <div> placed as first <body> child:
- *         display:none prevents visual flash on legitimate access (XOR decoder
- *         replaces the document via document.open/write/close before first paint).
- *         A <noscript> rule toggles it to display:flex when JS is disabled.
- *         Purpose: text editors (Notepad, VS Code, hex editors) opening the
- *         downloaded bootstrap file see the copyright message as readable HTML
- *         before encountering the base64 XOR payload. The protected div is
- *         position:fixed / z-index:max so it covers any partial render.
- *
- *   Security impact: zero on the human path (XOR decoder replaces the document
- *   before the browser ever paints the copyright div). Bot path is unchanged.
- *
- * 2026-06-03 v11 — /download redirect (D1):
- *   [D1] /download route: 302 redirect to the Google Drive direct-download URL for
- *        the Civil Engineering Suite Activation Tool installer (.exe). Previously
- *        the path was unhandled — !route → context.next() → Cloudflare static
- *        file serving found no file → 404. Fix: explicit handler before the route
- *        matcher issues a 302 Found with Cache-Control: no-store so the redirect
- *        destination can be swapped at any time without stale browser caches.
- *        SHARED_SECURITY_HEADERS applied to avoid stripping existing protections.
- *        No CSP needed: 302 responses carry no body.
- *
- * 2026-06-03 v10 — Inline handler CSP fix + landing page 404 fix (H1–H2):
- *   [H1] CRITICAL BUG FIX: script-src now includes 'unsafe-hashes' + SHA-256 hashes
- *        for all 9 inline event handlers in the decrypted HTML. Change [F2] (v9)
- *        removed 'unsafe-inline' from script-src to silence console noise. Per CSP
- *        Level 3, nonces bypass unsafe-inline ONLY for <script> elements, not for
- *        inline event handlers (onclick, etc.). Removing unsafe-inline therefore
- *        blocked every onclick attribute in the page — specifically:
- *          · onclick="openSegModal()" on the Hero "Buy License — 249 EGP" button
- *          · onclick="openSegModal()" on the World-First "Subscribe Now" button
- *          · onclick="openSegModal()" on the bottom CTA "Buy License — 249 EGP" button
- *          · onclick="segModalDismiss()" on the modal ✕ close button
- *          · onclick="segModalDismiss()" on the modal Skip button
- *          · onclick="segModalTrack('engineers'|'offices'|'students')" on modal cards
- *          · onclick="window.open('/footing-pro/{segment}/','_self')" on segment cards
- *          · onclick="event.stopPropagation()" on inner anchor tags
- *        All these handlers fired silently into void — the user saw no response.
- *        Fix: 'unsafe-hashes' + explicit SHA-256 hashes for each handler value allows
- *        ONLY those 9 specific handlers. Nonce security for <script> elements is
- *        unchanged. Lighthouse Best Practices score unaffected ('unsafe-hashes' is
- *        not penalized; 'unsafe-inline' was). Applied to BOTH bot and human CSP.
- *   [H2] _redirects BUG FIX (documented here for change log completeness):
- *        The landing page rewrite rules pointed to /public/footing-pro/{segment}/:splat
- *        but the files live at /footing-pro/{segment}/index.html (repo root, not public/).
- *        This mismatch caused 404 on /footing-pro/offices/ and /footing-pro/students/.
- *        Fix is in _redirects: the 3 incorrect rules are removed; Cloudflare Pages
- *        file serving finds the files directly without any redirect rule.
  * 2026-04-28 v9 — PSI font + LCP + CSP fixes (F1–F3):
  *   [F1] STATIC_PASSTHROUGH: added fonts\.* — eliminates function invocation
  *        overhead for every font request. Previously fonts fell through to
@@ -775,22 +707,6 @@ export async function onRequest(context) {
     }
   }
 
-  // ── [D1] /download — 302 redirect to activation tool installer ───────────
-  // Google Drive direct-download URL for CivEngSuite Activation Tool (.exe).
-  // 302 (not 301) so the destination can change without browser cache lock-in.
-  // Cache-Control: no-store prevents any CDN or browser from caching this
-  // redirect; every click fetches the freshest destination from this handler.
-  if (path === '/download') {
-    return new Response(null, {
-      status: 302,
-      headers: {
-        'Location':      'https://drive.google.com/uc?export=download&id=1EQ6UaHvwrchiV0U5vRdXR5YktOZMnfrQ&confirm=t',
-        'Cache-Control': 'no-store',
-        ...SHARED_SECURITY_HEADERS,
-      },
-    });
-  }
-
   // ── Route matching: exact app root paths only ─────────────────────────────
   const route = (path === '' || path === '/' || path === '/index.html')
     ? ROUTES[0]
@@ -969,7 +885,7 @@ export async function onRequest(context) {
       // [A4] Vary: Accept added on homepage so markdown-negotiated cache is separate.
       'Vary':                    route.prefix === '/' ? 'User-Agent, Accept' : 'User-Agent',
       'X-Robots-Tag':            'index, follow',
-      'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ=' 'unsafe-hashes' 'sha256-nAiI7XK5Mt/SgNQUZPqTuikvwxIVHV3se6mHGQue+88=' 'sha256-Jag+ZHPii6iUmMQWlnwms/mnjM8gRPTOJA2KIyTQQRk=' 'sha256-uLUdJIdD3+8SpL4nHNFN9YmyHRRmrseSQKwzj3ECn2I=' 'sha256-akyHNuxwVvvLQ11iHoDrpca0qH3TU3LfGbtdQ8kNdwI=' 'sha256-UOhLo4NRrWG89b3vpgtU0dc/C8aWLS+MQ2Lf9vW/4Fk=' 'sha256-jHF5hTIlMDyGZRAsNK0HO/WFYrwPvI2I1q0o1xKKB6I=' 'sha256-wflfhEeJWTAjAK0hnm9/OICxAQ8fVnj3168JrJ/m91k=' 'sha256-oTzV9+pQ7IAxC4NoAc7dH4+0Is4KloZ9u7cMJC7UDrE=' 'sha256-bTpi/7w0Cd8ihAWpwcZJIdz49sMq0d73fWWDzp5Ju2Q='`,
+      'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ='`,
       // [A1] Link header on ALL bot responses — agents crawling any tool page
       // discover the full agent catalog without needing to hit the homepage first.
       'Link':                    HOMEPAGE_LINK_HEADER,
@@ -1093,92 +1009,6 @@ export async function onRequest(context) {
       + ' imagesizes="100vw" fetchpriority="high">'
     : '';
 
-  // ── [M1] Mobile Download Protection — Bootstrap Shell Hardening ──────────────
-  // Chrome Android toolbar Download button cannot be intercepted by any JS event
-  // handler (contextmenu, keydown, navigator.share) — it issues a native HTTP GET
-  // that bypasses all page scripts. The fix operates at the bootstrap HTML level:
-  //
-  // [M1a] bootstrapOriginGuard: synchronous parser-blocking <script> in <head>.
-  //       Fires before the XOR decoder runs. Detects file:// (origin === 'null')
-  //       and any unauthorized origin. Replaces the document immediately with the
-  //       copyright page via document.open/write/close — the XOR decoder never runs.
-  //       The copyright HTML is base64-encoded to safely embed inside the JS string.
-  //
-  // [M1b] bootstrapCopyrightBody: first <body> child, display:none by default.
-  //       display:none → zero visual flash on legitimate access (XOR decoder replaces
-  //       the document via document.open/write/close before first browser paint).
-  //       <noscript> rule → display:flex when JS is disabled (replaces old noscript).
-  //       position:fixed; z-index:max → covers partial renders in edge cases.
-  //       Text editors (Notepad, VS Code) opening the downloaded bootstrap file see
-  //       the copyright HTML immediately before the base64 XOR payload blob.
-
-  const _crPageTitle  = escHtml(pageTitle);
-  const _crRoutePrefix = route.prefix === '/' ? '' : route.prefix;
-  const _crRouteUrl   = `https://civilengsuite.pages.dev${_crRoutePrefix}/`;
-  const _crRouteLabel = `civilengsuite.pages.dev${_crRoutePrefix}/`;
-
-  // Build copyright page HTML — base64-encoded to safely embed inside the JS string
-  // without any HTML/JS escaping conflicts (no nested quotes, no </script> risk).
-  const _crPageHtml =
-    `<!DOCTYPE html><html><head><meta charset="UTF-8">`
-    + `<meta name="viewport" content="width=device-width,initial-scale=1">`
-    + `<title>\u00A9 Protected \u2014 ${_crPageTitle}</title>`
-    + `<style>*{box-sizing:border-box;margin:0;padding:0}`
-    + `body{background:#0A1A2E;display:flex;align-items:center;justify-content:center;`
-    + `min-height:100vh;font-family:sans-serif;text-align:center;padding:24px}`
-    + `.card{max-width:440px}`
-    + `.icon{font-size:3.5rem;margin-bottom:18px}`
-    + `.title{color:#C17B1A;font-size:1.35rem;font-weight:700;margin-bottom:12px;line-height:1.4}`
-    + `.msg{color:#8AA3C7;font-size:0.9rem;line-height:1.8;margin-bottom:22px}`
-    + `a{color:#C17B1A;font-size:0.88rem;text-decoration:none}`
-    + `a:hover{text-decoration:underline}</style></head><body>`
-    + `<div class="card">`
-    + `<div class="icon">&#x1F512;</div>`
-    + `<div class="title">&#169; Eng. Aymn Asi &#8212; ${_crPageTitle}</div>`
-    + `<div class="msg">Unauthorized copying is prohibited.<br>`
-    + `This page must be accessed from the official website.</div>`
-    + `<a href="${_crRouteUrl}">${_crRouteLabel}</a>`
-    + `</div></body></html>`;
-  const _crB64 = u8ToB64(new TextEncoder().encode(_crPageHtml));
-
-  // [M1a] Bootstrap origin guard — in <head>, fires before XOR decoder
-  const bootstrapOriginGuard =
-    `<script nonce="${cspNonce}">`
-    + `(function(){'use strict';`
-    + `var _ao='https://civilengsuite.pages.dev';`
-    + `var _o=(typeof window!=='undefined')?window.location.origin:'';`
-    + `var _dev=/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(_o);`
-    + `if(_o!==_ao&&!_dev){`
-    + `var _b='${_crB64}';`
-    + `var _n=atob(_b);var _ba=new Uint8Array(_n.length);`
-    + `for(var i=0;i<_n.length;i++)_ba[i]=_n.charCodeAt(i);`
-    + `var _cr=new TextDecoder('utf-8').decode(_ba);`
-    + `try{document.open();document.write(_cr);document.close();}`
-    + `catch(e){window.location.replace(_ao+'${_crRoutePrefix}/');}`
-    + `}`
-    + `})();`
-    + `\u003c/script>`;
-
-  // [M1b] Bootstrap copyright body — first <body> child, hidden in browsers
-  const bootstrapCopyrightBody =
-    `<style>`
-    + `#_ces_cr_body{display:none;margin:0;background:#0A1A2E;color:#C17B1A;`
-    + `font-family:sans-serif;align-items:center;justify-content:center;`
-    + `min-height:100vh;text-align:center;position:fixed;top:0;left:0;`
-    + `width:100%;height:100%;z-index:2147483647}`
-    + `</style>`
-    + `<noscript><style>#_ces_cr_body{display:flex!important}</style></noscript>`
-    + `<div id="_ces_cr_body">`
-    + `<div style="padding:40px;max-width:440px">`
-    + `<div style="font-size:3.5rem;margin-bottom:18px">&#x1F512;</div>`
-    + `<h2 style="font-size:1.35rem;font-weight:700;margin-bottom:12px;line-height:1.4">`
-    + `&#169; Eng. Aymn Asi &#8212; ${_crPageTitle}</h2>`
-    + `<p style="color:#8AA3C7;font-size:0.9rem;line-height:1.8;margin-bottom:22px">`
-    + `Unauthorized copying is prohibited.<br>`
-    + `This page must be accessed from the official website.</p>`
-    + `<a href="${_crRouteUrl}" style="color:#C17B1A;font-size:0.88rem">${_crRouteLabel}</a>`
-    + `</div></div>`;
-
   const bootstrap = `<!DOCTYPE html><html><head>`
     + `<meta charset="UTF-8">`
     + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
@@ -1198,9 +1028,7 @@ export async function onRequest(context) {
     + `<title>${pageTitle}</title>`
     + ogMetaBlock
     + faviconLinks
-    + bootstrapOriginGuard
     + `</head><body>`
-    + bootstrapCopyrightBody
     + webMCPBootstrap
     + `<script nonce="${cspNonce}">`
     + `(function(){try{`
@@ -1215,12 +1043,13 @@ export async function onRequest(context) {
     + `_f.textContent='Page could not be loaded. Please refresh or contact support.';`
     + `document.body.appendChild(_f);}})();`
     + `\u003c/script>`
+    + `<noscript><div style="font-family:sans-serif;padding:40px;text-align:center;color:#C17B1A;background:#0A1A2E;min-height:100vh;display:flex;align-items:center;justify-content:center;"><div><h2 style="margin-bottom:16px;">JavaScript Required</h2><p style="color:#8AA3C7;line-height:1.8;">Civil Engineering Suite requires JavaScript to run.<br>Please enable JavaScript in your browser settings and refresh the page.</p></div></div></noscript>`
     + `</body></html>`;
 
   return new Response(bootstrap, { status: 200, headers: {
     'Content-Type':            'text/html; charset=utf-8',
     'Cache-Control':           'no-store',
-    'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ=' 'unsafe-hashes' 'sha256-nAiI7XK5Mt/SgNQUZPqTuikvwxIVHV3se6mHGQue+88=' 'sha256-Jag+ZHPii6iUmMQWlnwms/mnjM8gRPTOJA2KIyTQQRk=' 'sha256-uLUdJIdD3+8SpL4nHNFN9YmyHRRmrseSQKwzj3ECn2I=' 'sha256-akyHNuxwVvvLQ11iHoDrpca0qH3TU3LfGbtdQ8kNdwI=' 'sha256-UOhLo4NRrWG89b3vpgtU0dc/C8aWLS+MQ2Lf9vW/4Fk=' 'sha256-jHF5hTIlMDyGZRAsNK0HO/WFYrwPvI2I1q0o1xKKB6I=' 'sha256-wflfhEeJWTAjAK0hnm9/OICxAQ8fVnj3168JrJ/m91k=' 'sha256-oTzV9+pQ7IAxC4NoAc7dH4+0Is4KloZ9u7cMJC7UDrE=' 'sha256-bTpi/7w0Cd8ihAWpwcZJIdz49sMq0d73fWWDzp5Ju2Q='`,
+    'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ='`,
     // [A1] RFC 8288 Link header — visible in HTTP headers before JS executes.
     // [A4] Vary: Accept on homepage so intermediaries separate markdown/HTML caches.
     ...(route.prefix === '/' ? {
