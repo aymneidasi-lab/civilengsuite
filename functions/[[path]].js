@@ -1167,7 +1167,7 @@ export async function onRequest(context) {
 
   // Build copyright page HTML — base64-encoded to safely embed inside the JS string
   // without any HTML/JS escaping conflicts (no nested quotes, no </script> risk).
-  const _crPageHtml =
+  const _bsPageHtml =
     `<!DOCTYPE html><html><head><meta charset="UTF-8">`
     + `<meta name="viewport" content="width=device-width,initial-scale=1">`
     + `<title>\u00A9 Protected \u2014 ${_crPageTitle}</title>`
@@ -1187,7 +1187,7 @@ export async function onRequest(context) {
     + `This page must be accessed from the official website.</div>`
     + `<a href="${_crRouteUrl}">${_crRouteLabel}</a>`
     + `</div></body></html>`;
-  const _crB64 = u8ToB64(new TextEncoder().encode(_crPageHtml));
+  const _bsB64 = u8ToB64(new TextEncoder().encode(_bsPageHtml));
 
   // [M1a] Bootstrap origin guard — in <head>, fires before XOR decoder
   const bootstrapOriginGuard =
@@ -1197,7 +1197,7 @@ export async function onRequest(context) {
     + `var _o=(typeof window!=='undefined')?window.location.origin:'';`
     + `var _dev=/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(_o);`
     + `if(_o!==_ao&&!_dev){`
-    + `var _b='${_crB64}';`
+    + `var _b='${_bsB64}';`
     + `var _n=atob(_b);var _ba=new Uint8Array(_n.length);`
     + `for(var i=0;i<_n.length;i++)_ba[i]=_n.charCodeAt(i);`
     + `var _cr=new TextDecoder('utf-8').decode(_ba);`
