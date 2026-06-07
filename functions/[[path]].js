@@ -53,37 +53,6 @@
  *        the /payment/* _headers block which governs the checkout flow.
  *
  *
- * 2026-06-07 v12 — Mobile download button protection (M1):
- *   [M1] Bootstrap shell hardening against Chrome Android toolbar Download button.
- *        The native browser download button issues a raw HTTP GET that bypasses ALL
- *        JS event handlers on the page (contextmenu, keydown, navigator.share, etc.)
- *        and saves the bootstrap shell HTML (~330 KB) directly to disk.
- *        Desktop protection (v7 [B4]) intercepted Ctrl+S via showSaveFilePicker —
- *        that API does not exist on Android; the toolbar button has no JS surface.
- *        Two additions to the bootstrap shell close this gap:
- *
- *   [M1a] bootstrapOriginGuard — synchronous parser-blocking <script> in <head>:
- *         Fires before the XOR decoder. Checks window.location.origin. For any
- *         file:// load (origin === 'null') or unauthorized host, base64-decodes and
- *         document.write()s the full copyright page immediately. Mirrors the identical
- *         guard already embedded in the encrypted source HTML (footing-pro-v7-FIXED),
- *         but running one step earlier in the bootstrap shell itself so copyright
- *         is shown even if the XOR decoder never executes.
- *         Fallback: window.location.replace() for hypothetical sandboxed WebViews
- *         where document.open() is restricted.
- *
- *   [M1b] bootstrapCopyrightBody — hidden <div> placed as first <body> child:
- *         display:none prevents visual flash on legitimate access (XOR decoder
- *         replaces the document via document.open/write/close before first paint).
- *         A <noscript> rule toggles it to display:flex when JS is disabled.
- *         Purpose: text editors (Notepad, VS Code, hex editors) opening the
- *         downloaded bootstrap file see the copyright message as readable HTML
- *         before encountering the base64 XOR payload. The protected div is
- *         position:fixed / z-index:max so it covers any partial render.
- *
- *   Security impact: zero on the human path (XOR decoder replaces the document
- *   before the browser ever paints the copyright div). Bot path is unchanged.
- *
  * 2026-06-03 v11 — /download redirect (D1):
  *   [D1] /download route: 302 redirect to the Google Drive direct-download URL for
  *        the Civil Engineering Suite Activation Tool installer (.exe). Previously
@@ -1093,92 +1062,6 @@ export async function onRequest(context) {
       + ' imagesizes="100vw" fetchpriority="high">'
     : '';
 
-  // ── [M1] Mobile Download Protection — Bootstrap Shell Hardening ──────────────
-  // Chrome Android toolbar Download button cannot be intercepted by any JS event
-  // handler (contextmenu, keydown, navigator.share) — it issues a native HTTP GET
-  // that bypasses all page scripts. The fix operates at the bootstrap HTML level:
-  //
-  // [M1a] bootstrapOriginGuard: synchronous parser-blocking <script> in <head>.
-  //       Fires before the XOR decoder runs. Detects file:// (origin === 'null')
-  //       and any unauthorized origin. Replaces the document immediately with the
-  //       copyright page via document.open/write/close — the XOR decoder never runs.
-  //       The copyright HTML is base64-encoded to safely embed inside the JS string.
-  //
-  // [M1b] bootstrapCopyrightBody: first <body> child, display:none by default.
-  //       display:none → zero visual flash on legitimate access (XOR decoder replaces
-  //       the document via document.open/write/close before first browser paint).
-  //       <noscript> rule → display:flex when JS is disabled (replaces old noscript).
-  //       position:fixed; z-index:max → covers partial renders in edge cases.
-  //       Text editors (Notepad, VS Code) opening the downloaded bootstrap file see
-  //       the copyright HTML immediately before the base64 XOR payload blob.
-
-  const _crPageTitle  = escHtml(pageTitle);
-  const _crRoutePrefix = route.prefix === '/' ? '' : route.prefix;
-  const _crRouteUrl   = `https://civilengsuite.pages.dev${_crRoutePrefix}/`;
-  const _crRouteLabel = `civilengsuite.pages.dev${_crRoutePrefix}/`;
-
-  // Build copyright page HTML — base64-encoded to safely embed inside the JS string
-  // without any HTML/JS escaping conflicts (no nested quotes, no </script> risk).
-  const _crPageHtml =
-    `<!DOCTYPE html><html><head><meta charset="UTF-8">`
-    + `<meta name="viewport" content="width=device-width,initial-scale=1">`
-    + `<title>\u00A9 Protected \u2014 ${_crPageTitle}</title>`
-    + `<style>*{box-sizing:border-box;margin:0;padding:0}`
-    + `body{background:#0A1A2E;display:flex;align-items:center;justify-content:center;`
-    + `min-height:100vh;font-family:sans-serif;text-align:center;padding:24px}`
-    + `.card{max-width:440px}`
-    + `.icon{font-size:3.5rem;margin-bottom:18px}`
-    + `.title{color:#C17B1A;font-size:1.35rem;font-weight:700;margin-bottom:12px;line-height:1.4}`
-    + `.msg{color:#8AA3C7;font-size:0.9rem;line-height:1.8;margin-bottom:22px}`
-    + `a{color:#C17B1A;font-size:0.88rem;text-decoration:none}`
-    + `a:hover{text-decoration:underline}</style></head><body>`
-    + `<div class="card">`
-    + `<div class="icon">&#x1F512;</div>`
-    + `<div class="title">&#169; Eng. Aymn Asi &#8212; ${_crPageTitle}</div>`
-    + `<div class="msg">Unauthorized copying is prohibited.<br>`
-    + `This page must be accessed from the official website.</div>`
-    + `<a href="${_crRouteUrl}">${_crRouteLabel}</a>`
-    + `</div></body></html>`;
-  const _crB64 = u8ToB64(new TextEncoder().encode(_crPageHtml));
-
-  // [M1a] Bootstrap origin guard — in <head>, fires before XOR decoder
-  const bootstrapOriginGuard =
-    `<script nonce="${cspNonce}">`
-    + `(function(){'use strict';`
-    + `var _ao='https://civilengsuite.pages.dev';`
-    + `var _o=(typeof window!=='undefined')?window.location.origin:'';`
-    + `var _dev=/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(_o);`
-    + `if(_o!==_ao&&!_dev){`
-    + `var _b='${_crB64}';`
-    + `var _n=atob(_b);var _ba=new Uint8Array(_n.length);`
-    + `for(var i=0;i<_n.length;i++)_ba[i]=_n.charCodeAt(i);`
-    + `var _cr=new TextDecoder('utf-8').decode(_ba);`
-    + `try{document.open();document.write(_cr);document.close();}`
-    + `catch(e){window.location.replace(_ao+'${_crRoutePrefix}/');}`
-    + `}`
-    + `})();`
-    + `\u003c/script>`;
-
-  // [M1b] Bootstrap copyright body — first <body> child, hidden in browsers
-  const bootstrapCopyrightBody =
-    `<style>`
-    + `#_ces_cr_body{display:none;margin:0;background:#0A1A2E;color:#C17B1A;`
-    + `font-family:sans-serif;align-items:center;justify-content:center;`
-    + `min-height:100vh;text-align:center;position:fixed;top:0;left:0;`
-    + `width:100%;height:100%;z-index:2147483647}`
-    + `</style>`
-    + `<noscript><style>#_ces_cr_body{display:flex!important}</style></noscript>`
-    + `<div id="_ces_cr_body">`
-    + `<div style="padding:40px;max-width:440px">`
-    + `<div style="font-size:3.5rem;margin-bottom:18px">&#x1F512;</div>`
-    + `<h2 style="font-size:1.35rem;font-weight:700;margin-bottom:12px;line-height:1.4">`
-    + `&#169; Eng. Aymn Asi &#8212; ${_crPageTitle}</h2>`
-    + `<p style="color:#8AA3C7;font-size:0.9rem;line-height:1.8;margin-bottom:22px">`
-    + `Unauthorized copying is prohibited.<br>`
-    + `This page must be accessed from the official website.</p>`
-    + `<a href="${_crRouteUrl}" style="color:#C17B1A;font-size:0.88rem">${_crRouteLabel}</a>`
-    + `</div></div>`;
-
   const bootstrap = `<!DOCTYPE html><html><head>`
     + `<meta charset="UTF-8">`
     + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
@@ -1198,9 +1081,7 @@ export async function onRequest(context) {
     + `<title>${pageTitle}</title>`
     + ogMetaBlock
     + faviconLinks
-    + bootstrapOriginGuard
     + `</head><body>`
-    + bootstrapCopyrightBody
     + webMCPBootstrap
     + `<script nonce="${cspNonce}">`
     + `(function(){try{`
@@ -1215,6 +1096,7 @@ export async function onRequest(context) {
     + `_f.textContent='Page could not be loaded. Please refresh or contact support.';`
     + `document.body.appendChild(_f);}})();`
     + `\u003c/script>`
+    + `<noscript><div style="font-family:sans-serif;padding:40px;text-align:center;color:#C17B1A;background:#0A1A2E;min-height:100vh;display:flex;align-items:center;justify-content:center;"><div><h2 style="margin-bottom:16px;">JavaScript Required</h2><p style="color:#8AA3C7;line-height:1.8;">Civil Engineering Suite requires JavaScript to run.<br>Please enable JavaScript in your browser settings and refresh the page.</p></div></div></noscript>`
     + `</body></html>`;
 
   return new Response(bootstrap, { status: 200, headers: {
