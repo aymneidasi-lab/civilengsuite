@@ -53,61 +53,6 @@
  *        the /payment/* _headers block which governs the checkout flow.
  *
  *
- * 2026-06-07 v13 — Mobile download protection: bootstrap hardening + decoded-HTML guard (M1–M2):
- *
- *   ROOT CAUSE ANALYSIS — why desktop Ctrl+S protection succeeds but mobile Download fails:
- *     Desktop Ctrl+S fires a 'keydown' DOM event. buildProtectionBundle() intercepts it,
- *     overrides showSaveFilePicker, and saves copyright HTML instead of the real page. JS
- *     events CAN intercept Ctrl+S because it is a keyboard event dispatched through the DOM.
- *
- *     Chrome Android's toolbar Download button is a NATIVE OS UI element. When tapped, it
- *     sends a raw HTTP GET to the current URL and pipes the response bytes directly to the
- *     DownloadManager — completely bypassing the page's JavaScript execution context.
- *     No 'keydown', no 'contextmenu', no 'navigator.share' override — none of the existing
- *     buildProtectionBundle() handlers fire. The bootstrap HTML is saved as-is.
- *     Pre-v13, the bootstrap had no origin guard, so the XOR decoder ran on open → real HTML.
- *
- *   TWO DISTINCT DOWNLOAD SCENARIOS addressed by v13:
- *     Scenario A — Chrome saves the bootstrap HTTP response (new GET request to URL):
- *                  User opens the saved .html → guard in bootstrap <head> fires before body
- *                  is parsed → XOR decoder never runs → copyright page shown.
- *     Scenario B — Chrome saves the rendered DOM (post document.write DOM state):
- *                  User opens the saved .html → real decoded HTML with M2 guard in <head>
- *                  fires before content renders → copyright page shown.
- *     Both scenarios produce the same visible result: the copyright page. The XOR payload
- *     (base64 string in the bootstrap) is technically present in Scenario A files, but JS
- *     execution is blocked by the origin guard before the decoder can run.
- *
- *   [M1a] bootstrapOriginGuard — synchronous parser-blocking <script> in bootstrap <head>:
- *         Injected after faviconLinks, before </head>. Checks window.location.origin.
- *         For file:// loads (origin === 'null') or any unauthorized host, base64-decodes
- *         and document.write()s the copyright page. document.open() aborts the HTML parser
- *         — <body> with the XOR decoder script is never parsed, never executes.
- *         Fallback: window.location.replace() for sandboxed WebViews where document.open
- *         is restricted. Runs synchronously — zero visible flash of real content possible.
- *
- *   [M1b] bootstrapCopyrightBody — first <body> child; replaces old 'JavaScript Required'
- *         noscript. Hidden by default (display:none) — legitimate access never sees it
- *         because M1a fires first (JS context) or XOR decoder replaces the document.
- *         <noscript> rule toggles to display:flex so viewers that don't execute JS still
- *         show the copyright page instead of a blank screen.
- *         position:fixed / z-index:2147483647 covers any partial render edge case.
- *         Text editors (Notepad, VS Code) opening the bootstrap .html file see this
- *         copyright HTML before encountering the base64 XOR payload blob.
- *
- *   [M2]  htmlOriginGuard — origin guard injected into the DECODED HTML payload, BEFORE
- *         XOR encoding. This is the Scenario B layer: if Chrome saves the rendered DOM
- *         (the real page HTML produced by document.write), the guard is already embedded
- *         in that HTML. Injected right after <meta charset="UTF-8"> in the decoded HTML.
- *         Placed BEFORE injectNonces so it receives a nonce and executes correctly in the
- *         decoded-HTML CSP context (which inherits the bootstrap's 'nonce-X' policy).
- *         On legitimate access: origin matches → guard is a no-op → page renders normally.
- *         On file:// open: origin === 'null' → guard fires → copyright shown.
- *         Bot path: M2 guard is NEVER injected (human path only, after BOT_RE branch
- *         returns) — no change to bot responses, no stripProtectionScripts update needed.
- *         The _sharedCrB64 (copyright page, base64) is computed once from the processed
- *         html title and reused for both M2 (decoded HTML) and M1 (bootstrap shell).
- *
  * 2026-06-03 v11 — /download redirect (D1):
  *   [D1] /download route: 302 redirect to the Google Drive direct-download URL for
  *        the Civil Engineering Suite Activation Tool installer (.exe). Previously
@@ -1002,7 +947,7 @@ export async function onRequest(context) {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // HUMAN PATH — Full protection active
+  // HUMAN PATH — Full protection active (unchanged from original)
   // ═══════════════════════════════════════════════════════════════════════════
 
   // Inject protection bundle at end of body
@@ -1017,65 +962,7 @@ export async function onRequest(context) {
     .replace(/\s{2,}/g, ' ')
     .trim();
 
-  // ── [M2] Decoded-HTML origin guard — Scenario B coverage ─────────────────
-  // Injected HERE (after minify, BEFORE injectNonces) so the <script> tag
-  // receives a nonce from injectNonces and executes in the decoded-HTML CSP
-  // context (which inherits the bootstrap response's 'nonce-X' policy).
-  //
-  // Scenario B: Chrome Android saves the rendered DOM (post document.write)
-  // rather than the bootstrap HTTP response. The saved file IS the decoded
-  // real HTML. When opened as file://, this guard fires in <head> before any
-  // content renders and replaces the document with the copyright page.
-  //
-  // On legitimate access (origin === 'https://civilengsuite.pages.dev'):
-  //   guard check fails → no-op → page renders normally. ✓
-  // On file:// open (origin === 'null') or unauthorized host:
-  //   guard fires → copyright shown. ✓
-  //
-  // _sharedCrB64 is hoisted here and reused for M1 (bootstrapOriginGuard
-  // and bootstrapCopyrightBody) later — copyright page computed only once.
-  const _sharedCrRP    = route.prefix === '/' ? '' : route.prefix;
-  const _sharedCrTM    = html.match(/<title>([^<]*)<\/title>/i);
-  const _sharedCrPT    = escHtml(_sharedCrTM ? _sharedCrTM[1] : (route.ogTitle || 'Civil Engineering Suite'));
-  const _sharedCrUrl   = `https://civilengsuite.pages.dev${_sharedCrRP}/`;
-  const _sharedCrLabel = `civilengsuite.pages.dev${_sharedCrRP}/`;
-  const _sharedCrHtml  =
-    `<!DOCTYPE html><html><head><meta charset="UTF-8">`
-    + `<meta name="viewport" content="width=device-width,initial-scale=1">`
-    + `<title>\u00A9 Protected \u2014 ${_sharedCrPT}<\/title>`
-    + `<style>*{box-sizing:border-box;margin:0;padding:0}`
-    + `body{background:#0A1A2E;display:flex;align-items:center;justify-content:center;`
-    + `min-height:100vh;font-family:sans-serif;text-align:center;padding:24px}`
-    + `.card{max-width:440px}.icon{font-size:3.5rem;margin-bottom:18px}`
-    + `.title{color:#C17B1A;font-size:1.35rem;font-weight:700;margin-bottom:12px;line-height:1.4}`
-    + `.msg{color:#8AA3C7;font-size:0.9rem;line-height:1.8;margin-bottom:22px}`
-    + `a{color:#C17B1A;font-size:0.88rem;text-decoration:none}`
-    + `a:hover{text-decoration:underline}<\/style><\/head><body>`
-    + `<div class="card"><div class="icon">&#x1F512;<\/div>`
-    + `<div class="title">&#169; Eng. Aymn Asi &#8212; ${_sharedCrPT}<\/div>`
-    + `<div class="msg">Unauthorized copying is prohibited.<br>`
-    + `This page must be accessed from the official website.<\/div>`
-    + `<a href="${_sharedCrUrl}">${_sharedCrLabel}<\/a>`
-    + `<\/div><\/body><\/html>`;
-  const _sharedCrB64 = u8ToB64(new TextEncoder().encode(_sharedCrHtml));
-  const _m2Code =
-      `(function(){'use strict';`
-    + `var _ao='https://civilengsuite.pages.dev';`
-    + `var _o=(typeof window!=='undefined')?window.location.origin:'';`
-    + `var _dev=/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(_o);`
-    + `if(_o!==_ao&&!_dev){`
-    + `var _b='${_sharedCrB64}';`
-    + `var _n=atob(_b);var _ba=new Uint8Array(_n.length);`
-    + `for(var i=0;i<_n.length;i++)_ba[i]=_n.charCodeAt(i);`
-    + `var _cr=new TextDecoder('utf-8').decode(_ba);`
-    + `try{document.open();document.write(_cr);document.close();}`
-    + `catch(e){window.location.replace(_ao+'${_sharedCrRP}/');}`
-    + `}`
-    + `})();`;
-  // Inject right after <meta charset="UTF-8"> — injectNonces below stamps the nonce
-  html = html.replace(/(<meta charset="UTF-8">)/i, `$1<script>${_m2Code}<\/script>`);
-
-  // Stamp nonce on every <script> tag (including the M2 guard injected above)
+  // Stamp nonce on every <script> tag
   html = injectNonces(html, cspNonce);
 
   // [PSI-09] Minify inline <style> blocks before XOR encoding.
@@ -1092,55 +979,6 @@ export async function onRequest(context) {
 
   const titleM    = html.match(/<title>([^<]*)<\/title>/i);
   const pageTitle = titleM ? titleM[1] : 'Civil Engineering Suite';
-
-  // ── [M1] Bootstrap shell mobile-download protection ──────────────────────
-  // Build origin guard (M1a) and copyright body (M1b) from _sharedCrB64
-  // computed above in the M2 block. Same copyright page; no duplicate work.
-  //
-  // M1a — bootstrapOriginGuard: fires BEFORE <body> is parsed, so the XOR
-  //        decoder script in <body> is never reached on unauthorized opens.
-  // M1b — bootstrapCopyrightBody: first <body> child.
-  //        display:none for legitimate access (XOR decoder replaces the doc
-  //        before first paint). <noscript> makes it display:flex when JS is
-  //        disabled so no-JS viewers see copyright instead of blank screen.
-  //        position:fixed / z-index:2147483647 covers partial-render edge cases.
-  //        Text editors (Notepad, VS Code) see this copyright HTML before
-  //        encountering the base64 XOR payload blob.
-  const bootstrapOriginGuard =
-    `<script nonce="${cspNonce}">`
-    + `(function(){'use strict';`
-    + `var _ao='https://civilengsuite.pages.dev';`
-    + `var _o=(typeof window!=='undefined')?window.location.origin:'';`
-    + `var _dev=/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(_o);`
-    + `if(_o!==_ao&&!_dev){`
-    + `var _b='${_sharedCrB64}';`
-    + `var _n=atob(_b);var _ba=new Uint8Array(_n.length);`
-    + `for(var i=0;i<_n.length;i++)_ba[i]=_n.charCodeAt(i);`
-    + `var _cr=new TextDecoder('utf-8').decode(_ba);`
-    + `try{document.open();document.write(_cr);document.close();}`
-    + `catch(e){window.location.replace(_ao+'${_sharedCrRP}/');}`
-    + `}`
-    + `})();`
-    + `\u003c/script>`;
-
-  const bootstrapCopyrightBody =
-    `<style>`
-    + `#_ces_cr_body{display:none;margin:0;background:#0A1A2E;color:#C17B1A;`
-    + `font-family:sans-serif;align-items:center;justify-content:center;`
-    + `min-height:100vh;text-align:center;position:fixed;top:0;left:0;`
-    + `width:100%;height:100%;z-index:2147483647}`
-    + `</style>`
-    + `<noscript><style>#_ces_cr_body{display:flex!important}</style></noscript>`
-    + `<div id="_ces_cr_body">`
-    + `<div style="padding:40px;max-width:440px">`
-    + `<div style="font-size:3.5rem;margin-bottom:18px">&#x1F512;</div>`
-    + `<h2 style="font-size:1.35rem;font-weight:700;margin-bottom:12px;line-height:1.4">`
-    + `&#169; Eng. Aymn Asi &#8212; ${escHtml(pageTitle)}</h2>`
-    + `<p style="color:#8AA3C7;font-size:0.9rem;line-height:1.8;margin-bottom:22px">`
-    + `Unauthorized copying is prohibited.<br>`
-    + `This page must be accessed from the official website.</p>`
-    + `<a href="${_sharedCrUrl}" style="color:#C17B1A;font-size:0.88rem">${_sharedCrLabel}</a>`
-    + `</div></div>`;
 
   // [B9] Build og meta block for bootstrap shell.
   // iMessage link previews are fetched CLIENT-SIDE by the recipient's phone using
@@ -1243,9 +1081,7 @@ export async function onRequest(context) {
     + `<title>${pageTitle}</title>`
     + ogMetaBlock
     + faviconLinks
-    + bootstrapOriginGuard
     + `</head><body>`
-    + bootstrapCopyrightBody
     + webMCPBootstrap
     + `<script nonce="${cspNonce}">`
     + `(function(){try{`
@@ -1260,6 +1096,7 @@ export async function onRequest(context) {
     + `_f.textContent='Page could not be loaded. Please refresh or contact support.';`
     + `document.body.appendChild(_f);}})();`
     + `\u003c/script>`
+    + `<noscript><div style="font-family:sans-serif;padding:40px;text-align:center;color:#C17B1A;background:#0A1A2E;min-height:100vh;display:flex;align-items:center;justify-content:center;"><div><h2 style="margin-bottom:16px;">JavaScript Required</h2><p style="color:#8AA3C7;line-height:1.8;">Civil Engineering Suite requires JavaScript to run.<br>Please enable JavaScript in your browser settings and refresh the page.</p></div></div></noscript>`
     + `</body></html>`;
 
   return new Response(bootstrap, { status: 200, headers: {
