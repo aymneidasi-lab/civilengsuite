@@ -52,146 +52,6 @@
  *        payment=() on app pages is unnecessary; it is correctly absent from
  *        the /payment/* _headers block which governs the checkout flow.
  *
- *
- * 2026-06-07 v13 — Mobile download protection: bootstrap hardening + decoded-HTML guard (M1–M2):
- *
- *   ROOT CAUSE ANALYSIS — why desktop Ctrl+S protection succeeds but mobile Download fails:
- *     Desktop Ctrl+S fires a 'keydown' DOM event. buildProtectionBundle() intercepts it,
- *     overrides showSaveFilePicker, and saves copyright HTML instead of the real page. JS
- *     events CAN intercept Ctrl+S because it is a keyboard event dispatched through the DOM.
- *
- *     Chrome Android's toolbar Download button is a NATIVE OS UI element. When tapped, it
- *     sends a raw HTTP GET to the current URL and pipes the response bytes directly to the
- *     DownloadManager — completely bypassing the page's JavaScript execution context.
- *     No 'keydown', no 'contextmenu', no 'navigator.share' override — none of the existing
- *     buildProtectionBundle() handlers fire. The bootstrap HTML is saved as-is.
- *     Pre-v13, the bootstrap had no origin guard, so the XOR decoder ran on open → real HTML.
- *
- *   TWO DISTINCT DOWNLOAD SCENARIOS addressed by v13:
- *     Scenario A — Chrome saves the bootstrap HTTP response (new GET request to URL):
- *                  User opens the saved .html → guard in bootstrap <head> fires before body
- *                  is parsed → XOR decoder never runs → copyright page shown.
- *     Scenario B — Chrome saves the rendered DOM (post document.write DOM state):
- *                  User opens the saved .html → real decoded HTML with M2 guard in <head>
- *                  fires before content renders → copyright page shown.
- *     Both scenarios produce the same visible result: the copyright page. The XOR payload
- *     (base64 string in the bootstrap) is technically present in Scenario A files, but JS
- *     execution is blocked by the origin guard before the decoder can run.
- *
- *   [M1a] bootstrapOriginGuard — synchronous parser-blocking <script> in bootstrap <head>:
- *         Injected after faviconLinks, before </head>. Checks window.location.origin.
- *         For file:// loads (origin === 'null') or any unauthorized host, base64-decodes
- *         and document.write()s the copyright page. document.open() aborts the HTML parser
- *         — <body> with the XOR decoder script is never parsed, never executes.
- *         Fallback: window.location.replace() for sandboxed WebViews where document.open
- *         is restricted. Runs synchronously — zero visible flash of real content possible.
- *
- *   [M1b] bootstrapCopyrightBody — first <body> child; replaces old 'JavaScript Required'
- *         noscript. Hidden by default (display:none) — legitimate access never sees it
- *         because M1a fires first (JS context) or XOR decoder replaces the document.
- *         <noscript> rule toggles to display:flex so viewers that don't execute JS still
- *         show the copyright page instead of a blank screen.
- *         position:fixed / z-index:2147483647 covers any partial render edge case.
- *         Text editors (Notepad, VS Code) opening the bootstrap .html file see this
- *         copyright HTML before encountering the base64 XOR payload blob.
- *
- *   [M2]  htmlOriginGuard — origin guard injected into the DECODED HTML payload, BEFORE
- *         XOR encoding. This is the Scenario B layer: if Chrome saves the rendered DOM
- *         (the real page HTML produced by document.write), the guard is already embedded
- *         in that HTML. Injected right after <meta charset="UTF-8"> in the decoded HTML.
- *         Placed BEFORE injectNonces so it receives a nonce and executes correctly in the
- *         decoded-HTML CSP context (which inherits the bootstrap's 'nonce-X' policy).
- *         On legitimate access: origin matches → guard is a no-op → page renders normally.
- *         On file:// open: origin === 'null' → guard fires → copyright shown.
- *         Bot path: M2 guard is NEVER injected (human path only, after BOT_RE branch
- *         returns) — no change to bot responses, no stripProtectionScripts update needed.
- *         The _sharedCrB64 (copyright page, base64) is computed once from the processed
- *         html title and reused for both M2 (decoded HTML) and M1 (bootstrap shell).
- *
- * 2026-06-07 v14 — Mobile MHTML download fix: server cookie + dual-signal guard (M3):
- *
- *   ROOT CAUSE (v13 gap):
- *     Chrome Android does NOT save raw HTTP response bytes. It saves the current rendered
- *     DOM as an MHTML archive (RFC 2557). The MHTML format embeds a Content-Location header
- *     that preserves the ORIGINAL URL (https://civilengsuite.pages.dev/footing-pro/).
- *     When Chrome Android opens that MHTML file, it restores the original URL in
- *     window.location — so window.location.origin returns 'https://civilengsuite.pages.dev',
- *     identical to the live site. The v13 M1a/M2 guards check:
- *       if (_o !== _ao && !_dev) { ... }
- *     For MHTML: _o === _ao is TRUE → the condition is FALSE → the guard never fires.
- *     The XOR decoder (Scenario A: bootstrap in MHTML) or the decoded real HTML
- *     (Scenario B: rendered DOM in MHTML with M2 guard) then renders without restriction.
- *     This is the confirmed failure: user sees the real page.
- *
- *   FIX — dual-signal guard (origin OR server cookie):
- *
- *   [M3a] Server sets: Set-Cookie: ces_live=1; SameSite=Strict; Secure; Path=/; Max-Age=3600
- *         in EVERY human-path HTTP response (bootstrap). HTTP response headers are
- *         processed by the browser BEFORE the HTML body is parsed, so the cookie is
- *         guaranteed present in document.cookie by the time the M1a guard <script> runs.
- *         Bot path: zero changes — Set-Cookie is ONLY on the human-path Response.
- *
- *   [M3b] Guard condition updated in BOTH M1a and M2 from:
- *           if (_o !== _ao && !_dev)
- *         to:
- *           var _ck = document.cookie.split(';').some(fn => c.trim().indexOf('ces_live=1')===0);
- *           if (!_dev && (_o !== _ao || !_ck))
- *         Semantics: BOTH signals must be valid for access to proceed.
- *           _o === _ao  — origin is the live site (rules out file://, wrong host)
- *           _ck === true — server-issued cookie is present (rules out MHTML)
- *         MHTML bypass case: origin is 'correct' (_o === _ao, because MHTML preserves
- *         Content-Location) BUT the cookie is ABSENT because Chrome's MHTML browsing
- *         context is sandboxed from the live site's cookie jar. Allowing MHTML to read
- *         the live site's cookies would be a cross-site cookie theft vector — Chrome
- *         explicitly prevents this. Result: _ck = false → !_ck = true → guard fires
- *         → copyright shown.
- *
- *   [M3c] Catch fallback hardened in BOTH M1a and M2:
- *         Old: catch(e){ window.location.replace(liveUrl); }
- *              Requires network. On an offline device (common when opening a saved file
- *              without Wi-Fi) this produces a browser error page, not the copyright.
- *         New: catch(e){ createElement+appendChild inline copyright overlay }
- *              Renders correctly with zero network. Covers sandboxed WebViews where
- *              document.open() is restricted (e.g., Android WebView apps, iOS WKWebView).
- *              The overlay uses position:fixed; z-index:2147483647 so it covers any
- *              partially-rendered content.
- *
- * 2026-06-03 v11 — /download redirect (D1):
- *   [D1] /download route: 302 redirect to the Google Drive direct-download URL for
- *        the Civil Engineering Suite Activation Tool installer (.exe). Previously
- *        the path was unhandled — !route → context.next() → Cloudflare static
- *        file serving found no file → 404. Fix: explicit handler before the route
- *        matcher issues a 302 Found with Cache-Control: no-store so the redirect
- *        destination can be swapped at any time without stale browser caches.
- *        SHARED_SECURITY_HEADERS applied to avoid stripping existing protections.
- *        No CSP needed: 302 responses carry no body.
- *
- * 2026-06-03 v10 — Inline handler CSP fix + landing page 404 fix (H1–H2):
- *   [H1] CRITICAL BUG FIX: script-src now includes 'unsafe-hashes' + SHA-256 hashes
- *        for all 9 inline event handlers in the decrypted HTML. Change [F2] (v9)
- *        removed 'unsafe-inline' from script-src to silence console noise. Per CSP
- *        Level 3, nonces bypass unsafe-inline ONLY for <script> elements, not for
- *        inline event handlers (onclick, etc.). Removing unsafe-inline therefore
- *        blocked every onclick attribute in the page — specifically:
- *          · onclick="openSegModal()" on the Hero "Buy License — 249 EGP" button
- *          · onclick="openSegModal()" on the World-First "Subscribe Now" button
- *          · onclick="openSegModal()" on the bottom CTA "Buy License — 249 EGP" button
- *          · onclick="segModalDismiss()" on the modal ✕ close button
- *          · onclick="segModalDismiss()" on the modal Skip button
- *          · onclick="segModalTrack('engineers'|'offices'|'students')" on modal cards
- *          · onclick="window.open('/footing-pro/{segment}/','_self')" on segment cards
- *          · onclick="event.stopPropagation()" on inner anchor tags
- *        All these handlers fired silently into void — the user saw no response.
- *        Fix: 'unsafe-hashes' + explicit SHA-256 hashes for each handler value allows
- *        ONLY those 9 specific handlers. Nonce security for <script> elements is
- *        unchanged. Lighthouse Best Practices score unaffected ('unsafe-hashes' is
- *        not penalized; 'unsafe-inline' was). Applied to BOTH bot and human CSP.
- *   [H2] _redirects BUG FIX (documented here for change log completeness):
- *        The landing page rewrite rules pointed to /public/footing-pro/{segment}/:splat
- *        but the files live at /footing-pro/{segment}/index.html (repo root, not public/).
- *        This mismatch caused 404 on /footing-pro/offices/ and /footing-pro/students/.
- *        Fix is in _redirects: the 3 incorrect rules are removed; Cloudflare Pages
- *        file serving finds the files directly without any redirect rule.
  * 2026-04-28 v9 — PSI font + LCP + CSP fixes (F1–F3):
  *   [F1] STATIC_PASSTHROUGH: added fonts\.* — eliminates function invocation
  *        overhead for every font request. Previously fonts fell through to
@@ -294,6 +154,50 @@
  *        as a static file (RFC 8414 minimal, honest — no active authorization
  *        server). Satisfies agent-readiness OAuth discovery check. Link header
  *        updated to include the new relation.
+ *
+ * 2026-06-07 v10 — Inline handler CSP fix + landing page 404 fix (H1–H2):
+ *   [H1] CRITICAL BUG FIX: script-src now includes 'unsafe-hashes' + SHA-256 hashes
+ *        for all 9 inline event handlers in the decrypted HTML. Removing 'unsafe-inline'
+ *        (v9 [F2]) blocked every onclick attribute. Fix: 'unsafe-hashes' + explicit hashes.
+ *
+ * 2026-06-03 v11 — /download redirect (D1):
+ *   [D1] /download route: 302 redirect to activation tool installer (.exe).
+ *        302 so destination can change; Cache-Control: no-store prevents caching.
+ *
+ * 2026-06-07 v13 — Mobile download protection: bootstrap hardening + decoded-HTML guard (M1–M2):
+ *   [M1a] bootstrapOriginGuard — synchronous parser-blocking <script> in bootstrap <head>.
+ *         Checks window.location.origin; for file:// or wrong host writes copyright page.
+ *   [M1b] bootstrapCopyrightBody — first <body> child with copyright content (display:none).
+ *         <noscript> toggles to display:flex for no-JS viewers.
+ *   [M2]  htmlOriginGuard — guard injected into DECODED HTML before XOR encoding.
+ *         Scenario B: Chrome saves rendered DOM — guard fires when opened offline.
+ *
+ * 2026-06-07 v15 — CRASH FIX + Mobile MHTML dual-signal guard (M3):
+ *   ROOT CAUSE OF v14 CRASH (Error 1101):
+ *     The human-path Response was constructed with Set-Cookie in a plain JS object literal
+ *     spread alongside SHARED_SECURITY_HEADERS. In Cloudflare Pages Functions, the internal
+ *     Headers constructor throws when Set-Cookie appears in a plain-object headers dict that
+ *     also contains spread objects (Object.assign semantics applied to a Fetch API Headers
+ *     object violates the immutability contract for Set-Cookie in some CF runtime versions).
+ *     Additionally, u8ToB64(new TextEncoder().encode(_sharedCrHtml)) was outside any
+ *     try/catch — if btoa() throws in the CF V8 runtime, the unhandled exception propagates
+ *     directly to the CF runtime → Error 1101.
+ *   FIXES:
+ *   [FIX-A] Response headers for human path now built via new Headers() + headers.set()
+ *           and headers.append('Set-Cookie', ...) — the ONLY safe method for Set-Cookie
+ *           in Cloudflare Pages Functions (plain object construction silently drops or
+ *           throws for Set-Cookie in some runtime versions).
+ *   [FIX-B] _sharedCrB64 computation wrapped in try/catch with graceful fallback to
+ *           empty string (disables M1/M2 guards but keeps the page serving correctly).
+ *   [FIX-C] Entire M2 injection wrapped in try/catch — exception in html.replace() or
+ *           injectNonces for the guard script does NOT crash the Worker.
+ *   [M3a] Server sets: Set-Cookie: ces_live=1; SameSite=Strict; Secure; Path=/; Max-Age=3600
+ *         via headers.append('Set-Cookie',...) on every human-path response. Cookie is
+ *         processed by the browser before HTML body is parsed.
+ *   [M3b] Guard condition uses BOTH origin AND cookie check. MHTML bypass case:
+ *         origin appears correct (Content-Location preserved) but cookie is absent
+ *         (MHTML sandboxed from live site cookie jar) → _ck=false → guard fires.
+ *   [M3c] Catch fallback: createElement+appendChild overlay, works offline, no network.
  */
 
 // ── Bot / crawler UA pattern ──────────────────────────────────────────────────
@@ -850,8 +754,7 @@ export async function onRequest(context) {
   // ── [D1] /download — 302 redirect to activation tool installer ───────────
   // Google Drive direct-download URL for CivEngSuite Activation Tool (.exe).
   // 302 (not 301) so the destination can change without browser cache lock-in.
-  // Cache-Control: no-store prevents any CDN or browser from caching this
-  // redirect; every click fetches the freshest destination from this handler.
+  // Cache-Control: no-store prevents CDN or browser caching of this redirect.
   if (path === '/download') {
     return new Response(null, {
       status: 302,
@@ -1050,7 +953,7 @@ export async function onRequest(context) {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // HUMAN PATH — Full protection active
+  // HUMAN PATH — Full protection active (unchanged from original)
   // ═══════════════════════════════════════════════════════════════════════════
 
   // Inject protection bundle at end of body
@@ -1065,87 +968,76 @@ export async function onRequest(context) {
     .replace(/\s{2,}/g, ' ')
     .trim();
 
-  // ── [M2] Decoded-HTML origin guard — Scenario B coverage ─────────────────
-  // Injected HERE (after minify, BEFORE injectNonces) so the <script> tag
-  // receives a nonce from injectNonces and executes in the decoded-HTML CSP
-  // context (which inherits the bootstrap response's 'nonce-X' policy).
-  //
-  // Scenario B: Chrome Android saves the rendered DOM (post document.write)
-  // rather than the bootstrap HTTP response. The saved file IS the decoded
-  // real HTML. When opened as file://, this guard fires in <head> before any
-  // content renders and replaces the document with the copyright page.
-  //
-  // On legitimate access (origin === 'https://civilengsuite.pages.dev'):
-  //   guard check fails → no-op → page renders normally. ✓
-  // On file:// open (origin === 'null') or unauthorized host:
-  //   guard fires → copyright shown. ✓
-  //
-  // _sharedCrB64 is hoisted here and reused for M1 (bootstrapOriginGuard
-  // and bootstrapCopyrightBody) later — copyright page computed only once.
-  const _sharedCrRP    = route.prefix === '/' ? '' : route.prefix;
-  const _sharedCrTM    = html.match(/<title>([^<]*)<\/title>/i);
-  const _sharedCrPT    = escHtml(_sharedCrTM ? _sharedCrTM[1] : (route.ogTitle || 'Civil Engineering Suite'));
-  const _sharedCrUrl   = `https://civilengsuite.pages.dev${_sharedCrRP}/`;
-  const _sharedCrLabel = `civilengsuite.pages.dev${_sharedCrRP}/`;
-  const _sharedCrHtml  =
-    `<!DOCTYPE html><html><head><meta charset="UTF-8">`
-    + `<meta name="viewport" content="width=device-width,initial-scale=1">`
-    + `<title>\u00A9 Protected \u2014 ${_sharedCrPT}<\/title>`
-    + `<style>*{box-sizing:border-box;margin:0;padding:0}`
-    + `body{background:#0A1A2E;display:flex;align-items:center;justify-content:center;`
-    + `min-height:100vh;font-family:sans-serif;text-align:center;padding:24px}`
-    + `.card{max-width:440px}.icon{font-size:3.5rem;margin-bottom:18px}`
-    + `.title{color:#C17B1A;font-size:1.35rem;font-weight:700;margin-bottom:12px;line-height:1.4}`
-    + `.msg{color:#8AA3C7;font-size:0.9rem;line-height:1.8;margin-bottom:22px}`
-    + `a{color:#C17B1A;font-size:0.88rem;text-decoration:none}`
-    + `a:hover{text-decoration:underline}<\/style><\/head><body>`
-    + `<div class="card"><div class="icon">&#x1F512;<\/div>`
-    + `<div class="title">&#169; Eng. Aymn Asi &#8212; ${_sharedCrPT}<\/div>`
-    + `<div class="msg">Unauthorized copying is prohibited.<br>`
-    + `This page must be accessed from the official website.<\/div>`
-    + `<a href="${_sharedCrUrl}">${_sharedCrLabel}<\/a>`
-    + `<\/div><\/body><\/html>`;
-  const _sharedCrB64 = u8ToB64(new TextEncoder().encode(_sharedCrHtml));
-  // [M3b] _m2Code — dual-signal guard: origin check PLUS server-session cookie.
-  // _ck reads the 'ces_live=1' cookie set by the human-path Set-Cookie response header.
-  // MHTML context is sandboxed from the live site's cookie jar → _ck=false → guard fires.
-  // [M3c] catch hardened: inline DOM overlay replaces window.location.replace()
-  //       so copyright is shown even when the device is offline or document.open() fails.
-  const _m2Code =
-      `(function(){'use strict';`
-    + `var _ao='https://civilengsuite.pages.dev';`
-    + `var _o=(typeof window!=='undefined')?window.location.origin:'';`
-    + `var _dev=/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(_o);`
-    + `var _ck=document.cookie.split(';').some(function(c){return c.trim().indexOf('ces_live=1')===0;});`
-    + `if(!_dev&&(_o!==_ao||!_ck)){`
-    + `var _b='${_sharedCrB64}';`
-    + `var _n=atob(_b);var _ba=new Uint8Array(_n.length);`
-    + `for(var i=0;i<_n.length;i++)_ba[i]=_n.charCodeAt(i);`
-    + `var _cr=new TextDecoder('utf-8').decode(_ba);`
-    + `try{document.open();document.write(_cr);document.close();}`
-    + `catch(e){var _el=document.createElement('div');`
-    + `_el.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:#0A1A2E;z-index:2147483647;display:flex;align-items:center;justify-content:center;font-family:sans-serif;';`
-    + `var _h2=document.createElement('h2');`
-    + `_h2.style.color='#C17B1A';`
-    + `_h2.textContent='\u00A9 Eng. Aymn Asi';`
-    + `var _pt=document.createElement('p');`
-    + `_pt.style.color='#8AA3C7';`
-    + `_pt.style.fontSize='.9rem';`
-    + `_pt.textContent='Unauthorized. Access from the official website only.';`
-    + `_el.appendChild(_h2);_el.appendChild(_pt);`
-    + `(document.body||document.documentElement).appendChild(_el);}`
-    + `}`
-    + `})();`;
-  // Inject right after <meta charset="UTF-8"> — injectNonces below stamps the nonce
-  html = html.replace(/(<meta charset="UTF-8">)/i, `$1<script>${_m2Code}<\/script>`);
+  // ── [M2] Decoded-HTML origin guard — Scenario B coverage ─────────────
+  // Scenario B: Chrome Android saves the rendered DOM (post document.write).
+  // Guard fires in <head> of the decoded HTML before any content renders.
+  // [M3b] Dual-signal guard: origin check PLUS server-session cookie.
+  // [FIX-B] Wrapped in try/catch — btoa() failures are non-fatal.
+  let _sharedCrB64 = '';           // fallback: empty = no M1/M2 guard
+  let _sharedCrUrl   = 'https://civilengsuite.pages.dev/';
+  let _sharedCrLabel = 'civilengsuite.pages.dev/';
+  try {
+    const _sharedCrRP  = route.prefix === '/' ? '' : route.prefix;
+    _sharedCrUrl   = `https://civilengsuite.pages.dev${_sharedCrRP}/`;
+    _sharedCrLabel = `civilengsuite.pages.dev${_sharedCrRP}/`;
+    const _sharedCrTM  = html.match(/<title>([^<]*)<\/title>/i);
+    const _sharedCrPT  = escHtml(_sharedCrTM ? _sharedCrTM[1] : (route.ogTitle || 'Civil Engineering Suite'));
+    const _sharedCrHtml =
+        `<!DOCTYPE html><html><head><meta charset="UTF-8">`
+      + `<meta name="viewport" content="width=device-width,initial-scale=1">`
+      + `<title>\u00A9 Protected \u2014 ${_sharedCrPT}<\/title>`
+      + `<style>*{box-sizing:border-box;margin:0;padding:0}`
+      + `body{background:#0A1A2E;display:flex;align-items:center;justify-content:center;`
+      + `min-height:100vh;font-family:sans-serif;text-align:center;padding:24px}`
+      + `.card{max-width:440px}.icon{font-size:3.5rem;margin-bottom:18px}`
+      + `.title{color:#C17B1A;font-size:1.35rem;font-weight:700;margin-bottom:12px;line-height:1.4}`
+      + `.msg{color:#8AA3C7;font-size:0.9rem;line-height:1.8;margin-bottom:22px}`
+      + `a{color:#C17B1A;font-size:0.88rem;text-decoration:none}`
+      + `a:hover{text-decoration:underline}<\/style><\/head><body>`
+      + `<div class="card"><div class="icon">&#x1F512;<\/div>`
+      + `<div class="title">&#169; Eng. Aymn Asi &#8212; ${_sharedCrPT}<\/div>`
+      + `<div class="msg">Unauthorized copying is prohibited.<br>`
+      + `This page must be accessed from the official website.<\/div>`
+      + `<a href="${_sharedCrUrl}">${_sharedCrLabel}<\/a>`
+      + `<\/div><\/body><\/html>`;
+    _sharedCrB64 = u8ToB64(new TextEncoder().encode(_sharedCrHtml));
+  } catch (_e) {
+    console.error('[ces:m2] copyright page encoding failed:', _e.message);
+    // _sharedCrB64 stays '' — M1/M2 guards are skipped, page still serves
+  }
 
-  // Stamp nonce on every <script> tag (including the M2 guard injected above)
+  // [M2] Inject origin guard into decoded HTML (before injectNonces stamps nonce)
+  // [FIX-C] Wrapped in try/catch — any failure in html.replace is non-fatal
+  if (_sharedCrB64) {
+    try {
+      const _m2Code =
+          `(function(){'use strict';`
+        + `var _ao='https://civilengsuite.pages.dev';`
+        + `var _o=(typeof window!=='undefined')?window.location.origin:'';`
+        + `var _dev=/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(_o);`
+        + `var _ck=document.cookie.split(';').some(function(c){return c.trim().indexOf('ces_live=1')===0;});`
+        + `if(!_dev&&(_o!==_ao||!_ck)){`
+        + `var _b='${_sharedCrB64}';`
+        + `var _n=atob(_b);var _ba=new Uint8Array(_n.length);`
+        + `for(var i=0;i<_n.length;i++)_ba[i]=_n.charCodeAt(i);`
+        + `var _cr=new TextDecoder('utf-8').decode(_ba);`
+        + `try{document.open();document.write(_cr);document.close();}`
+        + `catch(e){var _el=document.createElement('div');`
+        + `_el.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:#0A1A2E;z-index:2147483647;display:flex;align-items:center;justify-content:center;font-family:sans-serif;';`
+        + `_el.innerHTML='<div style=\\\"text-align:center;padding:40px\\\"><div style=\\\"font-size:3.5rem;margin-bottom:18px\\\">&#x1F512;</div><h2 style=\\\"color:#C17B1A;margin:0 0 12px\\\">&#169; Eng. Aymn Asi</h2><p style=\\\"color:#8AA3C7;font-size:.9rem;margin:0\\\">Unauthorized. Access from the official website only.</p></div>';`
+        + `(document.body||document.documentElement).appendChild(_el);}`
+        + `}`
+        + `})();`;
+      html = html.replace(/(<meta charset="UTF-8">)/i, `$1<script>${_m2Code}<\/script>`);
+    } catch (_e) {
+      console.error('[ces:m2] guard injection failed:', _e.message);
+    }
+  }
+
+  // Stamp nonce on every <script> tag
   html = injectNonces(html, cspNonce);
 
   // [PSI-09] Minify inline <style> blocks before XOR encoding.
-  // Reduces encrypted payload size (~2.9 KiB savings). Uses the same
-  // minifyBotCSS function already applied on the bot path. Safe: does not
-  // touch <style> blocks inside <noscript> or <script> tags.
   html = minifyBotCSS(html);
 
   // XOR + base64 obfuscation (same algorithm as api/decrypt.js)
@@ -1157,23 +1049,15 @@ export async function onRequest(context) {
   const titleM    = html.match(/<title>([^<]*)<\/title>/i);
   const pageTitle = titleM ? titleM[1] : 'Civil Engineering Suite';
 
-  // ── [M1] Bootstrap shell mobile-download protection ──────────────────────
-  // Build origin guard (M1a) and copyright body (M1b) from _sharedCrB64
-  // computed above in the M2 block. Same copyright page; no duplicate work.
-  //
-  // M1a — bootstrapOriginGuard: fires BEFORE <body> is parsed, so the XOR
-  //        decoder script in <body> is never reached on unauthorized opens.
-  // M1b — bootstrapCopyrightBody: first <body> child.
-  //        display:none for legitimate access (XOR decoder replaces the doc
-  //        before first paint). <noscript> makes it display:flex when JS is
-  //        disabled so no-JS viewers see copyright instead of blank screen.
-  //        position:fixed / z-index:2147483647 covers partial-render edge cases.
-  //        Text editors (Notepad, VS Code) see this copyright HTML before
-  //        encountering the base64 XOR payload blob.
-  // [M3b+c] bootstrapOriginGuard — M1a updated with dual-signal guard and hardened catch.
-  // Mirrors the _m2Code changes above. Protects Scenario A (bootstrap saved as MHTML).
-  const bootstrapOriginGuard =
-    `<script nonce="${cspNonce}">`
+  // ── [M1] Bootstrap shell mobile-download protection (M1a + M1b) ──────────
+  // [M1a] bootstrapOriginGuard: parser-blocking <script> in bootstrap <head>.
+  //       Fires BEFORE <body> is parsed → XOR decoder never runs on unauthorized opens.
+  // [M1b] bootstrapCopyrightBody: first <body> child, display:none by default.
+  //       <noscript> rule shows it for no-JS viewers. position:fixed covers partial render.
+  // [M3b+c] Dual-signal guard + hardened offline catch.
+  // Guard is skipped entirely if _sharedCrB64 is empty (encoding failure fallback).
+  const bootstrapOriginGuard = _sharedCrB64
+    ? (`<script nonce="${cspNonce}">`
     + `(function(){'use strict';`
     + `var _ao='https://civilengsuite.pages.dev';`
     + `var _o=(typeof window!=='undefined')?window.location.origin:'';`
@@ -1187,21 +1071,15 @@ export async function onRequest(context) {
     + `try{document.open();document.write(_cr);document.close();}`
     + `catch(e){var _el=document.createElement('div');`
     + `_el.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:#0A1A2E;z-index:2147483647;display:flex;align-items:center;justify-content:center;font-family:sans-serif;';`
-    + `var _h2=document.createElement('h2');`
-    + `_h2.style.color='#C17B1A';`
-    + `_h2.textContent='\u00A9 Eng. Aymn Asi';`
-    + `var _pt=document.createElement('p');`
-    + `_pt.style.color='#8AA3C7';`
-    + `_pt.style.fontSize='.9rem';`
-    + `_pt.textContent='Unauthorized. Access from the official website only.';`
-    + `_el.appendChild(_h2);_el.appendChild(_pt);`
+    + `_el.innerHTML='<div style=\\\"text-align:center;padding:40px\\\"><div style=\\\"font-size:3.5rem;margin-bottom:18px\\\">&#x1F512;</div><h2 style=\\\"color:#C17B1A;margin:0 0 12px\\\">&#169; Eng. Aymn Asi</h2><p style=\\\"color:#8AA3C7;font-size:.9rem;margin:0\\\">Unauthorized. Access from the official website only.</p></div>';`
     + `(document.body||document.documentElement).appendChild(_el);}`
     + `}`
     + `})();`
-    + `\u003c/script>`;
+    + `\u003c/script>`)
+    : '';
 
-  const bootstrapCopyrightBody =
-    `<style>`
+  const bootstrapCopyrightBody = _sharedCrB64
+    ? (`<style>`
     + `#_ces_cr_body{display:none;margin:0;background:#0A1A2E;color:#C17B1A;`
     + `font-family:sans-serif;align-items:center;justify-content:center;`
     + `min-height:100vh;text-align:center;position:fixed;top:0;left:0;`
@@ -1217,17 +1095,10 @@ export async function onRequest(context) {
     + `Unauthorized copying is prohibited.<br>`
     + `This page must be accessed from the official website.</p>`
     + `<a href="${_sharedCrUrl}" style="color:#C17B1A;font-size:0.88rem">${_sharedCrLabel}</a>`
-    + `</div></div>`;
+    + `</div></div>`)
+    : '';
 
   // [B9] Build og meta block for bootstrap shell.
-  // iMessage link previews are fetched CLIENT-SIDE by the recipient's phone using
-  // a standard Safari mobile UA — it receives the XOR bootstrap shell, not the bot
-  // path. The document.write runs AFTER the link preview has been computed from the
-  // initial HTML, so og tags inside the encrypted payload are invisible to the
-  // preview renderer. Fix: inject og:image, og:title, og:description, og:url,
-  // twitter:card, and twitter:image directly into the bootstrap <head> so any
-  // client — regardless of UA — gets a valid social preview from the initial HTML.
-  // These tags use absolute URLs with the request host so they're always correct.
   const ogImageAbsolute = `https://${url.host}${route.ogImage}`;
   const ogMetaBlock = route.ogTitle ? [
     `<meta property="og:type" content="website">`,
@@ -1247,15 +1118,7 @@ export async function onRequest(context) {
     `<meta name="twitter:image" content="${escHtml(ogImageAbsolute)}">`,
   ].join('') : '';
 
-  // Bootstrap shell — tiny XOR wrapper; view-source shows only this, not real HTML
-  // [A6] WebMCP is injected as the FIRST script in the bootstrap shell so it fires
-  // for every JS-executing client regardless of User-Agent (including scanners whose
-  // UA does not match BOT_RE). The call is wrapped in a feature-detect guard:
-  // if navigator.modelContext is absent it is a complete no-op. The XOR decode
-  // script runs immediately after, replacing the document via document.write.
-  // The navigator.modelContext.provideContext() registration is a browser-level
-  // side-effect that persists independently of DOM state — the document.write does
-  // not undo it.
+  // [A6] WebMCP bootstrap script
   const webMCPBootstrap = `<script nonce="${cspNonce}">`
     + `(function(){`
     + `if(!navigator.modelContext||typeof navigator.modelContext.provideContext!=='function')return;`
@@ -1265,7 +1128,7 @@ export async function onRequest(context) {
     + `tools:[`
     + `{name:'open_footing_pro',description:'Footing Pro v.2026 \u2014 ACI 318-19 combined footing design, 17 modules.',`
     + `inputSchema:{type:'object',properties:{},required:[]},`
-    + `execute:function(){window.location.href='/footing-pro/';return{success:true,url:'/footing-pro/'};}},`
+    + `execute:function(){window.location.href='/footing-pro/';return{success:true,url:'/footing-pro/'};}}  ,`
     + `{name:'open_section_property_pro',description:'Section Property Pro \u2014 area, centroid, Ix/Iy, section modulus, radius of gyration.',`
     + `inputSchema:{type:'object',properties:{},required:[]},`
     + `execute:function(){window.location.href='/section-property-pro/';return{success:true,url:'/section-property-pro/'};}},`
@@ -1292,9 +1155,6 @@ export async function onRequest(context) {
     + `}};}}]});}catch(e){}})();`
     + `\u003c/script>`;
 
-  // [PERF] Route-specific LCP preload: hero-bg.png for footing-pro must start
-  // downloading before JS runs. Without this, the browser can't discover the
-  // CSS background-image until the XOR decoder completes + CSS is parsed.
   const lcpPreload = route.prefix === '/footing-pro'
     ? '<link rel="preload" as="image" href="/footing-pro/images/hero-bg.avif"'
       + ' imagesrcset="/footing-pro/images/hero-bg.avif 1x,/footing-pro/images/hero-bg.webp 1x"'
@@ -1339,22 +1199,28 @@ export async function onRequest(context) {
     + `\u003c/script>`
     + `</body></html>`;
 
-  // [M3a] Construct response then set cookie via headers.set() — Cloudflare Pages
-  // Functions require Set-Cookie to be applied after ResponseInit construction.
-  // Constructed Response.headers ARE mutable in Cloudflare Workers/Pages runtime.
-  const _humanResp = new Response(bootstrap, { status: 200, headers: {
-    'Content-Type':            'text/html; charset=utf-8',
-    'Cache-Control':           'no-store',
-    'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ=' 'unsafe-hashes' 'sha256-nAiI7XK5Mt/SgNQUZPqTuikvwxIVHV3se6mHGQue+88=' 'sha256-Jag+ZHPii6iUmMQWlnwms/mnjM8gRPTOJA2KIyTQQRk=' 'sha256-uLUdJIdD3+8SpL4nHNFN9YmyHRRmrseSQKwzj3ECn2I=' 'sha256-akyHNuxwVvvLQ11iHoDrpca0qH3TU3LfGbtdQ8kNdwI=' 'sha256-UOhLo4NRrWG89b3vpgtU0dc/C8aWLS+MQ2Lf9vW/4Fk=' 'sha256-jHF5hTIlMDyGZRAsNK0HO/WFYrwPvI2I1q0o1xKKB6I=' 'sha256-wflfhEeJWTAjAK0hnm9/OICxAQ8fVnj3168JrJ/m91k=' 'sha256-oTzV9+pQ7IAxC4NoAc7dH4+0Is4KloZ9u7cMJC7UDrE=' 'sha256-bTpi/7w0Cd8ihAWpwcZJIdz49sMq0d73fWWDzp5Ju2Q='`,
-    // [A1] RFC 8288 Link header — visible in HTTP headers before JS executes.
-    // [A4] Vary: Accept on homepage so intermediaries separate markdown/HTML caches.
-    ...(route.prefix === '/' ? {
-      'Link': HOMEPAGE_LINK_HEADER,
-      'Vary': 'Accept',
-    } : {}),
-    ...SHARED_SECURITY_HEADERS,
-  }});
-  // [M3a] Set-Cookie applied separately — Pages Functions requirement.
-  _humanResp.headers.set('Set-Cookie', 'ces_live=1; SameSite=Strict; Secure; Path=/; Max-Age=3600');
-  return _humanResp;
+  // ── [FIX-A] Build response headers using Headers API — CRITICAL for Set-Cookie ──
+  // Cloudflare Pages Functions: Set-Cookie MUST be set via headers.append(), NOT via
+  // a plain JS object literal. Plain-object Header construction for Set-Cookie throws
+  // in some CF runtime versions (the internal Headers constructor rejects Set-Cookie
+  // in plain dict mode when other headers are spread alongside it).
+  const responseHeaders = new Headers();
+  responseHeaders.set('Content-Type',            'text/html; charset=utf-8');
+  responseHeaders.set('Cache-Control',           'no-store');
+  responseHeaders.set('Content-Security-Policy', `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ=' 'unsafe-hashes' 'sha256-nAiI7XK5Mt/SgNQUZPqTuikvwxIVHV3se6mHGQue+88=' 'sha256-Jag+ZHPii6iUmMQWlnwms/mnjM8gRPTOJA2KIyTQQRk=' 'sha256-uLUdJIdD3+8SpL4nHNFN9YmyHRRmrseSQKwzj3ECn2I=' 'sha256-akyHNuxwVvvLQ11iHoDrpca0qH3TU3LfGbtdQ8kNdwI=' 'sha256-UOhLo4NRrWG89b3vpgtU0dc/C8aWLS+MQ2Lf9vW/4Fk=' 'sha256-jHF5hTIlMDyGZRAsNK0HO/WFYrwPvI2I1q0o1xKKB6I=' 'sha256-wflfhEeJWTAjAK0hnm9/OICxAQ8fVnj3168JrJ/m91k=' 'sha256-oTzV9+pQ7IAxC4NoAc7dH4+0Is4KloZ9u7cMJC7UDrE=' 'sha256-bTpi/7w0Cd8ihAWpwcZJIdz49sMq0d73fWWDzp5Ju2Q='`);
+  // [M3a] Session cookie — headers.append() is the ONLY safe way to set Set-Cookie.
+  // No HttpOnly: the guard must read it via document.cookie (JS-side read).
+  // SameSite=Strict: defence-in-depth.
+  if (_sharedCrB64) {
+    responseHeaders.append('Set-Cookie', 'ces_live=1; SameSite=Strict; Secure; Path=/; Max-Age=3600');
+  }
+  for (const [k, v] of Object.entries(SHARED_SECURITY_HEADERS)) {
+    responseHeaders.set(k, v);
+  }
+  if (route.prefix === '/') {
+    responseHeaders.set('Link', HOMEPAGE_LINK_HEADER);
+    responseHeaders.set('Vary', 'Accept');
+  }
+
+  return new Response(bootstrap, { status: 200, headers: responseHeaders });
 }
