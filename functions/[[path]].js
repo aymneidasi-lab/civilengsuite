@@ -1303,97 +1303,23 @@ export async function onRequest(context) {
     + `<a href="${_sharedCrUrl}" style="color:#C17B1A;font-size:0.88rem">${_sharedCrLabel}</a>`
     + `</div></div>`;
 
-  // [B9] Build og meta block for bootstrap shell.
-  // iMessage link previews are fetched CLIENT-SIDE by the recipient's phone using
-  // a standard Safari mobile UA — it receives the XOR bootstrap shell, not the bot
-  // path. The document.write runs AFTER the link preview has been computed from the
-  // initial HTML, so og tags inside the encrypted payload are invisible to the
-  // preview renderer. Fix: inject og:image, og:title, og:description, og:url,
-  // twitter:card, and twitter:image directly into the bootstrap <head> so any
-  // client — regardless of UA — gets a valid social preview from the initial HTML.
-  // These tags use absolute URLs with the request host so they're always correct.
-  const ogImageAbsolute = `https://${url.host}${route.ogImage}`;
-  const ogMetaBlock = route.ogTitle ? [
-    `<meta property="og:type" content="website">`,
-    `<meta property="og:site_name" content="Civil Engineering Suite">`,
-    `<meta property="og:title" content="${escHtml(route.ogTitle)}">`,
-    `<meta property="og:description" content="${escHtml(route.ogDescription)}">`,
-    `<meta property="og:url" content="${escHtml(route.ogUrl)}">`,
-    `<meta property="og:image" content="${escHtml(ogImageAbsolute)}">`,
-    `<meta property="og:image:secure_url" content="${escHtml(ogImageAbsolute)}">`,
-    `<meta property="og:image:type" content="image/png">`,
-    `<meta property="og:image:width" content="1200">`,
-    `<meta property="og:image:height" content="630">`,
-    `<meta property="og:image:alt" content="${escHtml(route.ogTitle)}">`,
-    `<meta name="twitter:card" content="summary_large_image">`,
-    `<meta name="twitter:title" content="${escHtml(route.ogTitle)}">`,
-    `<meta name="twitter:description" content="${escHtml(route.ogDescription)}">`,
-    `<meta name="twitter:image" content="${escHtml(ogImageAbsolute)}">`,
-  ].join('') : '';
-
-  // Bootstrap shell — tiny XOR wrapper; view-source shows only this, not real HTML
-  // [A6] WebMCP is injected as the FIRST script in the bootstrap shell so it fires
-  // for every JS-executing client regardless of User-Agent (including scanners whose
-  // UA does not match BOT_RE). The call is wrapped in a feature-detect guard:
-  // if navigator.modelContext is absent it is a complete no-op. The XOR decode
-  // script runs immediately after, replacing the document via document.write.
-  // The navigator.modelContext.provideContext() registration is a browser-level
-  // side-effect that persists independently of DOM state — the document.write does
-  // not undo it.
-  const webMCPBootstrap = `<script nonce="${cspNonce}">`
-    + `(function(){`
-    + `if(!navigator.modelContext||typeof navigator.modelContext.provideContext!=='function')return;`
-    + `try{navigator.modelContext.provideContext({`
-    + `name:'civil-engineering-suite',`
-    + `description:'Civil Engineering Suite \u2014 Free ACI 318-19 structural engineering tools by Eng. Aymn Asi.',`
-    + `tools:[`
-    + `{name:'open_footing_pro',description:'Footing Pro v.2026 \u2014 ACI 318-19 combined footing design, 17 modules.',`
-    + `inputSchema:{type:'object',properties:{},required:[]},`
-    + `execute:function(){window.location.href='/footing-pro/';return{success:true,url:'/footing-pro/'};}},`
-    + `{name:'open_section_property_pro',description:'Section Property Pro \u2014 area, centroid, Ix/Iy, section modulus, radius of gyration.',`
-    + `inputSchema:{type:'object',properties:{},required:[]},`
-    + `execute:function(){window.location.href='/section-property-pro/';return{success:true,url:'/section-property-pro/'};}},`
-    + `{name:'get_suite_info',description:'Returns metadata about all Civil Engineering Suite tools and agent discovery endpoints.',`
-    + `inputSchema:{type:'object',properties:{},required:[]},`
-    + `execute:function(){return{`
-    + `suite:'Civil Engineering Suite',author:'Eng. Aymn Asi',standard:'ACI 318-19',`
-    + `tools:[`
-    + `{name:'Footing Pro v.2026',url:'/footing-pro/',status:'live',modules:17},`
-    + `{name:'Section Property Pro',url:'/section-property-pro/',status:'live'},`
-    + `{name:'Beam Pro',url:'/beam-pro/',status:'coming-2026'},`
-    + `{name:'Column Pro',url:'/column-pro/',status:'coming-2026'},`
-    + `{name:'Deflection Pro',url:'/deflection-pro/',status:'coming-2026'},`
-    + `{name:'Earthquake Pro',url:'/earthquake-pro/',status:'coming-2026'},`
-    + `{name:'Mur Pro',url:'/mur-pro/',status:'coming-2026'},`
-    + `{name:'Add Reft Pro',url:'/add-reft-pro/',status:'coming-2026'}`
-    + `],`
-    + `agentDiscovery:{`
-    + `apiCatalog:'/.well-known/api-catalog',`
-    + `mcpServerCard:'/.well-known/mcp/server-card.json',`
-    + `agentSkills:'/.well-known/agent-skills/index.json',`
-    + `oauthServer:'/.well-known/oauth-authorization-server',`
-    + `oauthResource:'/.well-known/oauth-protected-resource'`
-    + `}};}}]});}catch(e){}})();`
-    + `\u003c/script>`;
-
-  // [PERF] Route-specific LCP preload: hero-bg.png for footing-pro must start
-  // downloading before JS runs. Without this, the browser can't discover the
-  // CSS background-image until the XOR decoder completes + CSS is parsed.
-  const lcpPreload = route.prefix === '/footing-pro'
-    ? '<link rel="preload" as="image" href="/footing-pro/images/hero-bg.avif"'
-      + ' imagesrcset="/footing-pro/images/hero-bg.avif 1x,/footing-pro/images/hero-bg.webp 1x"'
-      + ' imagesizes="100vw" fetchpriority="high">'
-    : '';
-
-  // [M4-DUAL] CRITICAL FIX v16: Conditional payload inclusion
-  // Check origin BEFORE building bootstrap to decide if payload should be included
-  const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(_canonicalOrigin.replace('https://', 'http://'));
-  const isAuthorizedHost = _allowedOriginsJs.includes(_canonicalOrigin) || isLocalhost;
+  const requestHostname = url.hostname;
+  const isCanonical = requestHostname === _canonicalHostname;
+  const isLocalhostRequest = /^(localhost|127\.0\.0\.1)$/.test(requestHostname);
+  const isPreviewSubdomain = requestHostname.endsWith('.civilengsuite.pages.dev');
   
-  // Minimal copyright-only response for unauthorized origins (no payload extraction possible)
-  const copyrightOnlyBootstrap = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>\u00A9 Protected \u2014 Civil Engineering Suite</title><style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0A1A2E;display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:sans-serif;text-align:center;padding:24px}.card{max-width:440px}.icon{font-size:3.5rem;margin-bottom:18px}.title{color:#C17B1A;font-size:1.35rem;font-weight:700;margin-bottom:12px;line-height:1.4}.msg{color:#8AA3C7;font-size:0.9rem;line-height:1.8;margin-bottom:22px}a{color:#C17B1A;font-size:0.88rem;text-decoration:none}a:hover{text-decoration:underline}</style></head><body><div class="card"><div class="icon">\uD83D\uDD12<\/div><div class="title">\u00A9 Civil Engineering Suite - Protected Content<\/div><div class="msg">Unauthorized copying is prohibited.<br><strong>Access via official site only:<\/strong><br>${_sharedCrUrl}<\/div><a href="${_sharedCrUrl}">Visit ${_sharedCrLabel}<\/a><\/div><\/body><\/html>`;
+  const allowedOriginsList = _allowedHostsRaw
+    .split(',')
+    .map(o => o.trim().replace('https://', '').replace('http://', ''))
+    .filter(o => o);
+  const isAllowedDomain = allowedOriginsList.some(domain => 
+    requestHostname === domain || requestHostname.endsWith(domain)
+  );
   
-  // Full bootstrap with XOR payload (authorized origins only)
+  const isAuthorizedOrigin = isCanonical || isLocalhostRequest || isPreviewSubdomain || isAllowedDomain;
+  
+  const copyrightOnlyHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>\u00A9 Protected \u2014 Civil Engineering Suite</title><style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0A1A2E;display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:sans-serif;text-align:center;padding:24px}.c{max-width:440px}.i{font-size:3.5rem;margin-bottom:18px}.t{color:#C17B1A;font-size:1.35rem;font-weight:700;margin-bottom:12px;line-height:1.4}.m{color:#8AA3C7;font-size:0.9rem;line-height:1.8;margin-bottom:22px}a{color:#C17B1A;text-decoration:none}a:hover{text-decoration:underline}</style></head><body><div class="c"><div class="i">\uD83D\uDD12<\/div><div class="t">\u00A9 Civil Engineering Suite - Protected<\/div><div class="m">Unauthorized copying prohibited.<br><br>Access via official site:<br><strong>${_canonicalOrigin}/<\/strong><\/div><a href="${_canonicalOrigin}/">Visit Official Site<\/a><\/div><\/body><\/html>`;
+  
   const fullBootstrap = `<!DOCTYPE html><html><head>`
     + `<meta charset="UTF-8">`
     + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
@@ -1441,12 +1367,20 @@ export async function onRequest(context) {
     + `document.body.appendChild(_f);}})();`
     + `\u003c/script>`
     + `</body></html>`;
-  
-  // [M4] SELECT RESPONSE BASED ON ORIGIN
-  const bootstrap = isAuthorizedHost ? fullBootstrap : copyrightOnlyBootstrap;
 
+  const bootstrap = isAuthorizedOrigin ? fullBootstrap : copyrightOnlyHtml;
 
   return new Response(bootstrap, { status: 200, headers: {
+    'Content-Type':            'text/html; charset=utf-8',
+    'Cache-Control':           'no-store',
+    'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ=' 'unsafe-hashes' 'sha256-nAiI7XK5Mt/SgNQUZPqTuikvwxIVHV3se6mHGQue+88=' 'sha256-Jag+ZHPii6iUmMQWlnwms/mnjM8gRPTOJA2KIyTQQRk=' 'sha256-uLUdJIdD3+8SpL4nHNFN9YmyHRRmrseSQKwzj3ECn2I=' 'sha256-akyHNuxwVvvLQ11iHoDrpca0qH3TU3LfGbtdQ8kNdwI=' 'sha256-UOhLo4NRrWG89b3vpgtU0dc/C8aWLS+MQ2Lf9vW/4Fk=' 'sha256-jHF5hTIlMDyGZRAsNK0HO/WFYrwPvI2I1q0o1xKKB6I=' 'sha256-wflfhEeJWTAjAK0hnm9/OICxAQ8fVnj3168JrJ/m91k=' 'sha256-oTzV9+pQ7IAxC4NoAc7dH4+0Is4KloZ9u7cMJC7UDrE=' 'sha256-bTpi/7w0Cd8ihAWpwcZJIdz49sMq0d73fWWDzp5Ju2Q='`,
+    ...(route.prefix === '/' ? {
+      'Link': HOMEPAGE_LINK_HEADER,
+      'Vary': 'Accept',
+    } : {}),
+    ...SHARED_SECURITY_HEADERS,
+  }});
+return new Response(bootstrap, { status: 200, headers: {
     'Content-Type':            'text/html; charset=utf-8',
     'Cache-Control':           'no-store',
     'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ=' 'unsafe-hashes' 'sha256-nAiI7XK5Mt/SgNQUZPqTuikvwxIVHV3se6mHGQue+88=' 'sha256-Jag+ZHPii6iUmMQWlnwms/mnjM8gRPTOJA2KIyTQQRk=' 'sha256-uLUdJIdD3+8SpL4nHNFN9YmyHRRmrseSQKwzj3ECn2I=' 'sha256-akyHNuxwVvvLQ11iHoDrpca0qH3TU3LfGbtdQ8kNdwI=' 'sha256-UOhLo4NRrWG89b3vpgtU0dc/C8aWLS+MQ2Lf9vW/4Fk=' 'sha256-jHF5hTIlMDyGZRAsNK0HO/WFYrwPvI2I1q0o1xKKB6I=' 'sha256-wflfhEeJWTAjAK0hnm9/OICxAQ8fVnj3168JrJ/m91k=' 'sha256-oTzV9+pQ7IAxC4NoAc7dH4+0Is4KloZ9u7cMJC7UDrE=' 'sha256-bTpi/7w0Cd8ihAWpwcZJIdz49sMq0d73fWWDzp5Ju2Q='`,
