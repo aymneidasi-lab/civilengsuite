@@ -53,6 +53,46 @@
  *        the /payment/* _headers block which governs the checkout flow.
  *
  *
+ * 2026-06-09 v15 — Inline non-canonical redirect gate + fix _canonicalOrigin derivation (M3b-inline, M3b-fix):
+ *
+ *   CONTEXT: v14 documented [M3b] as a SEPARATE gsuite_redirect_worker.js file that would
+ *   be deployed independently to the gsuite.pages.dev project. In practice this requires
+ *   maintaining two repos/deployments. v15 folds both responsibilities into this single
+ *   [[path]].js — the same file now acts as both the canonical serving handler and a
+ *   full redirect worker when deployed to any non-canonical Pages project.
+ *
+ *   [M3b-inline] Non-canonical host redirect gate added at the top of onRequest().
+ *         Runs BEFORE STATIC_PASSTHROUGH — every request to a non-canonical host
+ *         (e.g., gsuite.pages.dev) is intercepted and 301-redirected to the canonical
+ *         domain, including font, image, and .well-known requests. This closes the
+ *         CDN bypass at the network layer: no raw file is ever served from any
+ *         non-canonical host.
+ *         Canonical host: CANONICAL_HOST env var (default: 'civilengsuite.pages.dev').
+ *         Add custom domains: ALLOWED_ORIGINS env var (unchanged — comma-separated https:// origins).
+ *         Cloudflare preview deployments (*.civilengsuite.pages.dev) are exempt via
+ *         subdomain suffix check so preview URLs work without adding them to ALLOWED_ORIGINS.
+ *         Localhost / 127.0.0.1 (any port) is always exempt for local wrangler dev.
+ *         _canonicalHostname and _allowedHostsRaw computed here are reused below in
+ *         [M3a] to build _allowedOriginsJs — no duplicate env-var reads.
+ *
+ *   [M3b-fix]  _canonicalOrigin no longer derived from url.host.
+ *         v14 set: const _canonicalOrigin = `https://${url.host}`;
+ *         Critical defect: if [[path]].js is deployed to gsuite.pages.dev WITHOUT the
+ *         redirect gate (i.e., v14 only, before this fix), url.host would be
+ *         'gsuite.pages.dev', and _canonicalOrigin would be 'https://gsuite.pages.dev'.
+ *         All three guard layers (M1a bootstrapOriginGuard, M1c xorDecoderOriginGuard,
+ *         M2 htmlOriginGuard) would then emit gsuite.pages.dev as the ALLOWED origin —
+ *         completely neutralizing protection for any request served from that host.
+ *         Fix: _canonicalOrigin = `https://${_canonicalHostname}` where _canonicalHostname
+ *         comes from CANONICAL_HOST env var. By the time [M3a] runs, the redirect gate
+ *         has already guaranteed url.hostname IS the canonical host, making this
+ *         semantically equivalent but safe for multi-project deployments.
+ *
+ *   [M3b-urls] _sharedCrUrl and _sharedCrLabel (the copyright page's clickable link)
+ *         now use _canonicalOrigin / _canonicalHostname instead of the hardcoded
+ *         literal 'https://civilengsuite.pages.dev'. Ensures the copyright page link
+ *         is always correct for custom domain deployments.
+ *
  * 2026-06-08 v14 — Runtime allowed-origins + gsuite.pages.dev redirect gate (M3):
  *
  *   ROOT CAUSE: gsuite.pages.dev is the default Cloudflare Pages project alias —
@@ -787,6 +827,48 @@ export async function onRequest(context) {
   const url  = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, '') || '/';
 
+  // ── [M3b-inline] Non-canonical host redirect gate ────────────────────────
+  // Deployed to the canonical project (civilengsuite.pages.dev): url.hostname
+  // matches _canonicalHostname → gate is a no-op → normal serving continues.
+  //
+  // Deployed to a non-canonical project (e.g., gsuite.pages.dev): url.hostname
+  // does NOT match → 301 redirect to canonical → zero raw content served.
+  //
+  // MUST run before STATIC_PASSTHROUGH so that font/image/well-known requests
+  // from non-canonical hosts are also redirected rather than passed through.
+  //
+  // _canonicalHostname and _allowedHostsRaw are computed once here and reused
+  // below in [M3a] for building _allowedOriginsJs — no duplicate env reads.
+  //
+  // Canonical host  : CANONICAL_HOST env var (default: 'civilengsuite.pages.dev')
+  // Additional hosts: ALLOWED_ORIGINS env var (comma-separated https:// origins)
+  // Always exempt   : localhost / 127.0.0.1 (any port) for wrangler pages dev
+  // Always exempt   : *.civilengsuite.pages.dev preview-deployment subdomains
+  const _canonicalHostname = ((env.CANONICAL_HOST || 'civilengsuite.pages.dev')).trim().toLowerCase();
+  const _allowedHostsRaw = (env.ALLOWED_ORIGINS || '')
+    .split(',').map(s => s.trim())
+    .filter(s => s.length > 0 && /^https?:\/\//.test(s));
+  const _allowedHostsSet = new Set([
+    _canonicalHostname,
+    ..._allowedHostsRaw.map(o => {
+      try { return new URL(o).hostname.toLowerCase(); } catch(e) { return ''; }
+    }).filter(Boolean),
+  ]);
+  const _reqHostLower  = url.hostname.toLowerCase();
+  const _isLocalhostReq = /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(url.host);
+  // Allow Cloudflare preview deployments: *.civilengsuite.pages.dev
+  const _isPreviewDeploy = _reqHostLower.endsWith('.' + _canonicalHostname);
+  if (!_allowedHostsSet.has(_reqHostLower) && !_isLocalhostReq && !_isPreviewDeploy) {
+    return new Response(null, {
+      status: 301,
+      headers: {
+        'Location':      `https://${_canonicalHostname}${url.pathname}${url.search}`,
+        'Cache-Control': 'no-store',
+        ...SHARED_SECURITY_HEADERS,
+      },
+    });
+  }
+
   // ── Always pass through static/SEO files — never intercept these ──────────
   // [P1] ADDED: payment(?:\/.*)? and api\/payment\/.* — payment checkout pages
   //      are static HTML served directly by Cloudflare Pages file serving.
@@ -1096,15 +1178,19 @@ export async function onRequest(context) {
   // ALLOWED_ORIGINS env var (optional): comma-separated additional origins.
   //   Example: "https://civilengsuite.com,https://www.civilengsuite.com"
   //   If absent, only https://{request host} is allowed (plus localhost).
-  const _canonicalOrigin = `https://${url.host}`;
-  const _extraOrigins = (env.ALLOWED_ORIGINS || '')
-    .split(',')
-    .map(s => s.trim())
-    .filter(s => s.length > 0 && /^https?:\/\//.test(s));
+  // [M3b-fix] _canonicalOrigin uses _canonicalHostname (from CANONICAL_HOST env var),
+  // NOT url.host. If [[path]].js were deployed to gsuite.pages.dev without the
+  // redirect gate, url.host would be 'gsuite.pages.dev' — making gsuite.pages.dev
+  // the allowed origin in all 3 guards (M1a, M1c, M2), completely neutralizing
+  // protection. With the redirect gate above, url.hostname IS always the canonical
+  // host by this point, but using _canonicalHostname is semantically correct and
+  // safe regardless. _allowedHostsRaw reused from the redirect gate block above.
+  //   If absent, only https://{CANONICAL_HOST} is allowed (plus localhost).
+  const _canonicalOrigin = `https://${_canonicalHostname}`;
+  const _extraOrigins = _allowedHostsRaw.filter(o => o !== _canonicalOrigin);
   const _allAllowedOrigins = [_canonicalOrigin, ...new Set(_extraOrigins)];
-  // Serialize as a JS array literal to be inlined into the guard scripts.
-  // Values are already safe: derived from url.host (CF-validated hostname) and
-  // env.ALLOWED_ORIGINS (operator-controlled). escHtml used for double-quote safety.
+  // Values are safe: _canonicalHostname from CANONICAL_HOST env var,
+  // _allowedHostsRaw from ALLOWED_ORIGINS env var (both operator-controlled).
   const _allowedOriginsJs = JSON.stringify(_allAllowedOrigins);
 
   // _sharedCrB64 is hoisted here and reused for M1 (bootstrapOriginGuard
@@ -1112,8 +1198,8 @@ export async function onRequest(context) {
   const _sharedCrRP    = route.prefix === '/' ? '' : route.prefix;
   const _sharedCrTM    = html.match(/<title>([^<]*)<\/title>/i);
   const _sharedCrPT    = escHtml(_sharedCrTM ? _sharedCrTM[1] : (route.ogTitle || 'Civil Engineering Suite'));
-  const _sharedCrUrl   = `https://civilengsuite.pages.dev${_sharedCrRP}/`;
-  const _sharedCrLabel = `civilengsuite.pages.dev${_sharedCrRP}/`;
+  const _sharedCrUrl   = `${_canonicalOrigin}${_sharedCrRP}/`;
+  const _sharedCrLabel = `${_canonicalHostname}${_sharedCrRP}/`;
   const _sharedCrHtml  =
     `<!DOCTYPE html><html><head><meta charset="UTF-8">`
     + `<meta name="viewport" content="width=device-width,initial-scale=1">`
