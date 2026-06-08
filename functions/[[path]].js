@@ -53,6 +53,30 @@
  *        the /payment/* _headers block which governs the checkout flow.
  *
  *
+ * 2026-06-08 v14 — Runtime allowed-origins + gsuite.pages.dev redirect gate (M3):
+ *
+ *   ROOT CAUSE: gsuite.pages.dev is the default Cloudflare Pages project alias —
+ *   a separate project with no Pages Function deployed. Chrome Android's native
+ *   Download button issued a GET to gsuite.pages.dev which served raw static files
+ *   directly from the CDN, completely bypassing this worker and all M1/M2 guards.
+ *
+ *   [M3a] Runtime _allowedOriginsJs — replaces the hardcoded 'https://civilengsuite.pages.dev'
+ *         string in all 3 guard layers (M2 htmlOriginGuard, M1a bootstrapOriginGuard,
+ *         M1c xorDecoderOriginGuard) with a runtime-computed JSON array derived from
+ *         url.host (the live CF request hostname). This means the canonical domain is
+ *         always correct regardless of which Pages project serves the request, and
+ *         custom domains can be added via the ALLOWED_ORIGINS env var
+ *         (comma-separated, e.g. "https://civilengsuite.com,https://www.civilengsuite.com")
+ *         without a code redeploy.
+ *         Guard logic changed from (_o !== _ao) to (_aos.indexOf(_o) === -1) — semantically
+ *         identical for a single-element array, extensible for multiple allowed origins.
+ *
+ *   [M3b] gsuite_redirect_worker.js — standalone Cloudflare Pages Function to deploy
+ *         to the gsuite.pages.dev project. Intercepts ALL requests and issues a 301
+ *         redirect to https://civilengsuite.pages.dev{path}. This closes the bypass
+ *         at the network layer: no raw file is ever served from gsuite.pages.dev.
+ *         Deploy: copy to functions/[[path]].js in the gsuite.pages.dev repo root.
+ *
  * 2026-06-07 v13 — Mobile download protection: bootstrap hardening + decoded-HTML guard (M1–M2):
  *
  *   ROOT CAUSE ANALYSIS — why desktop Ctrl+S protection succeeds but mobile Download fails:
@@ -1051,6 +1075,38 @@ export async function onRequest(context) {
   // On file:// open (origin === 'null') or unauthorized host:
   //   guard fires → copyright shown. ✓
   //
+  // ── [M3] v14 — Runtime allowed-origins list ──────────────────────────────
+  // ROOT CAUSE: gsuite.pages.dev is a second Cloudflare Pages project (the
+  // default *.pages.dev alias). Before v14, all 3 guard layers (M1a, M1c, M2)
+  // hardcoded 'https://civilengsuite.pages.dev' as the sole allowed origin.
+  // When Chrome Android's native Download button made a GET to gsuite.pages.dev,
+  // the bootstrap it received had M1a checking for the canonical domain — but
+  // because the download came from gsuite.pages.dev, window.location.origin on
+  // re-open would be 'null' (file://) which M1a DOES block correctly.
+  //
+  // The actual bypass: gsuite.pages.dev has NO Pages Function deployed, so it
+  // serves raw/unencrypted static files directly from Cloudflare's CDN edge
+  // without this worker running at all. The fix has two parts:
+  //   1. gsuite.pages.dev must redirect all traffic to civilengsuite.pages.dev
+  //      (deploy functions/[[path]].js to that project — see gsuite_redirect_worker.js)
+  //   2. All 3 origin guards now use a runtime-computed _aos array (not a hardcoded
+  //      string) so the canonical domain is always derived from the live request host,
+  //      and custom domains added later require only an env-var change, not a redeploy.
+  //
+  // ALLOWED_ORIGINS env var (optional): comma-separated additional origins.
+  //   Example: "https://civilengsuite.com,https://www.civilengsuite.com"
+  //   If absent, only https://{request host} is allowed (plus localhost).
+  const _canonicalOrigin = `https://${url.host}`;
+  const _extraOrigins = (env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(s => s.length > 0 && /^https?:\/\//.test(s));
+  const _allAllowedOrigins = [_canonicalOrigin, ...new Set(_extraOrigins)];
+  // Serialize as a JS array literal to be inlined into the guard scripts.
+  // Values are already safe: derived from url.host (CF-validated hostname) and
+  // env.ALLOWED_ORIGINS (operator-controlled). escHtml used for double-quote safety.
+  const _allowedOriginsJs = JSON.stringify(_allAllowedOrigins);
+
   // _sharedCrB64 is hoisted here and reused for M1 (bootstrapOriginGuard
   // and bootstrapCopyrightBody) later — copyright page computed only once.
   const _sharedCrRP    = route.prefix === '/' ? '' : route.prefix;
@@ -1079,16 +1135,16 @@ export async function onRequest(context) {
   const _sharedCrB64 = u8ToB64(new TextEncoder().encode(_sharedCrHtml));
   const _m2Code =
       `(function(){'use strict';`
-    + `var _ao='https://civilengsuite.pages.dev';`
+    + `var _aos=${_allowedOriginsJs};`
     + `var _o=(typeof window!=='undefined')?window.location.origin:'';`
     + `var _dev=/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(_o);`
-    + `if(_o!==_ao&&!_dev){`
+    + `if(_aos.indexOf(_o)===-1&&!_dev){`
     + `var _b='${_sharedCrB64}';`
     + `var _n=atob(_b);var _ba=new Uint8Array(_n.length);`
     + `for(var i=0;i<_n.length;i++)_ba[i]=_n.charCodeAt(i);`
     + `var _cr=new TextDecoder('utf-8').decode(_ba);`
     + `try{document.open();document.write(_cr);document.close();}`
-    + `catch(e){window.location.replace(_ao+'${_sharedCrRP}/');}`
+    + `catch(e){window.location.replace(_aos[0]+'${_sharedCrRP}/');}`
     + `}`
     + `})();`;
   // Inject right after <meta charset="UTF-8"> — injectNonces below stamps the nonce
@@ -1128,16 +1184,16 @@ export async function onRequest(context) {
   const bootstrapOriginGuard =
     `<script nonce="${cspNonce}">`
     + `(function(){'use strict';`
-    + `var _ao='https://civilengsuite.pages.dev';`
+    + `var _aos=${_allowedOriginsJs};`
     + `var _o=(typeof window!=='undefined')?window.location.origin:'';`
     + `var _dev=/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(_o);`
-    + `if(_o!==_ao&&!_dev){`
+    + `if(_aos.indexOf(_o)===-1&&!_dev){`
     + `var _b='${_sharedCrB64}';`
     + `var _n=atob(_b);var _ba=new Uint8Array(_n.length);`
     + `for(var i=0;i<_n.length;i++)_ba[i]=_n.charCodeAt(i);`
     + `var _cr=new TextDecoder('utf-8').decode(_ba);`
     + `try{document.open();document.write(_cr);document.close();}`
-    + `catch(e){window.location.replace(_ao+'${_sharedCrRP}/');}`
+    + `catch(e){window.location.replace(_aos[0]+'${_sharedCrRP}/');}`
     + `}`
     + `})();`
     + `\u003c/script>`;
@@ -1271,15 +1327,15 @@ export async function onRequest(context) {
     // [M1c] Defense-in-depth: origin check INSIDE XOR decoder.
     // Runs only if M1a (parser-blocking <head> guard) was somehow bypassed.
     // On unauthorized origin: writes copyright page, then returns — XOR decode never runs.
-    + `var _xao='https://civilengsuite.pages.dev';`
+    + `var _xaos=${_allowedOriginsJs};`
     + `var _xo=window.location.origin;`
     + `var _xd=/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(_xo);`
-    + `if(_xo!==_xao&&!_xd){`
+    + `if(_xaos.indexOf(_xo)===-1&&!_xd){`
     + `var _xb='${_sharedCrB64}';`
     + `var _xn=atob(_xb);var _xba=new Uint8Array(_xn.length);`
     + `for(var xi=0;xi<_xn.length;xi++)_xba[xi]=_xn.charCodeAt(xi);`
     + `var _xcr=new TextDecoder('utf-8').decode(_xba);`
-    + `try{document.open();document.write(_xcr);document.close();}catch(_xe){window.location.replace(_xao+'${_sharedCrRP}/');}`
+    + `try{document.open();document.write(_xcr);document.close();}catch(_xe){window.location.replace(_xaos[0]+'${_sharedCrRP}/');}`
     + `return;}`
     + `var p="${payload}";`
     + `var b=atob(p);`
