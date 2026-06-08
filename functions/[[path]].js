@@ -1385,7 +1385,16 @@ export async function onRequest(context) {
       + ' imagesizes="100vw" fetchpriority="high">'
     : '';
 
-  const bootstrap = `<!DOCTYPE html><html><head>`
+  // [M4-DUAL] CRITICAL FIX v16: Conditional payload inclusion
+  // Check origin BEFORE building bootstrap to decide if payload should be included
+  const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(_canonicalOrigin.replace('https://', 'http://'));
+  const isAuthorizedHost = _allowedOriginsJs.includes(_canonicalOrigin) || isLocalhost;
+  
+  // Minimal copyright-only response for unauthorized origins (no payload extraction possible)
+  const copyrightOnlyBootstrap = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>\u00A9 Protected \u2014 Civil Engineering Suite</title><style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0A1A2E;display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:sans-serif;text-align:center;padding:24px}.card{max-width:440px}.icon{font-size:3.5rem;margin-bottom:18px}.title{color:#C17B1A;font-size:1.35rem;font-weight:700;margin-bottom:12px;line-height:1.4}.msg{color:#8AA3C7;font-size:0.9rem;line-height:1.8;margin-bottom:22px}a{color:#C17B1A;font-size:0.88rem;text-decoration:none}a:hover{text-decoration:underline}</style></head><body><div class="card"><div class="icon">\uD83D\uDD12<\/div><div class="title">\u00A9 Civil Engineering Suite - Protected Content<\/div><div class="msg">Unauthorized copying is prohibited.<br><strong>Access via official site only:<\/strong><br>${_sharedCrUrl}<\/div><a href="${_sharedCrUrl}">Visit ${_sharedCrLabel}<\/a><\/div><\/body><\/html>`;
+  
+  // Full bootstrap with XOR payload (authorized origins only)
+  const fullBootstrap = `<!DOCTYPE html><html><head>`
     + `<meta charset="UTF-8">`
     + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
     + (route.ogDescription ? `<meta name="description" content="${escHtml(route.ogDescription)}">` : '')
@@ -1410,9 +1419,6 @@ export async function onRequest(context) {
     + webMCPBootstrap
     + `<script nonce="${cspNonce}">`
     + `(function(){try{`
-    // [M1c] Defense-in-depth: origin check INSIDE XOR decoder.
-    // Runs only if M1a (parser-blocking <head> guard) was somehow bypassed.
-    // On unauthorized origin: writes copyright page, then returns — XOR decode never runs.
     + `var _xaos=${_allowedOriginsJs};`
     + `var _xo=window.location.origin;`
     + `var _xd=/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(_xo);`
@@ -1435,6 +1441,10 @@ export async function onRequest(context) {
     + `document.body.appendChild(_f);}})();`
     + `\u003c/script>`
     + `</body></html>`;
+  
+  // [M4] SELECT RESPONSE BASED ON ORIGIN
+  const bootstrap = isAuthorizedHost ? fullBootstrap : copyrightOnlyBootstrap;
+
 
   return new Response(bootstrap, { status: 200, headers: {
     'Content-Type':            'text/html; charset=utf-8',
