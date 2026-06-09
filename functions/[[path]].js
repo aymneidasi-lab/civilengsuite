@@ -8,7 +8,6 @@
  * Environment variables:
  *   CES_DECRYPT_KEY — 64-character hex AES-256-GCM key (required)
  *   CES_XOR_KEY     — 2-character hex XOR key (optional, default 0x5A)
- *   ALLOWED_ORIGINS — comma-separated extra origins (optional)
  *
  * ─── CHANGE LOG ──────────────────────────────────────────────────────────────
  * 2026-04-14 v2 — SEO infrastructure fixes (F1–F6):
@@ -32,96 +31,340 @@
  *
  * 2026-04-15 v4 — Critical bug fixes (X1–X2):
  *   [X1] CRITICAL: B1–B5 regexes used [\s\S]*? which crossed </script> boundaries.
+ *        The lazy quantifier started from a JSON-LD <script> tag and consumed
+ *        through its </script> to reach the protection marker in the NEXT block,
+ *        deleting ALL JSON-LD structured data. This caused "URL has no enhancements"
+ *        in Google Search Console live test.
  *        Fix: replaced [\s\S]*? with (?:(?!<\/script>)[\s\S])*? in all 5 patterns.
  *   [X2] Permissions-Policy: removed 'ambient-light-sensor=()' and 'usb=()'.
+ *        ambient-light-sensor was dropped from the spec; Chrome logs an
+ *        "Unrecognized feature" warning visible in GSC live test JS console.
+ *        usb=() is not a Permissions Policy directive (separate API).
  *
  * 2026-04-17 v5 — Payment gateway integration (P1–P3):
- *   [P1] STATIC_PASSTHROUGH: added /payment/* and /api/payment/*
- *   [P2] CSP_COMMON: form-action expanded to include site origin explicitly.
+ *   [P1] STATIC_PASSTHROUGH: added /payment/* and /api/payment/* so this
+ *        catch-all function never intercepts payment routes. Payment pages are
+ *        static HTML; payment API routes are dedicated CF Pages Functions.
+ *   [P2] CSP_COMMON: form-action expanded to include site origin explicitly,
+ *        allowing fetch()-based payment initiation from encrypted app pages.
  *   [P3] SHARED_SECURITY_HEADERS: removed payment=() from Permissions-Policy.
+ *        This function only serves encrypted app pages — not the payment pages.
+ *        payment=() on app pages is unnecessary; it is correctly absent from
+ *        the /payment/* _headers block which governs the checkout flow.
  *
- * 2026-06-08 v14 — Runtime allowed-origins (M3a):
- *   [M3a] Runtime _allowedOriginsJs replaces hardcoded origin string in all guards.
- *         ALLOWED_ORIGINS env var for custom domains without code redeploy.
- *   NOTE: M3b (gsuite_redirect_worker.js) was a dead-end analysis item.
- *         There is no gsuite.pages.dev project. Single repo, single project.
  *
- * 2026-06-07 v13 — Mobile download protection: bootstrap hardening (M1–M2):
- *   [M1a] bootstrapOriginGuard — synchronous parser-blocking <script> in bootstrap <head>.
- *   [M1b] bootstrapCopyrightBody — first <body> child; visible to text editors.
- *   [M1c] xorDecoderOriginGuard — third-layer origin check inside XOR decoder.
- *   [M2]  htmlOriginGuard — injected into decoded HTML (Scenario B coverage).
+ * 2026-06-09 v16 — Mobile download protection: fix origin-guard redirect fallback (MF1–MF3):
  *
- * 2026-06-03 v11 — /download redirect (D1).
- * 2026-06-03 v10 — Inline handler CSP fix + landing page 404 fix (H1–H2).
- * 2026-04-28 v9  — PSI font + LCP + CSP fixes (F1–F3).
- * 2026-04-25 v8  — Bot-path OG tag injection + favicon guard (V2-BOT, V4-FAV).
- * 2026-04-25 v7  — Sitemap + OG image fixes (V1–V3).
- * 2026-04-23 v6  — Agent-readiness infrastructure (A1–A7).
+ *   ROOT CAUSE: All three origin-guard layers (M1a bootstrapOriginGuard, M1c
+ *   xorDecoderOriginGuard, M2 htmlOriginGuard) shared an identical fallback bug.
+ *   When document.open() throws on Chrome Android opening a downloaded file via
+ *   the native file viewer (file:// or content:// URI), the catch block fired:
+ *       window.location.replace(_aos[0] + path)
+ *   This silently navigated the browser to the LIVE canonical URL. Chrome loaded
+ *   and rendered the real engineering page — the downloaded file appeared to have
+ *   "bypassed" protection, but was actually being redirected to civilengsuite.pages.dev.
  *
- * 2026-06-09 v15 — Split-payload bootstrap: zero-payload download protection (N1–N4):
+ *   [MF1] bootstrapOriginGuard (M1a) fallback: window.location.replace() removed.
+ *         Replaced with: attempt document.open() without any redirect on failure.
+ *         On document.open() failure, sets window['__CES_BLOCK']=1 so M1c can
+ *         detect the blocked state when the HTML parser reaches <body>. If M1a's
+ *         document.open() aborts the parser (normal Chrome behavior), M1c is never
+ *         reached and copyright is already shown. If it fails, M1c takes over.
  *
- *   ROOT CAUSE CONFIRMED: Chrome Android's native Download button saves the bootstrap
- *   HTTP response to disk. The bootstrap contained the full XOR-encoded real HTML as an
- *   embedded base64 blob. When the saved file was opened (file:// context), the M1a/M1c
- *   origin guards should have fired — but a combination of Chrome Android's non-standard
- *   document.open() parser-abort behaviour in file:// context and possible document.write
- *   re-entry quirks caused the XOR decoder to still execute, rendering the real page.
+ *   [MF2] xorDecoderOriginGuard (M1c): guard condition expanded from
+ *         (_xaos.indexOf(_xo)===-1&&!_xd) to also OR window['__CES_BLOCK'],
+ *         which is set by M1a on document.open failure. Fallback changed from
+ *         window.location.replace() to a fixed-position DOM overlay element
+ *         (document.body is available in the <body> script context). The return
+ *         statement after copyright display is unconditional — XOR decode NEVER
+ *         runs regardless of document.open() success or failure.
  *
- *   THE FIX — ARCHITECTURAL CHANGE:
- *   The XOR payload is NEVER embedded in the bootstrap response. The downloaded file
- *   is now a pure copyright HTML page with no decodable content whatsoever.
- *   Real content is delivered only as a second same-origin programmatic fetch that
- *   cannot succeed from a file:// context (CORS blocks cross-origin XHR).
+ *   [MF3] htmlOriginGuard (M2) fallback: window.location.replace() removed.
+ *         Replaced with: (a) inject hide-style into <head> immediately, so real
+ *         content is not visible even if document.open() fails; (b) DOMContentLoaded
+ *         handler that overwrites document.body with the copyright card. Handles
+ *         Scenario B (Chrome Android saves the rendered DOM post document.write).
  *
- *   [N1] Zero-payload copyright bootstrap:
- *        Bootstrap HTTP response is now a self-contained copyright page (dark background,
- *        lock icon, official URL). No XOR blob. No base64 payload. ~2 KB instead of ~333 KB.
- *        Downloaded file = copyright page only. Text editor opens = copyright HTML only.
- *        No JS needed to see the copyright message (pure HTML+CSS content).
- *        Loading indicator shown via JS when authorized origin detected.
+ *   NET RESULT: Downloaded .html file opened on Android Chrome (file:// or
+ *   content://) now shows the copyright page and NEVER silently redirects to
+ *   civilengsuite.pages.dev. The live site is not loaded from a locally opened file.
  *
- *   [N2] Payload delivery endpoint (same URL, detected by request headers):
- *        Worker detects same-origin programmatic XHR by checking three independent guards:
- *          (a) X-CES-Context: payload       — our custom marker header
- *          (b) Sec-Fetch-Dest: empty        — only set by fetch()/XHR, NOT by native download
- *          (c) Sec-Fetch-Site: same-origin  — only set when request originates from same origin
- *        Sec-Fetch-* are "forbidden request headers" in the Fetch spec — browsers prevent JS
- *        from overriding them. Chrome's native Download button sets Sec-Fetch-Dest: document
- *        (navigation), not 'empty' — so it NEVER receives the payload, only the copyright page.
- *        When all three checks pass: decrypt .enc, process, XOR-encode, return JSON {p: payload}.
+ * 2026-06-09 v15 — Inline non-canonical redirect gate + fix _canonicalOrigin derivation (M3b-inline, M3b-fix):
  *
- *   [N3] Client-nonce echo for CSP continuity:
- *        Bootstrap response has CSP header: script-src 'nonce-{cspNonce}'.
- *        After document.write(decodedHtml), the new document inherits this CSP.
- *        Decoded HTML scripts must carry nonce="{cspNonce}" to execute.
- *        Bootstrap JS sends its own nonce in X-CES-Nonce header with the payload request.
- *        Payload endpoint stamps decoded HTML scripts with this echoed nonce, ensuring
- *        nonce continuity: bootstrap CSP nonce === decoded HTML script nonces. ✓
+ *   CONTEXT: v14 documented [M3b] as a SEPARATE gsuite_redirect_worker.js file that would
+ *   be deployed independently to the gsuite.pages.dev project. In practice this requires
+ *   maintaining two repos/deployments. v15 folds both responsibilities into this single
+ *   [[path]].js — the same file now acts as both the canonical serving handler and a
+ *   full redirect worker when deployed to any non-canonical Pages project.
  *
- *   [N4] Decryption optimization:
- *        AES-256-GCM decryption now runs ONLY for bot UAs and payload fetches.
- *        Normal bootstrap requests (copyright page delivery) skip decryption entirely.
- *        Reduces worker CPU time and .enc I/O for the common case.
+ *   [M3b-inline] Non-canonical host redirect gate added at the top of onRequest().
+ *         Runs BEFORE STATIC_PASSTHROUGH — every request to a non-canonical host
+ *         (e.g., gsuite.pages.dev) is intercepted and 301-redirected to the canonical
+ *         domain, including font, image, and .well-known requests. This closes the
+ *         CDN bypass at the network layer: no raw file is ever served from any
+ *         non-canonical host.
+ *         Canonical host: CANONICAL_HOST env var (default: 'civilengsuite.pages.dev').
+ *         Add custom domains: ALLOWED_ORIGINS env var (unchanged — comma-separated https:// origins).
+ *         Cloudflare preview deployments (*.civilengsuite.pages.dev) are exempt via
+ *         subdomain suffix check so preview URLs work without adding them to ALLOWED_ORIGINS.
+ *         Localhost / 127.0.0.1 (any port) is always exempt for local wrangler dev.
+ *         _canonicalHostname and _allowedHostsRaw computed here are reused below in
+ *         [M3a] to build _allowedOriginsJs — no duplicate env-var reads.
  *
- *   SECURITY LAYERS FOR DOWNLOADED FILE:
- *     Layer 1 — No payload in file:   nothing to decode, copyright page is all there is.
- *     Layer 2 — Origin check in JS:   window.location.origin === 'null' → loader exits.
- *     Layer 3 — CORS blocks XHR:      file:// → https:// is cross-origin, browser blocks.
- *     Layer 4 — Sec-Fetch-Dest check: even if XHR somehow reached server, 'document'≠'empty'.
- *     Layer 5 — M2 guard in payload:  decoded HTML still has M2 origin guard for Scenario B.
+ *   [M3b-fix]  _canonicalOrigin no longer derived from url.host.
+ *         v14 set: const _canonicalOrigin = `https://${url.host}`;
+ *         Critical defect: if [[path]].js is deployed to gsuite.pages.dev WITHOUT the
+ *         redirect gate (i.e., v14 only, before this fix), url.host would be
+ *         'gsuite.pages.dev', and _canonicalOrigin would be 'https://gsuite.pages.dev'.
+ *         All three guard layers (M1a bootstrapOriginGuard, M1c xorDecoderOriginGuard,
+ *         M2 htmlOriginGuard) would then emit gsuite.pages.dev as the ALLOWED origin —
+ *         completely neutralizing protection for any request served from that host.
+ *         Fix: _canonicalOrigin = `https://${_canonicalHostname}` where _canonicalHostname
+ *         comes from CANONICAL_HOST env var. By the time [M3a] runs, the redirect gate
+ *         has already guaranteed url.hostname IS the canonical host, making this
+ *         semantically equivalent but safe for multi-project deployments.
  *
- *   THREAT MODEL UNCHANGED FOR DETERMINED DEVELOPERS:
- *     A developer with DevTools on the live site can still inspect the payload XHR response,
- *     extract the base64+XOR content, and decode it. XOR obfuscation is not encryption.
- *     This is an inherent limitation of client-side protection and is unchanged from v13/v14.
- *     The goal of v15 is stopping CASUAL MOBILE DOWNLOAD, which is fully achieved.
+ *   [M3b-urls] _sharedCrUrl and _sharedCrLabel (the copyright page's clickable link)
+ *         now use _canonicalOrigin / _canonicalHostname instead of the hardcoded
+ *         literal 'https://civilengsuite.pages.dev'. Ensures the copyright page link
+ *         is always correct for custom domain deployments.
+ *
+ * 2026-06-08 v14 — Runtime allowed-origins + gsuite.pages.dev redirect gate (M3):
+ *
+ *   ROOT CAUSE: gsuite.pages.dev is the default Cloudflare Pages project alias —
+ *   a separate project with no Pages Function deployed. Chrome Android's native
+ *   Download button issued a GET to gsuite.pages.dev which served raw static files
+ *   directly from the CDN, completely bypassing this worker and all M1/M2 guards.
+ *
+ *   [M3a] Runtime _allowedOriginsJs — replaces the hardcoded 'https://civilengsuite.pages.dev'
+ *         string in all 3 guard layers (M2 htmlOriginGuard, M1a bootstrapOriginGuard,
+ *         M1c xorDecoderOriginGuard) with a runtime-computed JSON array derived from
+ *         url.host (the live CF request hostname). This means the canonical domain is
+ *         always correct regardless of which Pages project serves the request, and
+ *         custom domains can be added via the ALLOWED_ORIGINS env var
+ *         (comma-separated, e.g. "https://civilengsuite.com,https://www.civilengsuite.com")
+ *         without a code redeploy.
+ *         Guard logic changed from (_o !== _ao) to (_aos.indexOf(_o) === -1) — semantically
+ *         identical for a single-element array, extensible for multiple allowed origins.
+ *
+ *   [M3b] gsuite_redirect_worker.js — standalone Cloudflare Pages Function to deploy
+ *         to the gsuite.pages.dev project. Intercepts ALL requests and issues a 301
+ *         redirect to https://civilengsuite.pages.dev{path}. This closes the bypass
+ *         at the network layer: no raw file is ever served from gsuite.pages.dev.
+ *         Deploy: copy to functions/[[path]].js in the gsuite.pages.dev repo root.
+ *
+ * 2026-06-07 v13 — Mobile download protection: bootstrap hardening + decoded-HTML guard (M1–M2):
+ *
+ *   ROOT CAUSE ANALYSIS — why desktop Ctrl+S protection succeeds but mobile Download fails:
+ *     Desktop Ctrl+S fires a 'keydown' DOM event. buildProtectionBundle() intercepts it,
+ *     overrides showSaveFilePicker, and saves copyright HTML instead of the real page. JS
+ *     events CAN intercept Ctrl+S because it is a keyboard event dispatched through the DOM.
+ *
+ *     Chrome Android's toolbar Download button is a NATIVE OS UI element. When tapped, it
+ *     sends a raw HTTP GET to the current URL and pipes the response bytes directly to the
+ *     DownloadManager — completely bypassing the page's JavaScript execution context.
+ *     No 'keydown', no 'contextmenu', no 'navigator.share' override — none of the existing
+ *     buildProtectionBundle() handlers fire. The bootstrap HTML is saved as-is.
+ *     Pre-v13, the bootstrap had no origin guard, so the XOR decoder ran on open → real HTML.
+ *
+ *   TWO DISTINCT DOWNLOAD SCENARIOS addressed by v13:
+ *     Scenario A — Chrome saves the bootstrap HTTP response (new GET request to URL):
+ *                  User opens the saved .html → guard in bootstrap <head> fires before body
+ *                  is parsed → XOR decoder never runs → copyright page shown.
+ *     Scenario B — Chrome saves the rendered DOM (post document.write DOM state):
+ *                  User opens the saved .html → real decoded HTML with M2 guard in <head>
+ *                  fires before content renders → copyright page shown.
+ *     Both scenarios produce the same visible result: the copyright page. The XOR payload
+ *     (base64 string in the bootstrap) is technically present in Scenario A files, but JS
+ *     execution is blocked by the origin guard before the decoder can run.
+ *
+ *   [M1a] bootstrapOriginGuard — synchronous parser-blocking <script> in bootstrap <head>:
+ *         Injected after faviconLinks, before </head>. Checks window.location.origin.
+ *         For file:// loads (origin === 'null') or any unauthorized host, base64-decodes
+ *         and document.write()s the copyright page. document.open() aborts the HTML parser
+ *         — <body> with the XOR decoder script is never parsed, never executes.
+ *         Fallback: window.location.replace() for sandboxed WebViews where document.open
+ *         is restricted. Runs synchronously — zero visible flash of real content possible.
+ *
+ *   [M1b] bootstrapCopyrightBody — first <body> child; replaces old 'JavaScript Required'
+ *         noscript. Hidden by default (display:none) — legitimate access never sees it
+ *         because M1a fires first (JS context) or XOR decoder replaces the document.
+ *         <noscript> rule toggles to display:flex so viewers that don't execute JS still
+ *         show the copyright page instead of a blank screen.
+ *         position:fixed / z-index:2147483647 covers any partial render edge case.
+ *         Text editors (Notepad, VS Code) opening the bootstrap .html file see this
+ *         copyright HTML before encountering the base64 XOR payload blob.
+ *
+ *   [M1c] xorDecoderOriginGuard — third-layer origin check INSIDE the XOR decoder script
+ *         itself (bootstrap <body>). Defense-in-depth only: M1a (bootstrap <head>) already
+ *         aborts the HTML parser via document.open() so the XOR decoder's <script> tag is
+ *         never even parsed on unauthorized file:// opens. M1c only fires in the rare edge
+ *         case where M1a was silently neutralized — for example, a browser extension that
+ *         strips nonce attributes and forces scripts async, a CSP-relaxing extension, or a
+ *         future browser quirk where <head> scripts lose their parser-blocking guarantee.
+ *         Reuses _sharedCrB64 (copyright page already in memory from M1a/M2 setup).
+ *         On M1c trigger: document.open() + copyright write, then early return — XOR decode
+ *         never executes and real HTML is never exposed.
+ *         On legitimate access: origin matches → guard is a no-op → decode continues. ✓
+ *
+ *   [M2]  htmlOriginGuard — origin guard injected into the DECODED HTML payload, BEFORE
+ *         XOR encoding. This is the Scenario B layer: if Chrome saves the rendered DOM
+ *         (the real page HTML produced by document.write), the guard is already embedded
+ *         in that HTML. Injected right after <meta charset="UTF-8"> in the decoded HTML.
+ *         Placed BEFORE injectNonces so it receives a nonce and executes correctly in the
+ *         decoded-HTML CSP context (which inherits the bootstrap's 'nonce-X' policy).
+ *         On legitimate access: origin matches → guard is a no-op → page renders normally.
+ *         On file:// open: origin === 'null' → guard fires → copyright shown.
+ *         Bot path: M2 guard is NEVER injected (human path only, after BOT_RE branch
+ *         returns) — no change to bot responses, no stripProtectionScripts update needed.
+ *         The _sharedCrB64 (copyright page, base64) is computed once from the processed
+ *         html title and reused for M1a, M1c (bootstrap) and M2 (decoded HTML).
+ *
+ * 2026-06-03 v11 — /download redirect (D1):
+ *   [D1] /download route: 302 redirect to the Google Drive direct-download URL for
+ *        the Civil Engineering Suite Activation Tool installer (.exe). Previously
+ *        the path was unhandled — !route → context.next() → Cloudflare static
+ *        file serving found no file → 404. Fix: explicit handler before the route
+ *        matcher issues a 302 Found with Cache-Control: no-store so the redirect
+ *        destination can be swapped at any time without stale browser caches.
+ *        SHARED_SECURITY_HEADERS applied to avoid stripping existing protections.
+ *        No CSP needed: 302 responses carry no body.
+ *
+ * 2026-06-03 v10 — Inline handler CSP fix + landing page 404 fix (H1–H2):
+ *   [H1] CRITICAL BUG FIX: script-src now includes 'unsafe-hashes' + SHA-256 hashes
+ *        for all 9 inline event handlers in the decrypted HTML. Change [F2] (v9)
+ *        removed 'unsafe-inline' from script-src to silence console noise. Per CSP
+ *        Level 3, nonces bypass unsafe-inline ONLY for <script> elements, not for
+ *        inline event handlers (onclick, etc.). Removing unsafe-inline therefore
+ *        blocked every onclick attribute in the page — specifically:
+ *          · onclick="openSegModal()" on the Hero "Buy License — 249 EGP" button
+ *          · onclick="openSegModal()" on the World-First "Subscribe Now" button
+ *          · onclick="openSegModal()" on the bottom CTA "Buy License — 249 EGP" button
+ *          · onclick="segModalDismiss()" on the modal ✕ close button
+ *          · onclick="segModalDismiss()" on the modal Skip button
+ *          · onclick="segModalTrack('engineers'|'offices'|'students')" on modal cards
+ *          · onclick="window.open('/footing-pro/{segment}/','_self')" on segment cards
+ *          · onclick="event.stopPropagation()" on inner anchor tags
+ *        All these handlers fired silently into void — the user saw no response.
+ *        Fix: 'unsafe-hashes' + explicit SHA-256 hashes for each handler value allows
+ *        ONLY those 9 specific handlers. Nonce security for <script> elements is
+ *        unchanged. Lighthouse Best Practices score unaffected ('unsafe-hashes' is
+ *        not penalized; 'unsafe-inline' was). Applied to BOTH bot and human CSP.
+ *   [H2] _redirects BUG FIX (documented here for change log completeness):
+ *        The landing page rewrite rules pointed to /public/footing-pro/{segment}/:splat
+ *        but the files live at /footing-pro/{segment}/index.html (repo root, not public/).
+ *        This mismatch caused 404 on /footing-pro/offices/ and /footing-pro/students/.
+ *        Fix is in _redirects: the 3 incorrect rules are removed; Cloudflare Pages
+ *        file serving finds the files directly without any redirect rule.
+ * 2026-04-28 v9 — PSI font + LCP + CSP fixes (F1–F3):
+ *   [F1] STATIC_PASSTHROUGH: added fonts\.* — eliminates function invocation
+ *        overhead for every font request. Previously fonts fell through to
+ *        context.next() via the !route fallback, adding unnecessary routing
+ *        overhead on every woff2 request.
+ *   [F2] Human-path bootstrap CSP: removed 'unsafe-inline' from script-src.
+ *        Per CSP Level 3 spec, 'unsafe-inline' is ignored when a nonce is
+ *        present. Its presence caused browsers to log nonce violations for
+ *        inline event handlers in the decoded HTML. Removal eliminates two
+ *        console errors per page load, restoring Best Practices to 100.
+ *   [F3] lcpPreload: removed type="image/webp", added imagesizes="100vw".
+ *        type attribute caused preload skip on some user agents. imagesizes
+ *        is required for correct preload width computation on responsive views.
+ *        Bootstrap font preloads updated: replaced inter-400/inter-700/playfair-700
+ *        with inter-500/inter-600/playfair-400/playfair-900/jetbrains-mono-400/
+ *        jetbrains-mono-600 (8 fonts total, ordered by first-viewport priority).
+ *
+ * 2026-04-25 v8 — Bot-path OG tag injection + favicon guard (V2-BOT, V4-FAV):
+ *   [V2-BOT] Bot path: inject og:image:secure_url / og:image:type / width / height
+ *            into bot-path (decrypted) HTML when absent. Bootstrap ogMetaBlock (v7
+ *            [V2]) already handles non-bot UAs (iMessage iOS). Bot-path HTML comes
+ *            from the encrypted source which may lack these tags. WhatsApp / Telegram
+ *            scrapers match BOT_RE and receive bot-path HTML — they require
+ *            og:image:secure_url to render the image thumbnail. Without it they show
+ *            only text + domain (image blank in chat). Guard prevents duplication.
+ *   [V4-FAV] Inject faviconLinks into decrypted HTML if <link rel="icon"> / apple-
+ *            touch-icon is absent. Human-path document.write replaces the bootstrap
+ *            <head>, discarding the bootstrap favicon links. If the encrypted source
+ *            has no favicon declaration, the browser tab shows no icon. Fix: append
+ *            faviconLinks before </head> in the decrypted HTML when the source lacks
+ *            icon links. Guard prevents duplication when source already has them.
+ *
+ * 2026-04-25 v7 — Sitemap + OG image fixes (V1–V3):
+ *   [V1] SITEMAP CRITICAL: Removed X-Robots-Tag: noindex from /sitemap.xml response.
+ *        Googlebot's sitemap fetcher respects X-Robots-Tag directives. noindex on
+ *        the sitemap.xml URL itself caused the fetcher to abort without reading the
+ *        document — reported as "Couldn't fetch" / "Sitemap could not be read" in
+ *        Google Search Console despite the file loading correctly in browsers.
+ *        The noindex was intended to prevent the sitemap.xml URL from appearing in
+ *        search results (correct intent) but the implementation prevented the sitemap
+ *        from being processed entirely (wrong effect). Fix: removed the header.
+ *        Google has never indexed sitemap.xml URLs regardless of X-Robots-Tag.
+ *   [V2] OG IMAGE — WhatsApp/iMessage: Added og:image:secure_url and og:image:type
+ *        to the ogMetaBlock in the bootstrap shell. WhatsApp's scraper requires
+ *        og:image:secure_url (HTTPS alias of og:image) and og:image:type to reliably
+ *        render the image thumbnail in chat previews. Facebook Sharing Debugger
+ *        confirmed og:image was set correctly — WhatsApp not showing image was caused
+ *        by missing og:image:secure_url + og:image:type declarations.
+ *   [V3] STATIC_PASSTHROUGH: Added /images/*, /footing-pro/images/*, and all
+ *        sub-app /images/* paths plus /sitemap.xsl. These paths were already handled
+ *        correctly via the !route → context.next() fallback, but explicit passthrough
+ *        eliminates the route-matching overhead for every image request and ensures
+ *        the ASSETS binding is never invoked unnecessarily for static media files.
+ *
+ * 2026-04-23 v6 — Agent-readiness infrastructure (A1–A7):
+ *   [A1] HOMEPAGE_LINK_HEADER: RFC 8288 Link response header — 7 relations:
+ *        api-catalog (RFC 9727), agent-skills index, mcp-server-card,
+ *        oauth-authorization-server (RFC 8414), oauth-protected-resource (RFC 9728),
+ *        security.txt (RFC 9116), sitemap.
+ *        Emitted on homepage responses (both bot and human paths) and on ALL
+ *        bot-path responses so agents scanning any tool page find the catalog.
+ *   [A2] HOMEPAGE_MARKDOWN: static curated markdown constant returned when
+ *        Accept: text/markdown is detected on the homepage. Short-circuits the
+ *        decrypt pipeline — no .enc read needed. Includes x-markdown-tokens hint
+ *        (word count × 1.3) per Cloudflare agent-readiness convention.
+ *        Cache-Control: public (markdown is not user-specific, safe to cache).
+ *   [A3] WebMCP (bot path): navigator.modelContext.provideContext() injected into
+ *        bot path HTML before </body>. Exposes 3 tools to AI agent crawlers:
+ *        open_footing_pro, open_section_property_pro, get_suite_info.
+ *   [A4] Vary: Accept added alongside Vary: User-Agent on homepage responses so
+ *        CDN correctly separates HTML / markdown caches.
+ *   [A5] Security: all changes are additive — SHARED_SECURITY_HEADERS,
+ *        CSP_COMMON, buildProtectionBundle, stripProtectionScripts, XOR
+ *        obfuscation and the human path are byte-for-byte identical to v5.
+ *   [A6] WebMCP (bootstrap shell): navigator.modelContext.provideContext() is now
+ *        also injected into the human-path bootstrap shell as a standalone <script>
+ *        block that executes BEFORE the XOR decoder. This ensures the WebMCP call
+ *        fires for any JS-executing client regardless of User-Agent — including
+ *        agent-readiness scanners whose UA does not match BOT_RE.
+ *        Security impact: zero. The tools expose only navigation URLs and public
+ *        metadata. The XOR payload, encryption key, and protection bundle are never
+ *        referenced. The call is wrapped in a feature-detect guard so it is a no-op
+ *        in all browsers that do not implement navigator.modelContext.
+ *   [S1] SITEMAP FIX: sitemap.xml removed from STATIC_PASSTHROUGH and handled
+ *        explicitly in the function with minimal clean headers. Root cause: the
+ *        _headers /*  catch-all was applying Content-Security-Policy to sitemap.xml.
+ *        Cloudflare Pages _headers is additive — all matching rules stack — so
+ *        sitemap.xml received the full CSP header from the /* block. Googlebot's
+ *        sitemap fetcher rejects documents with CSP headers, reporting
+ *        "Couldn't fetch" / "Sitemap could not be read" in Search Console despite
+ *        the file loading correctly in the browser (which ignores CSP on XML).
+ *        Fix: function intercepts /sitemap.xml, fetches raw XML from ASSETS binding,
+ *        and returns with ONLY Content-Type: application/xml and Cache-Control.
+ *        No CSP, no X-Frame-Options, no security headers on the XML response.
+ *   [S2] SITEMAP IMAGE PATHS: 7 of 9 <image:loc> entries referenced /og-image.png
+ *        (root-level, which 404s). Fixed to /images/og-image.png for all sub-app
+ *        pages. Footing Pro retains /footing-pro/images/og-image.png (correct).
+ *        lastmod updated to 2026-04-24 on all pages.
+ *   [A7] oauth-authorization-server: /.well-known/oauth-authorization-server added
+ *        as a static file (RFC 8414 minimal, honest — no active authorization
+ *        server). Satisfies agent-readiness OAuth discovery check. Link header
+ *        updated to include the new relation.
  */
 
 // ── Bot / crawler UA pattern ──────────────────────────────────────────────────
+// [F1] ADDED: googlebot-image, adsbot-google, perplexitybot, ia_archiver
 const BOT_RE = /googlebot|googlebot-image|google-inspectiontool|googleother|adsbot-google|bingbot|yandexbot|duckduckbot|baiduspider|applebot|slurp|facebookexternalhit|twitterbot|linkedinbot|whatsapp|telegrambot|slackbot|discordbot|perplexitybot|ia_archiver/i;
 
-// ── Route table ───────────────────────────────────────────────────────────────
+// ── Route table — only the app root paths (no sub‑paths like /footing-pro/images) ──
 const ROUTES = [
   {
     prefix: '/', exact: true,
@@ -130,6 +373,7 @@ const ROUTES = [
     pageFilename: 'civil-engineering-suite.html',
     faviconLinks: '<link rel="icon" type="image/x-icon" href="/images/favicon.ico">'
                 + '<link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon.png">',
+    // [B9] og meta for bootstrap shell — social preview for browser-UA scrapers (iMessage etc.)
     ogTitle:       'Civil Engineering Suite — 8-App ACI 318 Structural Engineering Software by Eng. Aymn Asi',
     ogDescription: '8 professional structural engineering apps by Eng. Aymn Asi. Footing Pro (Combined, Trapezoidal, Strap — Live Now) + Beam Pro, Column Pro, Deflection Pro, Earthquake Pro, Mur Pro, Add Reft Pro, Section Property Pro. ACI 318-compliant, 100% offline.',
     ogImage:       '/images/og-image.png',
@@ -234,7 +478,11 @@ const ROUTES = [
   },
 ];
 
-// ── CSP common ────────────────────────────────────────────────────────────────
+// ── CSP common (matches api/decrypt.js CSP_COMMON exactly) ───────────────────
+// [P2] form-action: added site origin explicitly to support payment initiation
+//      fetch() calls from encrypted app pages (belt-and-suspenders; same-origin
+//      fetch is already permitted by connect-src 'self', but form-action governs
+//      <form> submissions and is declared explicitly for completeness).
 const CSP_COMMON = [
   "default-src 'self'",
   "object-src 'none'",
@@ -252,7 +500,20 @@ const CSP_COMMON = [
   "report-uri /api/csp-report",
 ].join('; ');
 
-// ── Shared security headers ───────────────────────────────────────────────────
+// [F6] Shared security headers applied to EVERY response this function emits.
+// NOTE: _headers does NOT apply to Cloudflare Pages Function responses —
+// these must be set explicitly here on every returned Response.
+//
+// [X2] REMOVED ambient-light-sensor=() — this feature was dropped from the
+// Permissions Policy spec; Chrome logs "Unrecognized feature" console warning
+// that appears in Google Search Console's live test (Image 2, Apr 15 2026).
+//
+// [P3] REMOVED payment=() — this function only serves encrypted app pages.
+// The payment=() restriction is unnecessary here (the app pages do not invoke
+// the browser Payment Request API). The /payment/* checkout pages are governed
+// by the _headers file which correctly omits payment=(), enabling Apple Pay
+// via the Paymob SDK. Keeping payment=() here would not affect /payment/ pages
+// (different routing path) but is removed for semantic correctness.
 const SHARED_SECURITY_HEADERS = {
   'X-Content-Type-Options':            'nosniff',
   'X-Frame-Options':                   'DENY',
@@ -264,18 +525,33 @@ const SHARED_SECURITY_HEADERS = {
   'X-Permitted-Cross-Domain-Policies': 'none',
 };
 
-// ── RFC 8288 Link header ──────────────────────────────────────────────────────
+// [A1] RFC 8288 Link response header — agent discovery.
+// Emitted on all homepage responses (bot + human) and on ALL bot-path responses
+// so agents that crawl /footing-pro/ directly still discover the agent catalog.
+// Relations:
+//   api-catalog              — RFC 9727 machine-readable API catalog
+//   agentskills.io/rel/...   — Agent Skills Discovery index (RFC v0.2.0)
+//   mcp-server-card          — SEP-1649 MCP Server Card
+//   oauth-protected-resource — RFC 9728 OAuth resource metadata
+//   security-policy          — RFC 9116 security.txt
+//   sitemap                  — XML sitemap for structural discovery
 const HOMEPAGE_LINK_HEADER = [
   '</.well-known/api-catalog>; rel="api-catalog"',
   '</.well-known/agent-skills/index.json>; rel="https://agentskills.io/rel/skills-index"',
   '</.well-known/mcp/server-card.json>; rel="mcp-server-card"',
+  // [A7] RFC 8414 OAuth Authorization Server Metadata — even when no auth server
+  // is active, publishing this file satisfies agent OAuth-discovery checks and
+  // correctly informs agents that no authorization is required.
   '</.well-known/oauth-authorization-server>; rel="oauth-authorization-server"',
   '</.well-known/oauth-protected-resource>; rel="oauth-protected-resource"',
   '</.well-known/security.txt>; rel="security-policy"',
   '</sitemap.xml>; rel="sitemap"',
 ].join(', ');
 
-// ── Homepage markdown ─────────────────────────────────────────────────────────
+// [A2] Static curated markdown for the homepage — returned when an agent sends
+// Accept: text/markdown. Short-circuits the decrypt pipeline entirely: no
+// CES_DECRYPT_KEY read, no AES-GCM operation, no XOR, no HTML processing.
+// Content mirrors the JSON-LD structured data in index.html — update in sync.
 const HOMEPAGE_MARKDOWN = `# Civil Engineering Suite
 
 > Professional-grade ACI 318-compliant structural and civil engineering software by **Eng. Aymn Asi** — Structural Engineer.
@@ -367,13 +643,14 @@ function escHtml(s) {
                   .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 function injectNonces(html, nonce) {
+  // Case-insensitive; skips scripts that already carry a nonce attribute
   return html.replace(/<script(\b[^>]*?)>/gi, (match, attrs) => {
-    if (/\bnonce\s*=/.test(attrs)) return match;
+    if (/\bnonce\s*=/.test(attrs)) return match; // already has nonce
     return `<script${attrs} nonce="${nonce}">`;
   });
 }
 
-// ── AES-256-GCM decrypt ───────────────────────────────────────────────────────
+// ── AES-256-GCM decrypt using Web Crypto ─────────────────────────────────────
 async function decryptEnc(encData, keyHex) {
   const dot = encData.indexOf('.');
   if (dot === -1) throw new Error('Bad .enc format');
@@ -401,7 +678,9 @@ function errResponse(status, title, message) {
   );
 }
 
-// ── Client-side protection bundle (human browsers ONLY) ──────────────────────
+// ── Client-side protection bundle (injected for human browsers ONLY) ──────────
+// [SECURITY] This bundle is NEVER sent to crawlers. The BOT_RE branch returns
+// before this function is ever called in the bot path.
 function buildProtectionBundle(pageFilename) {
   const crHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Protected</title></head>`
     + `<body style="margin:0;background:#0A1A2E;display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:sans-serif">`
@@ -461,23 +740,52 @@ function buildProtectionBundle(pageFilename) {
 }
 
 // ── Strip protection scripts from bot HTML ────────────────────────────────────
+// [B1–B5] Removes only the protection IIFEs. Every pattern is anchored to a
+// unique comment string that appears ONLY inside the protection scripts and
+// NEVER in JSON-LD, translation, or navigation code.
+//
+// [X1] CRITICAL FIX: All patterns use (?:(?!<\/script>)[\s\S])*? instead of
+// [\s\S]*?. The lazy [\s\S]*? crosses </script> boundaries — it starts from the
+// FIRST <script> before the marker (which could be a JSON-LD block many lines
+// earlier) and consumes through that block's </script> to find the marker in the
+// NEXT script block. This silently deletes all preceding JSON-LD structured data.
+// The negative lookahead (?!<\/script>) prevents the quantifier from ever
+// consuming a </script> sequence, confining each match to a single script block.
 function stripProtectionScripts(html) {
+  // Reusable safe-match helper: builds a regex that matches a single <script> block
+  // containing the given marker string, without crossing into adjacent blocks.
   function safeScriptRe(marker) {
     return new RegExp(
       '<script\\b[^>]*>(?:(?!<\\/script>)[\\s\\S])*?' + marker + '(?:(?!<\\/script>)[\\s\\S])*?<\\/script>',
       'gi'
     );
   }
+
+  // [B1] "CONTENT PROTECTION SYSTEM" — the main protection IIFE (~180 lines).
   html = html.replace(safeScriptRe('CONTENT PROTECTION SYSTEM'), '');
+
+  // [B2] "© Footing Pro v.2026 - Eng. Aymn Asi - All Rights Reserved"
   html = html.replace(safeScriptRe('\u00A9 Footing Pro v\\.2026 - Eng\\. Aymn Asi - All Rights Reserved'), '');
+
+  // [B3] "© Footing Pro v.2026 - Eng. Aymn Asi - Protected"
   html = html.replace(safeScriptRe('\u00A9 Footing Pro v\\.2026 - Eng\\. Aymn Asi - Protected'), '');
+
+  // [B4] "_CES_COPYRIGHT_HTML" — the showSaveFilePicker override (Ctrl+S).
   html = html.replace(safeScriptRe('_CES_COPYRIGHT_HTML'), '');
+
+  // [B5] "FOOTING PRO v.2026 — ENGINE TRANSFER + SECURITY UPGRADE"
   html = html.replace(safeScriptRe('FOOTING PRO v\\.2026 \u2014 ENGINE TRANSFER'), '');
+
+  // [B7] Remove oncontextmenu attribute from <body> tag.
   html = html.replace(/<body([^>]*)\soncontextmenu="[^"]*"/gi, '<body$1');
+
   return html;
 }
 
-// ── Minify inline <style> blocks ──────────────────────────────────────────────
+// ── Minify inline <style> blocks for bot response ─────────────────────────────
+// [B6] Reduces CSS payload from ~120 KB to ~60 KB by stripping comments and
+// collapsing whitespace. Does NOT touch <style> blocks inside <noscript> or
+// <script> tags. Safe for all standard CSS including @media and calc().
 function minifyBotCSS(html) {
   return html.replace(/<style([^>]*)>([\s\S]*?)<\/style>/gi, (match, attrs, css) => {
     const minified = css
@@ -490,7 +798,9 @@ function minifyBotCSS(html) {
   });
 }
 
-// ── WebMCP script for bot path ────────────────────────────────────────────────
+// [A3] WebMCP script — exposes CES tools to AI agents via navigator.modelContext.
+// Injected ONLY into bot path HTML, before </body>. Never reaches human browsers.
+// Each tool: name, description, inputSchema (JSON Schema), execute callback.
 function buildWebMCPScript() {
   return `<script>
 (function(){
@@ -547,60 +857,84 @@ function buildWebMCPScript() {
 </script>`;
 }
 
-// ── Shared CSP script-src hashes (used in both bot and human path responses) ──
-const CSP_SCRIPT_HASHES = [
-  "'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw='",
-  "'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ='",
-  "'unsafe-hashes'",
-  "'sha256-nAiI7XK5Mt/SgNQUZPqTuikvwxIVHV3se6mHGQue+88='",
-  "'sha256-Jag+ZHPii6iUmMQWlnwms/mnjM8gRPTOJA2KIyTQQRk='",
-  "'sha256-uLUdJIdD3+8SpL4nHNFN9YmyHRRmrseSQKwzj3ECn2I='",
-  "'sha256-akyHNuxwVvvLQ11iHoDrpca0qH3TU3LfGbtdQ8kNdwI='",
-  "'sha256-UOhLo4NRrWG89b3vpgtU0dc/C8aWLS+MQ2Lf9vW/4Fk='",
-  "'sha256-jHF5hTIlMDyGZRAsNK0HO/WFYrwPvI2I1q0o1xKKB6I='",
-  "'sha256-wflfhEeJWTAjAK0hnm9/OICxAQ8fVnj3168JrJ/m91k='",
-  "'sha256-oTzV9+pQ7IAxC4NoAc7dH4+0Is4KloZ9u7cMJC7UDrE='",
-  "'sha256-bTpi/7w0Cd8ihAWpwcZJIdz49sMq0d73fWWDzp5Ju2Q='",
-].join(' ');
-
-// ── Build shared copyright page HTML ─────────────────────────────────────────
-// Used by M2 guard (decoded HTML) and copyright bootstrap body.
-// pageTitle: the page title string (already html-escaped at call site).
-// canonicalPath: route prefix or '' for homepage.
-// canonicalOrigin: 'https://civilengsuite.pages.dev' or request host.
-function buildCopyrightHtml(pageTitle, canonicalPath, canonicalOrigin) {
-  const url   = `${canonicalOrigin}${canonicalPath}/`;
-  const label = `${canonicalOrigin.replace(/^https?:\/\//,'')}${canonicalPath}/`;
-  return `<!DOCTYPE html><html><head><meta charset="UTF-8">`
-    + `<meta name="viewport" content="width=device-width,initial-scale=1">`
-    + `<title>\u00A9 Protected \u2014 ${pageTitle}<\/title>`
-    + `<style>*{box-sizing:border-box;margin:0;padding:0}`
-    + `body{background:#0A1A2E;display:flex;align-items:center;justify-content:center;`
-    + `min-height:100vh;font-family:sans-serif;text-align:center;padding:24px}`
-    + `.card{max-width:440px}.icon{font-size:3.5rem;margin-bottom:18px}`
-    + `.title{color:#C17B1A;font-size:1.35rem;font-weight:700;margin-bottom:12px;line-height:1.4}`
-    + `.msg{color:#8AA3C7;font-size:0.9rem;line-height:1.8;margin-bottom:22px}`
-    + `a{color:#C17B1A;font-size:0.88rem;text-decoration:none}`
-    + `a:hover{text-decoration:underline}<\/style><\/head><body>`
-    + `<div class="card"><div class="icon">&#x1F512;<\/div>`
-    + `<div class="title">\u00A9 Civil Engineering Suite \u2014 Protected Content<\/div>`
-    + `<div class="msg">Unauthorized copying is prohibited.<br>`
-    + `This page must be accessed from the official website.<\/div>`
-    + `<a href="${url}">${label}<\/a>`
-    + `<\/div><\/body><\/html>`;
-}
-
 // ── Main request handler ──────────────────────────────────────────────────────
 export async function onRequest(context) {
   const { request, env } = context;
   const url  = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, '') || '/';
 
-  // ── Static passthrough ────────────────────────────────────────────────────
+  // ── [M3b-inline] Non-canonical host redirect gate ────────────────────────
+  // Deployed to the canonical project (civilengsuite.pages.dev): url.hostname
+  // matches _canonicalHostname → gate is a no-op → normal serving continues.
+  //
+  // Deployed to a non-canonical project (e.g., gsuite.pages.dev): url.hostname
+  // does NOT match → 301 redirect to canonical → zero raw content served.
+  //
+  // MUST run before STATIC_PASSTHROUGH so that font/image/well-known requests
+  // from non-canonical hosts are also redirected rather than passed through.
+  //
+  // _canonicalHostname and _allowedHostsRaw are computed once here and reused
+  // below in [M3a] for building _allowedOriginsJs — no duplicate env reads.
+  //
+  // Canonical host  : CANONICAL_HOST env var (default: 'civilengsuite.pages.dev')
+  // Additional hosts: ALLOWED_ORIGINS env var (comma-separated https:// origins)
+  // Always exempt   : localhost / 127.0.0.1 (any port) for wrangler pages dev
+  // Always exempt   : *.civilengsuite.pages.dev preview-deployment subdomains
+  const _canonicalHostname = ((env.CANONICAL_HOST || 'civilengsuite.pages.dev')).trim().toLowerCase();
+  const _allowedHostsRaw = (env.ALLOWED_ORIGINS || '')
+    .split(',').map(s => s.trim())
+    .filter(s => s.length > 0 && /^https?:\/\//.test(s));
+  const _allowedHostsSet = new Set([
+    _canonicalHostname,
+    ..._allowedHostsRaw.map(o => {
+      try { return new URL(o).hostname.toLowerCase(); } catch(e) { return ''; }
+    }).filter(Boolean),
+  ]);
+  const _reqHostLower  = url.hostname.toLowerCase();
+  const _isLocalhostReq = /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(url.host);
+  // Allow Cloudflare preview deployments: *.civilengsuite.pages.dev
+  const _isPreviewDeploy = _reqHostLower.endsWith('.' + _canonicalHostname);
+  if (!_allowedHostsSet.has(_reqHostLower) && !_isLocalhostReq && !_isPreviewDeploy) {
+    return new Response(null, {
+      status: 301,
+      headers: {
+        'Location':      `https://${_canonicalHostname}${url.pathname}${url.search}`,
+        'Cache-Control': 'no-store',
+        ...SHARED_SECURITY_HEADERS,
+      },
+    });
+  }
+
+  // ── Always pass through static/SEO files — never intercept these ──────────
+  // [P1] ADDED: payment(?:\/.*)? and api\/payment\/.* — payment checkout pages
+  //      are static HTML served directly by Cloudflare Pages file serving.
+  //      Payment API routes are dedicated CF Pages Functions in
+  //      functions/api/payment/*.js which take routing precedence over this
+  //      catch-all by Cloudflare's function routing rules, but the passthrough
+  //      here is an explicit defensive guard.
+  // [S1] NOTE: sitemap.xml is intentionally NOT in STATIC_PASSTHROUGH — it is
+  //      handled explicitly below with controlled headers. See [S1] in changelog.
+  // [L1] ADDED: footing-pro\/engineers\/? footing-pro\/offices\/?
+  //      footing-pro\/students\/? — persona landing pages are static HTML files
+  //      deployed at footing-pro/{engineers,offices,students}/index.html.
+  //      Without explicit passthrough they fall to the !route → context.next()
+  //      fallback which is functionally correct but adds unnecessary route-match
+  //      overhead on every landing page request. Explicit passthrough here
+  //      short-circuits the ROUTES loop entirely, matching the same pattern used
+  //      for all other static sub-paths (images, fonts, .well-known).
+  //      These paths MUST NOT be in ROUTES — they are plain static files with no
+  //      .enc decryption required. _headers rules for /footing-pro/engineers/*
+  //      apply directly (Cloudflare Pages _headers applies to static responses).
   const STATIC_PASSTHROUGH = /^\/(?:robots\.txt|manifest\.json|favicon\.ico|og-image\.png|images\/.*|footing-pro\/images\/.*|footing-pro\/engineers\/?.*|footing-pro\/offices\/?.*|footing-pro\/students\/?.*|beam-pro\/images\/.*|column-pro\/images\/.*|deflection-pro\/images\/.*|earthquake-pro\/images\/.*|mur-pro\/images\/.*|add-reft-pro\/images\/.*|section-property-pro\/images\/.*|google[0-9a-f]+\.html|sitemap\.xsl|fonts\/.*|\.well-known\/.*|payment(?:\/.*)?|api\/payment\/.*)$/i;
   if (STATIC_PASSTHROUGH.test(path)) return context.next();
 
-  // ── [S1] Sitemap ──────────────────────────────────────────────────────────
+  // ── [S1] Sitemap — explicit handler with clean minimal headers ───────────
+  // The _headers /* catch-all applies Content-Security-Policy to every path
+  // including sitemap.xml (Cloudflare Pages _headers is additive — all matching
+  // rules stack). Googlebot's sitemap parser rejects XML documents that carry
+  // CSP headers, reporting "Couldn't fetch" in Search Console.
+  // Fix: intercept /sitemap.xml here, fetch raw XML from ASSETS, return with
+  // ONLY Content-Type + Cache-Control. No security headers on XML.
   if (path === '/sitemap.xml') {
     try {
       const sitemapResp = await env.ASSETS.fetch(new URL('/sitemap.xml', url.origin));
@@ -619,7 +953,11 @@ export async function onRequest(context) {
     }
   }
 
-  // ── [D1] /download ────────────────────────────────────────────────────────
+  // ── [D1] /download — 302 redirect to activation tool installer ───────────
+  // Google Drive direct-download URL for CivEngSuite Activation Tool (.exe).
+  // 302 (not 301) so the destination can change without browser cache lock-in.
+  // Cache-Control: no-store prevents any CDN or browser from caching this
+  // redirect; every click fetches the freshest destination from this handler.
   if (path === '/download') {
     return new Response(null, {
       status: 302,
@@ -631,16 +969,22 @@ export async function onRequest(context) {
     });
   }
 
-  // ── Route matching ────────────────────────────────────────────────────────
+  // ── Route matching: exact app root paths only ─────────────────────────────
   const route = (path === '' || path === '/' || path === '/index.html')
     ? ROUTES[0]
     : ROUTES.slice(1).find(r => path === r.prefix);
 
+  // Not an encrypted route → serve static file / apply _redirects
   if (!route) return context.next();
 
   const { encFile, baseHref, faviconLinks, pageFilename } = route;
 
-  // ── Markdown negotiation ──────────────────────────────────────────────────
+  // ── Markdown negotiation (RFC 9110 content negotiation) ────────────────────
+  // [A2] Agents sending Accept: text/markdown on the homepage receive a curated
+  // static markdown response. The decrypt pipeline is bypassed entirely —
+  // no CES_DECRYPT_KEY access, no AES-GCM, no XOR, no HTML parsing.
+  // Cache-Control: public — markdown content is not user-specific.
+  // x-markdown-tokens: approximate token count (word count × 1.3 multiplier).
   const acceptHeader = request.headers.get('Accept') || '';
   if (path === '/' && acceptHeader.includes('text/markdown')) {
     const tokenEstimate = String(Math.round(HOMEPAGE_MARKDOWN.split(/\s+/).length * 1.3));
@@ -657,469 +1001,507 @@ export async function onRequest(context) {
     });
   }
 
-  // ── Per-request nonce (shared across all paths below) ─────────────────────
-  const cspNonce = generateNonce();
+  // ── Validate key ───────────────────────────────────────────────────────────
+  const keyHex = (env.CES_DECRYPT_KEY || '').trim();
+  if (!keyHex || keyHex.length !== 64)
+    return errResponse(500, 'Config Error', 'CES_DECRYPT_KEY missing or invalid.');
 
-  // ── Runtime allowed-origins (v14 M3a) ────────────────────────────────────
-  const _canonicalOrigin = `https://${url.host}`;
-  const _extraOrigins = (env.ALLOWED_ORIGINS || '')
-    .split(',').map(s => s.trim()).filter(s => s.length > 0 && /^https?:\/\//.test(s));
-  const _allAllowedOrigins = [_canonicalOrigin, ...new Set(_extraOrigins)];
-  const _allowedOriginsJs  = JSON.stringify(_allAllowedOrigins);
-
-  // ── XOR key (needed by payload handler and copyright bootstrap loader) ────
+  // ── XOR key ────────────────────────────────────────────────────────────────
   const xorHex = (env.CES_XOR_KEY || '').trim();
   const XOR_KEY = (xorHex.length === 2 && /^[0-9A-Fa-f]{2}$/.test(xorHex))
     ? parseInt(xorHex, 16) : 0x5A;
 
-  // ── Shared CSS for response headers ──────────────────────────────────────
-  const CSP_FULL = `${CSP_COMMON}; script-src 'nonce-${cspNonce}' ${CSP_SCRIPT_HASHES}`;
+  // ── Read .enc file via Cloudflare ASSETS binding ───────────────────────────
+  let encData;
+  try {
+    const encResp = await env.ASSETS.fetch(new URL(`/public/${encFile}`, url.origin));
+    if (!encResp.ok) throw new Error(`HTTP ${encResp.status}`);
+    encData = (await encResp.text()).trim();
+  } catch (e) {
+    console.error('[ces:decrypt] File read error:', encFile, e.message);
+    return errResponse(500, 'Server Error', 'A configuration error occurred. Please try again later.');
+  }
+
+  // ── Decrypt ────────────────────────────────────────────────────────────────
+  let html;
+  try {
+    html = await decryptEnc(encData, keyHex);
+  } catch (e) {
+    console.error('[ces:decrypt] Decryption failed for', encFile, '—', e.message);
+    return errResponse(500, 'Server Error', 'A configuration error occurred. Please try again later.');
+  }
+
+  // ── [E1] Top-level safety net ─────────────────────────────────────────────
+  // All post-decryption logic is wrapped in one try-catch so any uncaught
+  // runtime exception (regex edge-case, V8 isolate behaviour, large-string op)
+  // returns a clean 500 instead of Cloudflare Error 1101.
+  // Check Workers & Pages → Functions → Logs to see the exact error.
+  try {
+
+  // ── Inject base href ───────────────────────────────────────────────────────
+  html = html.replace(/(<head[^>]*>)/i, `$1<base href="${baseHref}">`);
+
+  // ── [V4-FAV] Inject favicon links into decrypted HTML if absent ────────────
+  // Human path: document.write(decodedHtml) replaces the entire document,
+  // discarding the bootstrap <head> (which already had faviconLinks). If the
+  // encrypted source HTML has no <link rel="icon"> / <link rel="apple-touch-icon">
+  // the browser tab shows no favicon and iOS shows no touch icon after JS runs.
+  // Fix: if the decrypted HTML lacks a favicon link, inject faviconLinks directly
+  // into its <head> so the final rendered page always has correct icon references.
+  // Guard prevents duplication if the source already declares its own icons.
+  if (faviconLinks && !/<link[^>]+rel=["'](?:icon|shortcut icon|apple-touch-icon)["']/i.test(html)) {
+    html = html.replace(/(<\/head>)/i, `${faviconLinks}$1`);
+  }
+
+  // ── Per-request nonce ──────────────────────────────────────────────────────
+  const cspNonce = generateNonce();
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // BOT PATH — decrypted HTML served to crawlers
-  // [N4] Decryption now runs ONLY here (and in the payload handler below).
+  // BOT PATH — Ultra-clean, lightweight HTML served to crawlers
+  // [SECURITY] Nothing in this block affects the human path. The human path
+  // receives the fully obfuscated XOR bootstrap with all protections active.
   // ═══════════════════════════════════════════════════════════════════════════
   const ua = request.headers.get('User-Agent') || '';
   if (BOT_RE.test(ua)) {
-    const keyHex = (env.CES_DECRYPT_KEY || '').trim();
-    if (!keyHex || keyHex.length !== 64)
-      return errResponse(500, 'Config Error', 'CES_DECRYPT_KEY missing or invalid.');
+    const host = url.host;
+    let botHtml = html;
 
-    let encData;
-    try {
-      const encResp = await env.ASSETS.fetch(new URL(`/public/${encFile}`, url.origin));
-      if (!encResp.ok) throw new Error(`HTTP ${encResp.status}`);
-      encData = (await encResp.text()).trim();
-    } catch (e) {
-      console.error('[ces:bot] File read error:', encFile, e.message);
-      return errResponse(500, 'Server Error', 'A configuration error occurred. Please try again later.');
-    }
+    // Fix any noindex directives so crawlers can index properly
+    botHtml = botHtml.replace(
+      /<meta\s+name="robots"\s+content="noindex[^"]*"/gi,
+      '<meta name="robots" content="index, follow"'
+    );
 
-    let html;
-    try {
-      html = await decryptEnc(encData, keyHex);
-    } catch (e) {
-      console.error('[ces:bot] Decryption failed for', encFile, '—', e.message);
-      return errResponse(500, 'Server Error', 'A configuration error occurred. Please try again later.');
-    }
+    // Fix og:image / twitter:image host references
+    botHtml = botHtml.replace(
+      /(<meta\s+(?:property|name)="(?:og:image|og:image:secure_url|twitter:image)"\s+content=")https:\/\/[^/]+(\/[^"]*")/gi,
+      `$1https://${host}$2`
+    );
 
-    try {
-      html = html.replace(/(<head[^>]*>)/i, `$1<base href="${baseHref}">`);
-      if (faviconLinks && !/<link[^>]+rel=["'](?:icon|shortcut icon|apple-touch-icon)["']/i.test(html)) {
-        html = html.replace(/(<\/head>)/i, `${faviconLinks}$1`);
+    // [F3] FIX: /footing-pro/og-image.png → /footing-pro/images/og-image.png
+    botHtml = botHtml.replace(
+      /(https?:\/\/[^"']+)\/footing-pro\/og-image\.png/gi,
+      '$1/footing-pro/images/og-image.png'
+    );
+
+    // [B8] FIX: og:image / twitter:image paths missing /images/ prefix.
+    // The encrypted source HTML references /og-image.png (root-level, 404).
+    // The static file is served at /images/og-image.png (from public/images/).
+    // After the host-rewrite above, URLs become https://host/og-image.png — still 404.
+    // This pattern matches any og:image URL ending in /og-image.png that does NOT
+    // already have /images/ or /footing-pro/images/ in the path, and inserts /images/.
+    // Scope: homepage and all sub-app pages that reference the shared og-image asset.
+    botHtml = botHtml.replace(
+      /(content="https?:\/\/[^"]+\/)og-image\.png"/gi,
+      (match, prefix) => {
+        // Already correct paths — leave untouched
+        if (/\/images\//.test(prefix)) return match;
+        return `${prefix}images/og-image.png"`;
       }
+    );
 
-      const host = url.host;
-      let botHtml = html;
-
+    // [V2-BOT] WhatsApp and Telegram scrapers match BOT_RE and receive bot-path
+    // (decrypted) HTML — NOT the bootstrap shell. The bootstrap shell ogMetaBlock
+    // (v7 [V2]) added og:image:secure_url + og:image:type for non-bot UA clients
+    // (iMessage iOS). But bot-path HTML originates from the encrypted source which
+    // may not have these tags. WhatsApp's image-fetch pipeline requires BOTH
+    // og:image:secure_url (the HTTPS alias) and og:image:type to render the image
+    // thumbnail in chat previews. Without them, WhatsApp shows only text + domain.
+    // Fix: if og:image:secure_url is absent from the bot HTML, extract the already-
+    // rewritten og:image content value and inject the four companion meta tags
+    // immediately after the og:image tag.
+    if (!/<meta[^>]+property="og:image:secure_url"/i.test(botHtml)) {
       botHtml = botHtml.replace(
-        /<meta\s+name="robots"\s+content="noindex[^"]*"/gi,
-        '<meta name="robots" content="index, follow"'
-      );
-      botHtml = botHtml.replace(
-        /(<meta\s+(?:property|name)="(?:og:image|og:image:secure_url|twitter:image)"\s+content=")https:\/\/[^/]+(\/[^"]*")/gi,
-        `$1https://${host}$2`
-      );
-      botHtml = botHtml.replace(
-        /(https?:\/\/[^"']+)\/footing-pro\/og-image\.png/gi,
-        '$1/footing-pro/images/og-image.png'
-      );
-      botHtml = botHtml.replace(
-        /(content="https?:\/\/[^"]+\/)og-image\.png"/gi,
-        (match, prefix) => {
-          if (/\/images\//.test(prefix)) return match;
-          return `${prefix}images/og-image.png"`;
+        /(<meta[^>]+property="og:image"[^>]*\/?>)/i,
+        (m) => {
+          const urlMatch = m.match(/content="([^"]+)"/i);
+          if (!urlMatch) return m;
+          const imgUrl = urlMatch[1];
+          return m
+            + `<meta property="og:image:secure_url" content="${imgUrl}">`
+            + `<meta property="og:image:type" content="image/png">`
+            + `<meta property="og:image:width" content="1200">`
+            + `<meta property="og:image:height" content="630">`;
         }
       );
-      if (!/<meta[^>]+property="og:image:secure_url"/i.test(botHtml)) {
-        botHtml = botHtml.replace(
-          /(<meta[^>]+property="og:image"[^>]*\/?>)/i,
-          (m) => {
-            const urlMatch = m.match(/content="([^"]+)"/i);
-            if (!urlMatch) return m;
-            const imgUrl = urlMatch[1];
-            return m
-              + `<meta property="og:image:secure_url" content="${imgUrl}">`
-              + `<meta property="og:image:type" content="image/png">`
-              + `<meta property="og:image:width" content="1200">`
-              + `<meta property="og:image:height" content="630">`;
-          }
-        );
-      }
-      botHtml = botHtml.replace(
-        /(<noscript>)\s*<style>[^<]*?body\s*\{[^}]*?display\s*:\s*none[^}]*?\}[^<]*?<\/style>/gi,
-        '$1'
-      );
-      botHtml = stripProtectionScripts(botHtml);
-      botHtml = minifyBotCSS(botHtml);
-      botHtml = injectNonces(botHtml, cspNonce);
-      botHtml = botHtml.replace(/<\/body>/i,
-        injectNonces(buildWebMCPScript(), cspNonce) + '</body>');
-
-      return new Response(botHtml, { status: 200, headers: {
-        'Content-Type':            'text/html; charset=utf-8',
-        'Cache-Control':           'private, max-age=3600, must-revalidate',
-        'Vary':                    route.prefix === '/' ? 'User-Agent, Accept' : 'User-Agent',
-        'X-Robots-Tag':            'index, follow',
-        'Content-Security-Policy': CSP_FULL,
-        'Link':                    HOMEPAGE_LINK_HEADER,
-        ...SHARED_SECURITY_HEADERS,
-      }});
-
-    } catch (e) {
-      console.error('[ces:bot] Runtime exception:', e && e.message, e && e.stack);
-      return errResponse(500, 'Server Error', 'An internal error occurred. Please refresh or try again.');
-    }
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // [N2] PAYLOAD FETCH — Same-origin programmatic XHR from bootstrap loader JS.
-  //
-  // THREE INDEPENDENT GUARDS (all must pass):
-  //   (a) X-CES-Context: payload   — our custom marker (unknown to external callers)
-  //   (b) Sec-Fetch-Dest: empty    — only XHR/fetch() sets this; native Download = 'document'
-  //   (c) Sec-Fetch-Site: same-origin — request originates from civilengsuite.pages.dev
-  //
-  // Sec-Fetch-* are "forbidden request headers" — JS cannot override them.
-  // Chrome Android's Download button: Sec-Fetch-Dest=document → guard (b) fails → copyright.
-  // file:// opened bootstrap JS trying XHR: Sec-Fetch-Site=cross-site → guard (c) fails.
-  // CORS also blocks the response at the browser level for cross-origin XHR independently.
-  // ═══════════════════════════════════════════════════════════════════════════
-  const isPayloadFetch =
-    request.headers.get('X-CES-Context')  === 'payload'      // (a)
-    && request.headers.get('Sec-Fetch-Dest')  === 'empty'     // (b)
-    && request.headers.get('Sec-Fetch-Site')  === 'same-origin'; // (c)
-
-  if (isPayloadFetch) {
-    const keyHex = (env.CES_DECRYPT_KEY || '').trim();
-    if (!keyHex || keyHex.length !== 64) {
-      return new Response('{"error":"config"}', { status: 500, headers: {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Cache-Control': 'no-store',
-        ...SHARED_SECURITY_HEADERS,
-      }});
     }
 
-    let encData;
-    try {
-      const encResp = await env.ASSETS.fetch(new URL(`/public/${encFile}`, url.origin));
-      if (!encResp.ok) throw new Error(`HTTP ${encResp.status}`);
-      encData = (await encResp.text()).trim();
-    } catch (e) {
-      console.error('[ces:payload] File read error:', encFile, e.message);
-      return new Response('{"error":"file"}', { status: 500, headers: {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Cache-Control': 'no-store',
-        ...SHARED_SECURITY_HEADERS,
-      }});
-    }
+    // [F2] FIX: Strip body-hiding noscript style
+    botHtml = botHtml.replace(
+      /(<noscript>)\s*<style>[^<]*?body\s*\{[^}]*?display\s*:\s*none[^}]*?\}[^<]*?<\/style>/gi,
+      '$1'
+    );
 
-    let html;
-    try {
-      html = await decryptEnc(encData, keyHex);
-    } catch (e) {
-      console.error('[ces:payload] Decryption failed for', encFile, '—', e.message);
-      return new Response('{"error":"decrypt"}', { status: 500, headers: {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Cache-Control': 'no-store',
-        ...SHARED_SECURITY_HEADERS,
-      }});
-    }
+    // [B1–B5, B7] Strip all inline protection scripts and inline event handlers.
+    botHtml = stripProtectionScripts(botHtml);
 
-    try {
-      // Inject base href and favicons
-      html = html.replace(/(<head[^>]*>)/i, `$1<base href="${baseHref}">`);
-      if (faviconLinks && !/<link[^>]+rel=["'](?:icon|shortcut icon|apple-touch-icon)["']/i.test(html)) {
-        html = html.replace(/(<\/head>)/i, `${faviconLinks}$1`);
-      }
+    // [B6] Minify all inline <style> blocks.
+    botHtml = minifyBotCSS(botHtml);
 
-      // [N3] Client-nonce echo: bootstrap JS sends its own CSP nonce in X-CES-Nonce.
-      // We stamp decoded HTML scripts with this echoed nonce so they match the
-      // bootstrap response's CSP header (script-src 'nonce-{cspNonce}').
-      // Regex validates nonce format: URL-safe base64, 16–64 chars.
-      const clientNonce = request.headers.get('X-CES-Nonce') || '';
-      const payloadNonce = /^[A-Za-z0-9_\-]{16,64}$/.test(clientNonce) ? clientNonce : cspNonce;
+    // Inject nonces into remaining scripts (JSON-LD, translation, navigation)
+    botHtml = injectNonces(botHtml, cspNonce);
 
-      // Inject protection bundle (Ctrl+S intercept, DevTools, copy/cut/paste)
-      const bundle = `<script nonce="${payloadNonce}">${buildProtectionBundle(pageFilename)}</script>`;
-      html = html.replace(/<\/body>/i, bundle + '</body>');
+    // [A3] Inject WebMCP tools before </body> — visible to AI agents on page scan.
+    // injectNonces stamps the nonce onto the WebMCP <script> tag as well.
+    botHtml = botHtml.replace(/<\/body>/i,
+      injectNonces(buildWebMCPScript(), cspNonce) + '</body>');
 
-      // Minify (HTML comments + inter-tag whitespace)
-      html = html
-        .replace(/<!--[\s\S]*?-->/g, '')
-        .replace(/>\s+</g, '><')
-        .replace(/\s{2,}/g, ' ')
-        .trim();
-
-      // [M2] Decoded-HTML origin guard (Scenario B: Chrome saves rendered DOM)
-      // Injected right after <meta charset="UTF-8">, before injectNonces.
-      // Protects the decoded HTML if it is ever saved to disk and opened as file://.
-      const _sharedCrRP    = route.prefix === '/' ? '' : route.prefix;
-      const _sharedCrTM    = html.match(/<title>([^<]*)<\/title>/i);
-      const _sharedCrPT    = escHtml(_sharedCrTM ? _sharedCrTM[1] : (route.ogTitle || 'Civil Engineering Suite'));
-      const _sharedCrHtml  = buildCopyrightHtml(_sharedCrPT, _sharedCrRP, _canonicalOrigin);
-      const _sharedCrB64   = u8ToB64(new TextEncoder().encode(_sharedCrHtml));
-
-      const _m2Code =
-          `(function(){'use strict';`
-        + `var _aos=${_allowedOriginsJs};`
-        + `var _o=(typeof window!=='undefined')?window.location.origin:'';`
-        + `var _dev=/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(_o);`
-        + `if(_aos.indexOf(_o)===-1&&!_dev){`
-        + `var _b='${_sharedCrB64}';`
-        + `var _n=atob(_b);var _ba=new Uint8Array(_n.length);`
-        + `for(var i=0;i<_n.length;i++)_ba[i]=_n.charCodeAt(i);`
-        + `var _cr=new TextDecoder('utf-8').decode(_ba);`
-        + `try{document.open();document.write(_cr);document.close();}`
-        + `catch(e){window.location.replace(_aos[0]+'${_sharedCrRP}/');}`
-        + `}`
-        + `})();`;
-      html = html.replace(/(<meta charset="UTF-8">)/i, `$1<script>${_m2Code}<\/script>`);
-
-      // Stamp nonces + minify CSS
-      html = injectNonces(html, payloadNonce);
-      html = minifyBotCSS(html);
-
-      // XOR + base64 encode
-      const raw   = new TextEncoder().encode(html);
-      const xored = new Uint8Array(raw.length);
-      for (let i = 0; i < raw.length; i++) xored[i] = raw[i] ^ XOR_KEY;
-      const payload = u8ToB64(xored);
-
-      // Return JSON payload. XOR key is intentionally NOT in the response —
-      // it is embedded in the bootstrap loader script (_xk variable) so it
-      // stays in the bootstrap HTML that the user already has.
-      return new Response(JSON.stringify({ p: payload }), { status: 200, headers: {
-        'Content-Type':   'application/json; charset=utf-8',
-        'Cache-Control':  'no-store',
-        'Vary':           'X-CES-Context, Sec-Fetch-Dest',
-        ...SHARED_SECURITY_HEADERS,
-      }});
-
-    } catch (e) {
-      console.error('[ces:payload] Processing error:', e && e.message, e && e.stack);
-      return new Response('{"error":"processing"}', { status: 500, headers: {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Cache-Control': 'no-store',
-        ...SHARED_SECURITY_HEADERS,
-      }});
-    }
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // [N1] COPYRIGHT BOOTSTRAP — Default response for ALL human browsers.
-  //
-  // WHAT CHANGED FROM v13/v14:
-  //   Before: Bootstrap = copyright guard + XOR payload blob (~333 KB).
-  //           Downloaded file contained the full decoded HTML as XOR+base64.
-  //           M1a/M1c guards were supposed to block file:// opens but
-  //           Chrome Android's document.open() parser-abort behaviour in
-  //           file:// context was unreliable — real page rendered on open.
-  //
-  //   Now:    Bootstrap = copyright page HTML only (~2 KB, no payload).
-  //           Downloaded file IS the copyright page. Nothing to decode.
-  //           JS origin check → if authorized, XHR fetches payload (above).
-  //           If unauthorized (file:// or different domain): copyright stays.
-  //           CORS independently blocks any XHR from file:// to https://.
-  //
-  // RESULT: Downloaded file opened = copyright page, always, unconditionally.
-  // Text editor opened = copyright HTML source text, no engineering content.
-  // ═══════════════════════════════════════════════════════════════════════════
-  try {
-
-    const _sharedCrRP    = route.prefix === '/' ? '' : route.prefix;
-    const _crUrl         = `${_canonicalOrigin}${_sharedCrRP}/`;
-    const _crLabel       = `${url.host}${_sharedCrRP}/`;
-    const pageTitle      = route.ogTitle || 'Civil Engineering Suite';
-
-    // OG meta block (social previews: iMessage, WhatsApp bootstrap shell)
-    const ogImageAbsolute = `https://${url.host}${route.ogImage}`;
-    const ogMetaBlock = route.ogTitle ? [
-      `<meta property="og:type" content="website">`,
-      `<meta property="og:site_name" content="Civil Engineering Suite">`,
-      `<meta property="og:title" content="${escHtml(route.ogTitle)}">`,
-      `<meta property="og:description" content="${escHtml(route.ogDescription)}">`,
-      `<meta property="og:url" content="${escHtml(route.ogUrl)}">`,
-      `<meta property="og:image" content="${escHtml(ogImageAbsolute)}">`,
-      `<meta property="og:image:secure_url" content="${escHtml(ogImageAbsolute)}">`,
-      `<meta property="og:image:type" content="image/png">`,
-      `<meta property="og:image:width" content="1200">`,
-      `<meta property="og:image:height" content="630">`,
-      `<meta property="og:image:alt" content="${escHtml(route.ogTitle)}">`,
-      `<meta name="twitter:card" content="summary_large_image">`,
-      `<meta name="twitter:title" content="${escHtml(route.ogTitle)}">`,
-      `<meta name="twitter:description" content="${escHtml(route.ogDescription)}">`,
-      `<meta name="twitter:image" content="${escHtml(ogImageAbsolute)}">`,
-    ].join('') : '';
-
-    // [PERF] Route-specific LCP preload (footing-pro hero image)
-    const lcpPreload = route.prefix === '/footing-pro'
-      ? '<link rel="preload" as="image" href="/footing-pro/images/hero-bg.avif"'
-        + ' imagesrcset="/footing-pro/images/hero-bg.avif 1x,/footing-pro/images/hero-bg.webp 1x"'
-        + ' imagesizes="100vw" fetchpriority="high">'
-      : '';
-
-    // [A6] WebMCP: fires for any JS-executing client before content loads.
-    // Feature-detect guard makes it a no-op in browsers without modelContext.
-    const webMCPBootstrap = `<script nonce="${cspNonce}">`
-      + `(function(){`
-      + `if(!navigator.modelContext||typeof navigator.modelContext.provideContext!=='function')return;`
-      + `try{navigator.modelContext.provideContext({`
-      + `name:'civil-engineering-suite',`
-      + `description:'Civil Engineering Suite \u2014 Free ACI 318-19 structural engineering tools by Eng. Aymn Asi.',`
-      + `tools:[`
-      + `{name:'open_footing_pro',description:'Footing Pro v.2026 \u2014 ACI 318-19 combined footing design, 17 modules.',`
-      + `inputSchema:{type:'object',properties:{},required:[]},`
-      + `execute:function(){window.location.href='/footing-pro/';return{success:true,url:'/footing-pro/'};}},`
-      + `{name:'open_section_property_pro',description:'Section Property Pro \u2014 area, centroid, Ix/Iy, section modulus, radius of gyration.',`
-      + `inputSchema:{type:'object',properties:{},required:[]},`
-      + `execute:function(){window.location.href='/section-property-pro/';return{success:true,url:'/section-property-pro/'};}},`
-      + `{name:'get_suite_info',description:'Returns metadata about all Civil Engineering Suite tools and agent discovery endpoints.',`
-      + `inputSchema:{type:'object',properties:{},required:[]},`
-      + `execute:function(){return{`
-      + `suite:'Civil Engineering Suite',author:'Eng. Aymn Asi',standard:'ACI 318-19',`
-      + `tools:[`
-      + `{name:'Footing Pro v.2026',url:'/footing-pro/',status:'live',modules:17},`
-      + `{name:'Section Property Pro',url:'/section-property-pro/',status:'live'},`
-      + `{name:'Beam Pro',url:'/beam-pro/',status:'coming-2026'},`
-      + `{name:'Column Pro',url:'/column-pro/',status:'coming-2026'},`
-      + `{name:'Deflection Pro',url:'/deflection-pro/',status:'coming-2026'},`
-      + `{name:'Earthquake Pro',url:'/earthquake-pro/',status:'coming-2026'},`
-      + `{name:'Mur Pro',url:'/mur-pro/',status:'coming-2026'},`
-      + `{name:'Add Reft Pro',url:'/add-reft-pro/',status:'coming-2026'}`
-      + `],`
-      + `agentDiscovery:{`
-      + `apiCatalog:'/.well-known/api-catalog',`
-      + `mcpServerCard:'/.well-known/mcp/server-card.json',`
-      + `agentSkills:'/.well-known/agent-skills/index.json',`
-      + `oauthServer:'/.well-known/oauth-authorization-server',`
-      + `oauthResource:'/.well-known/oauth-protected-resource'`
-      + `}};}}]});}catch(e){}})();`
-      + `\u003c/script>`;
-
-    // [N1] Copyright bootstrap loader:
-    // 1. Checks window.location.origin against allowed origins.
-    // 2. Unauthorized (file://, etc.): exits immediately — copyright stays visible.
-    // 3. Authorized: shows loading indicator, fires XHR with three custom markers.
-    // 4. XHR success: XOR-decode payload → document.open()/write()/close() → real page.
-    // 5. XHR error (CORS block, network failure): loading indicator shows error message.
-    //
-    // _xk (XOR key) is embedded here in the bootstrap JS, NOT in the JSON payload.
-    // This keeps the same security posture as v13/v14 — key visible to anyone who
-    // reads the bootstrap source, same as before.
-    const bootstrapLoaderScript =
-      `<script nonce="${cspNonce}">`
-      + `(function(){'use strict';`
-      // Origin check — same three-guard logic as M1a/M1c in prior versions
-      + `var _aos=${_allowedOriginsJs};`
-      + `var _o=window.location.origin;`
-      + `var _dev=/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(_o);`
-      // Unauthorized: copyright stays, JS exits — nothing further happens
-      + `if(_aos.indexOf(_o)===-1&&!_dev)return;`
-      // Authorized: reveal loading indicator
-      + `var _ld=document.getElementById('_ces_ld');if(_ld)_ld.style.display='block';`
-      + `var _cr=document.getElementById('_ces_cr');if(_cr)_cr.style.display='none';`
-      // Nonce to echo back so decoded HTML scripts match this response's CSP
-      + `var _pn='${cspNonce}';`
-      // XOR key for decoding the payload
-      + `var _xk=${XOR_KEY};`
-      // Payload fetch — same-origin XHR with three custom headers
-      + `var _x=new XMLHttpRequest();`
-      + `_x.open('GET',window.location.href,true);`
-      + `_x.setRequestHeader('X-CES-Context','payload');`     // marker (a)
-      + `_x.setRequestHeader('X-CES-Nonce',_pn);`            // nonce echo [N3]
-      // Sec-Fetch-* are set by the browser automatically — we cannot set them,
-      // but the XHR context guarantees Sec-Fetch-Dest=empty, Sec-Fetch-Site=same-origin
-      + `_x.responseType='text';`
-      + `_x.timeout=30000;`
-      + `_x.onload=function(){`
-      + `if(_x.status!==200){`
-      + `if(_ld)_ld.textContent='Error loading content. Please refresh.';`
-      + `if(_cr)_cr.style.display='block';`
-      + `return;}`
-      + `try{`
-      + `var _d=JSON.parse(_x.responseText);`
-      + `var _b=atob(_d.p);`
-      + `var _u=new Uint8Array(_b.length);`
-      + `for(var i=0;i<_b.length;i++)_u[i]=_b.charCodeAt(i)^_xk;`
-      + `var _h=new TextDecoder('utf-8').decode(_u);`
-      + `document.open();document.write(_h);document.close();`
-      + `}catch(_e){`
-      + `if(_ld)_ld.textContent='Error loading content. Please refresh.';`
-      + `if(_cr)_cr.style.display='block';`
-      + `}};`
-      + `_x.onerror=_x.ontimeout=function(){`
-      + `if(_ld)_ld.textContent='Error loading content. Please refresh.';`
-      + `if(_cr)_cr.style.display='block';`
-      + `};`
-      + `_x.send();`
-      + `})();`
-      + `\u003c/script>`;
-
-    // Copyright body: visible by default (no JS required), hidden when loading
-    // _ces_cr: copyright card — hidden when authorized JS fetch starts
-    // _ces_ld: loading/error indicator — shown when authorized JS fetch starts
-    const copyrightBody =
-      `<style>`
-      + `*{box-sizing:border-box;margin:0;padding:0}`
-      + `body{background:#0A1A2E;display:flex;align-items:center;justify-content:center;`
-      + `min-height:100vh;font-family:sans-serif;text-align:center;padding:24px}`
-      + `.ces-card{max-width:440px}`
-      + `.ces-icon{font-size:3.5rem;margin-bottom:18px}`
-      + `.ces-title{color:#C17B1A;font-size:1.35rem;font-weight:700;margin-bottom:12px;line-height:1.4}`
-      + `.ces-msg{color:#8AA3C7;font-size:0.9rem;line-height:1.8;margin-bottom:22px}`
-      + `.ces-link{color:#C17B1A;font-size:0.88rem;text-decoration:none;display:block;margin-top:8px}`
-      + `.ces-link:hover{text-decoration:underline}`
-      + `.ces-loading{color:#8AA3C7;font-size:0.85rem;margin-top:16px;display:none}`
-      + `<\/style>`
-      + `<noscript><style>body{display:flex!important}<\/style><\/noscript>`
-      + `<div class="ces-card" id="_ces_cr">`
-      + `<div class="ces-icon">&#x1F512;<\/div>`
-      + `<div class="ces-title">&#169; Civil Engineering Suite<\/div>`
-      + `<div class="ces-msg">Protected Content.<br>Unauthorized copying is prohibited.<\/div>`
-      + `<a class="ces-link" href="${escHtml(_crUrl)}">${escHtml(_crLabel)}<\/a>`
-      + `<\/div>`
-      + `<div class="ces-loading" id="_ces_ld">Loading\u2026<\/div>`;
-
-    const bootstrap =
-      `<!DOCTYPE html><html><head>`
-      + `<meta charset="UTF-8">`
-      + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
-      + (route.ogDescription ? `<meta name="description" content="${escHtml(route.ogDescription)}">` : '')
-      + lcpPreload
-      + `<link rel="preload" href="/fonts/inter-400.woff2" as="font" type="font/woff2" crossorigin>`
-      + `<link rel="preload" href="/fonts/inter-700.woff2" as="font" type="font/woff2" crossorigin>`
-      + `<link rel="preload" href="/fonts/playfair-700.woff2" as="font" type="font/woff2" crossorigin>`
-      + `<link rel="preload" href="/fonts/cairo-700.woff2" as="font" type="font/woff2" crossorigin>`
-      + `<link rel="preload" href="/fonts/cairo-400.woff2" as="font" type="font/woff2" crossorigin>`
-      + `<link rel="preload" href="/fonts/inter-500.woff2" as="font" type="font/woff2" crossorigin>`
-      + `<link rel="preload" href="/fonts/inter-600.woff2" as="font" type="font/woff2" crossorigin>`
-      + `<link rel="preload" href="/fonts/playfair-400.woff2" as="font" type="font/woff2" crossorigin>`
-      + `<link rel="preload" href="/fonts/playfair-900.woff2" as="font" type="font/woff2" crossorigin>`
-      + `<link rel="preload" href="/fonts/jetbrains-mono-400.woff2" as="font" type="font/woff2" crossorigin>`
-      + `<link rel="preload" href="/fonts/jetbrains-mono-600.woff2" as="font" type="font/woff2" crossorigin>`
-      + `<title>${escHtml(pageTitle)}</title>`
-      + ogMetaBlock
-      + faviconLinks
-      + `</head><body>`
-      + copyrightBody
-      + webMCPBootstrap
-      + bootstrapLoaderScript
-      + `</body></html>`;
-
-    return new Response(bootstrap, { status: 200, headers: {
+    return new Response(botHtml, { status: 200, headers: {
       'Content-Type':            'text/html; charset=utf-8',
-      'Cache-Control':           'no-store',
-      'Content-Security-Policy': CSP_FULL,
-      // [A1] RFC 8288 Link header on homepage
-      ...(route.prefix === '/' ? {
-        'Link': HOMEPAGE_LINK_HEADER,
-        'Vary': 'Accept',
-      } : {}),
+      // [F5] private prevents CDN from caching decrypted HTML and serving to humans
+      'Cache-Control':           'private, max-age=3600, must-revalidate',
+      // [F4] Vary: User-Agent prevents CDN merging bot/human caches.
+      // [A4] Vary: Accept added on homepage so markdown-negotiated cache is separate.
+      'Vary':                    route.prefix === '/' ? 'User-Agent, Accept' : 'User-Agent',
+      'X-Robots-Tag':            'index, follow',
+      'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ=' 'unsafe-hashes' 'sha256-nAiI7XK5Mt/SgNQUZPqTuikvwxIVHV3se6mHGQue+88=' 'sha256-Jag+ZHPii6iUmMQWlnwms/mnjM8gRPTOJA2KIyTQQRk=' 'sha256-uLUdJIdD3+8SpL4nHNFN9YmyHRRmrseSQKwzj3ECn2I=' 'sha256-akyHNuxwVvvLQ11iHoDrpca0qH3TU3LfGbtdQ8kNdwI=' 'sha256-UOhLo4NRrWG89b3vpgtU0dc/C8aWLS+MQ2Lf9vW/4Fk=' 'sha256-jHF5hTIlMDyGZRAsNK0HO/WFYrwPvI2I1q0o1xKKB6I=' 'sha256-wflfhEeJWTAjAK0hnm9/OICxAQ8fVnj3168JrJ/m91k=' 'sha256-oTzV9+pQ7IAxC4NoAc7dH4+0Is4KloZ9u7cMJC7UDrE=' 'sha256-bTpi/7w0Cd8ihAWpwcZJIdz49sMq0d73fWWDzp5Ju2Q='`,
+      // [A1] Link header on ALL bot responses — agents crawling any tool page
+      // discover the full agent catalog without needing to hit the homepage first.
+      'Link':                    HOMEPAGE_LINK_HEADER,
       ...SHARED_SECURITY_HEADERS,
     }});
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // HUMAN PATH — Full protection active
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // Inject protection bundle at end of body
+  const bundle = `<script nonce="${cspNonce}">${buildProtectionBundle(pageFilename)}</script>`;
+  html = html.replace(/<\/body>/i, bundle + '</body>');
+
+  // Minify (HTML comments, inter-tag whitespace — does NOT remove newlines so
+  // inline JS // comments in marketing pages are preserved correctly)
+  html = html
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/>\s+</g, '><')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
+  // ── [M2] Decoded-HTML origin guard — Scenario B coverage ─────────────────
+  // Injected HERE (after minify, BEFORE injectNonces) so the <script> tag
+  // receives a nonce from injectNonces and executes in the decoded-HTML CSP
+  // context (which inherits the bootstrap response's 'nonce-X' policy).
+  //
+  // Scenario B: Chrome Android saves the rendered DOM (post document.write)
+  // rather than the bootstrap HTTP response. The saved file IS the decoded
+  // real HTML. When opened as file://, this guard fires in <head> before any
+  // content renders and replaces the document with the copyright page.
+  //
+  // On legitimate access (origin === 'https://civilengsuite.pages.dev'):
+  //   guard check fails → no-op → page renders normally. ✓
+  // On file:// open (origin === 'null') or unauthorized host:
+  //   guard fires → copyright shown. ✓
+  //
+  // ── [M3] v14 — Runtime allowed-origins list ──────────────────────────────
+  // ROOT CAUSE: gsuite.pages.dev is a second Cloudflare Pages project (the
+  // default *.pages.dev alias). Before v14, all 3 guard layers (M1a, M1c, M2)
+  // hardcoded 'https://civilengsuite.pages.dev' as the sole allowed origin.
+  // When Chrome Android's native Download button made a GET to gsuite.pages.dev,
+  // the bootstrap it received had M1a checking for the canonical domain — but
+  // because the download came from gsuite.pages.dev, window.location.origin on
+  // re-open would be 'null' (file://) which M1a DOES block correctly.
+  //
+  // The actual bypass: gsuite.pages.dev has NO Pages Function deployed, so it
+  // serves raw/unencrypted static files directly from Cloudflare's CDN edge
+  // without this worker running at all. The fix has two parts:
+  //   1. gsuite.pages.dev must redirect all traffic to civilengsuite.pages.dev
+  //      (deploy functions/[[path]].js to that project — see gsuite_redirect_worker.js)
+  //   2. All 3 origin guards now use a runtime-computed _aos array (not a hardcoded
+  //      string) so the canonical domain is always derived from the live request host,
+  //      and custom domains added later require only an env-var change, not a redeploy.
+  //
+  // ALLOWED_ORIGINS env var (optional): comma-separated additional origins.
+  //   Example: "https://civilengsuite.com,https://www.civilengsuite.com"
+  //   If absent, only https://{request host} is allowed (plus localhost).
+  // [M3b-fix] _canonicalOrigin uses _canonicalHostname (from CANONICAL_HOST env var),
+  // NOT url.host. If [[path]].js were deployed to gsuite.pages.dev without the
+  // redirect gate, url.host would be 'gsuite.pages.dev' — making gsuite.pages.dev
+  // the allowed origin in all 3 guards (M1a, M1c, M2), completely neutralizing
+  // protection. With the redirect gate above, url.hostname IS always the canonical
+  // host by this point, but using _canonicalHostname is semantically correct and
+  // safe regardless. _allowedHostsRaw reused from the redirect gate block above.
+  //   If absent, only https://{CANONICAL_HOST} is allowed (plus localhost).
+  const _canonicalOrigin = `https://${_canonicalHostname}`;
+  const _extraOrigins = _allowedHostsRaw.filter(o => o !== _canonicalOrigin);
+  const _allAllowedOrigins = [_canonicalOrigin, ...new Set(_extraOrigins)];
+  // Values are safe: _canonicalHostname from CANONICAL_HOST env var,
+  // _allowedHostsRaw from ALLOWED_ORIGINS env var (both operator-controlled).
+  const _allowedOriginsJs = JSON.stringify(_allAllowedOrigins);
+
+  // _sharedCrB64 is hoisted here and reused for M1 (bootstrapOriginGuard
+  // and bootstrapCopyrightBody) later — copyright page computed only once.
+  const _sharedCrRP    = route.prefix === '/' ? '' : route.prefix;
+  const _sharedCrTM    = html.match(/<title>([^<]*)<\/title>/i);
+  const _sharedCrPT    = escHtml(_sharedCrTM ? _sharedCrTM[1] : (route.ogTitle || 'Civil Engineering Suite'));
+  const _sharedCrUrl   = `${_canonicalOrigin}${_sharedCrRP}/`;
+  const _sharedCrLabel = `${_canonicalHostname}${_sharedCrRP}/`;
+  const _sharedCrHtml  =
+    `<!DOCTYPE html><html><head><meta charset="UTF-8">`
+    + `<meta name="viewport" content="width=device-width,initial-scale=1">`
+    + `<title>\u00A9 Protected \u2014 ${_sharedCrPT}<\/title>`
+    + `<style>*{box-sizing:border-box;margin:0;padding:0}`
+    + `body{background:#0A1A2E;display:flex;align-items:center;justify-content:center;`
+    + `min-height:100vh;font-family:sans-serif;text-align:center;padding:24px}`
+    + `.card{max-width:440px}.icon{font-size:3.5rem;margin-bottom:18px}`
+    + `.title{color:#C17B1A;font-size:1.35rem;font-weight:700;margin-bottom:12px;line-height:1.4}`
+    + `.msg{color:#8AA3C7;font-size:0.9rem;line-height:1.8;margin-bottom:22px}`
+    + `a{color:#C17B1A;font-size:0.88rem;text-decoration:none}`
+    + `a:hover{text-decoration:underline}<\/style><\/head><body>`
+    + `<div class="card"><div class="icon">&#x1F512;<\/div>`
+    + `<div class="title">&#169; Eng. Aymn Asi &#8212; ${_sharedCrPT}<\/div>`
+    + `<div class="msg">Unauthorized copying is prohibited.<br>`
+    + `This page must be accessed from the official website.<\/div>`
+    + `<a href="${_sharedCrUrl}">${_sharedCrLabel}<\/a>`
+    + `<\/div><\/body><\/html>`;
+  const _sharedCrB64 = u8ToB64(new TextEncoder().encode(_sharedCrHtml));
+  const _m2Code =
+      `(function(){'use strict';`
+    + `var _aos=${_allowedOriginsJs};`
+    + `var _o=(typeof window!=='undefined')?window.location.origin:'';`
+    + `var _dev=/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(_o);`
+    + `if(_aos.indexOf(_o)===-1&&!_dev){`
+    + `var _b='${_sharedCrB64}';`
+    + `var _n=atob(_b);var _ba=new Uint8Array(_n.length);`
+    + `for(var i=0;i<_n.length;i++)_ba[i]=_n.charCodeAt(i);`
+    + `var _cr=new TextDecoder('utf-8').decode(_ba);`
+    + `var _m2ok=false;`
+    + `try{document.open();document.write(_cr);document.close();_m2ok=true;}catch(_m2e){}`
+    + `if(!_m2ok){`
+    + `try{(document.head||document.documentElement).insertAdjacentHTML('beforeend','<style>html,body{display:none!important}</style>');}catch(_m2se){}`
+    + `document.addEventListener('DOMContentLoaded',function(){try{`
+    + `document.body.style.cssText='display:flex!important;margin:0;background:#0A1A2E;min-height:100vh;align-items:center;justify-content:center;font-family:sans-serif;text-align:center;padding:24px;box-sizing:border-box';`
+    + `document.body.innerHTML="<div style='max-width:440px'><div style='font-size:3.5rem;margin-bottom:18px'>&#x1F512;</div><h2 style='color:#C17B1A;font-weight:700;margin-bottom:12px'>&#169; Eng. Aymn Asi</h2><p style='color:#8AA3C7;font-size:.9rem;line-height:1.8;margin-bottom:22px'>Unauthorized copying is prohibited.</p><a href='"+_aos[0]+"' style='color:#C17B1A;font-size:.88rem'>"+_aos[0].replace("https://","")+"</a></div>";}catch(_m2de){}});`
+    + `}`
+    + `}`
+    + `})();`;
+  // Inject right after <meta charset="UTF-8"> — injectNonces below stamps the nonce
+  html = html.replace(/(<meta charset="UTF-8">)/i, `$1<script>${_m2Code}<\/script>`);
+
+  // Stamp nonce on every <script> tag (including the M2 guard injected above)
+  html = injectNonces(html, cspNonce);
+
+  // [PSI-09] Minify inline <style> blocks before XOR encoding.
+  // Reduces encrypted payload size (~2.9 KiB savings). Uses the same
+  // minifyBotCSS function already applied on the bot path. Safe: does not
+  // touch <style> blocks inside <noscript> or <script> tags.
+  html = minifyBotCSS(html);
+
+  // XOR + base64 obfuscation (same algorithm as api/decrypt.js)
+  const raw   = new TextEncoder().encode(html);
+  const xored = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) xored[i] = raw[i] ^ XOR_KEY;
+  const payload = u8ToB64(xored);   // chunked — safe for 500KB+ payloads
+
+  const titleM    = html.match(/<title>([^<]*)<\/title>/i);
+  const pageTitle = titleM ? titleM[1] : 'Civil Engineering Suite';
+
+  // ── [M1] Bootstrap shell mobile-download protection ──────────────────────
+  // Build origin guard (M1a) and copyright body (M1b) from _sharedCrB64
+  // computed above in the M2 block. Same copyright page; no duplicate work.
+  //
+  // M1a — bootstrapOriginGuard: fires BEFORE <body> is parsed, so the XOR
+  //        decoder script in <body> is never reached on unauthorized opens.
+  // M1b — bootstrapCopyrightBody: first <body> child.
+  //        display:none for legitimate access (XOR decoder replaces the doc
+  //        before first paint). <noscript> makes it display:flex when JS is
+  //        disabled so no-JS viewers see copyright instead of blank screen.
+  //        position:fixed / z-index:2147483647 covers partial-render edge cases.
+  //        Text editors (Notepad, VS Code) see this copyright HTML before
+  //        encountering the base64 XOR payload blob.
+  const bootstrapOriginGuard =
+    `<script nonce="${cspNonce}">`
+    + `(function(){'use strict';`
+    + `var _aos=${_allowedOriginsJs};`
+    + `var _o=(typeof window!=='undefined')?window.location.origin:'';`
+    + `var _dev=/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(_o);`
+    + `if(_aos.indexOf(_o)===-1&&!_dev){`
+    + `var _b='${_sharedCrB64}';`
+    + `var _n=atob(_b);var _ba=new Uint8Array(_n.length);`
+    + `for(var i=0;i<_n.length;i++)_ba[i]=_n.charCodeAt(i);`
+    + `var _cr=new TextDecoder('utf-8').decode(_ba);`
+    + `var _m1aOk=false;`
+    + `try{document.open();document.write(_cr);document.close();_m1aOk=true;}catch(_m1ae){}`
+    + `if(!_m1aOk){window['__CES_BLOCK']=1;}`
+    + `}`
+    + `})();`
+    + `\u003c/script>`;
+
+  const bootstrapCopyrightBody =
+    `<style>`
+    + `#_ces_cr_body{display:none;margin:0;background:#0A1A2E;color:#C17B1A;`
+    + `font-family:sans-serif;align-items:center;justify-content:center;`
+    + `min-height:100vh;text-align:center;position:fixed;top:0;left:0;`
+    + `width:100%;height:100%;z-index:2147483647}`
+    + `</style>`
+    + `<noscript><style>#_ces_cr_body{display:flex!important}</style></noscript>`
+    + `<div id="_ces_cr_body">`
+    + `<div style="padding:40px;max-width:440px">`
+    + `<div style="font-size:3.5rem;margin-bottom:18px">&#x1F512;</div>`
+    + `<h2 style="font-size:1.35rem;font-weight:700;margin-bottom:12px;line-height:1.4">`
+    + `&#169; Eng. Aymn Asi &#8212; ${escHtml(pageTitle)}</h2>`
+    + `<p style="color:#8AA3C7;font-size:0.9rem;line-height:1.8;margin-bottom:22px">`
+    + `Unauthorized copying is prohibited.<br>`
+    + `This page must be accessed from the official website.</p>`
+    + `<a href="${_sharedCrUrl}" style="color:#C17B1A;font-size:0.88rem">${_sharedCrLabel}</a>`
+    + `</div></div>`;
+
+  // [B9] Build og meta block for bootstrap shell.
+  // iMessage link previews are fetched CLIENT-SIDE by the recipient's phone using
+  // a standard Safari mobile UA — it receives the XOR bootstrap shell, not the bot
+  // path. The document.write runs AFTER the link preview has been computed from the
+  // initial HTML, so og tags inside the encrypted payload are invisible to the
+  // preview renderer. Fix: inject og:image, og:title, og:description, og:url,
+  // twitter:card, and twitter:image directly into the bootstrap <head> so any
+  // client — regardless of UA — gets a valid social preview from the initial HTML.
+  // These tags use absolute URLs with the request host so they're always correct.
+  const ogImageAbsolute = `https://${url.host}${route.ogImage}`;
+  const ogMetaBlock = route.ogTitle ? [
+    `<meta property="og:type" content="website">`,
+    `<meta property="og:site_name" content="Civil Engineering Suite">`,
+    `<meta property="og:title" content="${escHtml(route.ogTitle)}">`,
+    `<meta property="og:description" content="${escHtml(route.ogDescription)}">`,
+    `<meta property="og:url" content="${escHtml(route.ogUrl)}">`,
+    `<meta property="og:image" content="${escHtml(ogImageAbsolute)}">`,
+    `<meta property="og:image:secure_url" content="${escHtml(ogImageAbsolute)}">`,
+    `<meta property="og:image:type" content="image/png">`,
+    `<meta property="og:image:width" content="1200">`,
+    `<meta property="og:image:height" content="630">`,
+    `<meta property="og:image:alt" content="${escHtml(route.ogTitle)}">`,
+    `<meta name="twitter:card" content="summary_large_image">`,
+    `<meta name="twitter:title" content="${escHtml(route.ogTitle)}">`,
+    `<meta name="twitter:description" content="${escHtml(route.ogDescription)}">`,
+    `<meta name="twitter:image" content="${escHtml(ogImageAbsolute)}">`,
+  ].join('') : '';
+
+  // Bootstrap shell — tiny XOR wrapper; view-source shows only this, not real HTML
+  // [A6] WebMCP is injected as the FIRST script in the bootstrap shell so it fires
+  // for every JS-executing client regardless of User-Agent (including scanners whose
+  // UA does not match BOT_RE). The call is wrapped in a feature-detect guard:
+  // if navigator.modelContext is absent it is a complete no-op. The XOR decode
+  // script runs immediately after, replacing the document via document.write.
+  // The navigator.modelContext.provideContext() registration is a browser-level
+  // side-effect that persists independently of DOM state — the document.write does
+  // not undo it.
+  const webMCPBootstrap = `<script nonce="${cspNonce}">`
+    + `(function(){`
+    + `if(!navigator.modelContext||typeof navigator.modelContext.provideContext!=='function')return;`
+    + `try{navigator.modelContext.provideContext({`
+    + `name:'civil-engineering-suite',`
+    + `description:'Civil Engineering Suite \u2014 Free ACI 318-19 structural engineering tools by Eng. Aymn Asi.',`
+    + `tools:[`
+    + `{name:'open_footing_pro',description:'Footing Pro v.2026 \u2014 ACI 318-19 combined footing design, 17 modules.',`
+    + `inputSchema:{type:'object',properties:{},required:[]},`
+    + `execute:function(){window.location.href='/footing-pro/';return{success:true,url:'/footing-pro/'};}},`
+    + `{name:'open_section_property_pro',description:'Section Property Pro \u2014 area, centroid, Ix/Iy, section modulus, radius of gyration.',`
+    + `inputSchema:{type:'object',properties:{},required:[]},`
+    + `execute:function(){window.location.href='/section-property-pro/';return{success:true,url:'/section-property-pro/'};}},`
+    + `{name:'get_suite_info',description:'Returns metadata about all Civil Engineering Suite tools and agent discovery endpoints.',`
+    + `inputSchema:{type:'object',properties:{},required:[]},`
+    + `execute:function(){return{`
+    + `suite:'Civil Engineering Suite',author:'Eng. Aymn Asi',standard:'ACI 318-19',`
+    + `tools:[`
+    + `{name:'Footing Pro v.2026',url:'/footing-pro/',status:'live',modules:17},`
+    + `{name:'Section Property Pro',url:'/section-property-pro/',status:'live'},`
+    + `{name:'Beam Pro',url:'/beam-pro/',status:'coming-2026'},`
+    + `{name:'Column Pro',url:'/column-pro/',status:'coming-2026'},`
+    + `{name:'Deflection Pro',url:'/deflection-pro/',status:'coming-2026'},`
+    + `{name:'Earthquake Pro',url:'/earthquake-pro/',status:'coming-2026'},`
+    + `{name:'Mur Pro',url:'/mur-pro/',status:'coming-2026'},`
+    + `{name:'Add Reft Pro',url:'/add-reft-pro/',status:'coming-2026'}`
+    + `],`
+    + `agentDiscovery:{`
+    + `apiCatalog:'/.well-known/api-catalog',`
+    + `mcpServerCard:'/.well-known/mcp/server-card.json',`
+    + `agentSkills:'/.well-known/agent-skills/index.json',`
+    + `oauthServer:'/.well-known/oauth-authorization-server',`
+    + `oauthResource:'/.well-known/oauth-protected-resource'`
+    + `}};}}]});}catch(e){}})();`
+    + `\u003c/script>`;
+
+  // [PERF] Route-specific LCP preload: hero-bg.png for footing-pro must start
+  // downloading before JS runs. Without this, the browser can't discover the
+  // CSS background-image until the XOR decoder completes + CSS is parsed.
+  const lcpPreload = route.prefix === '/footing-pro'
+    ? '<link rel="preload" as="image" href="/footing-pro/images/hero-bg.avif"'
+      + ' imagesrcset="/footing-pro/images/hero-bg.avif 1x,/footing-pro/images/hero-bg.webp 1x"'
+      + ' imagesizes="100vw" fetchpriority="high">'
+    : '';
+
+  const bootstrap = `<!DOCTYPE html><html><head>`
+    + `<meta charset="UTF-8">`
+    + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
+    + (route.ogDescription ? `<meta name="description" content="${escHtml(route.ogDescription)}">` : '')
+    + lcpPreload
+    + `<link rel="preload" href="/fonts/inter-400.woff2" as="font" type="font/woff2" crossorigin>`
+    + `<link rel="preload" href="/fonts/inter-700.woff2" as="font" type="font/woff2" crossorigin>`
+    + `<link rel="preload" href="/fonts/playfair-700.woff2" as="font" type="font/woff2" crossorigin>`
+    + `<link rel="preload" href="/fonts/cairo-700.woff2" as="font" type="font/woff2" crossorigin>`
+    + `<link rel="preload" href="/fonts/cairo-400.woff2" as="font" type="font/woff2" crossorigin>`
+    + `<link rel="preload" href="/fonts/inter-500.woff2" as="font" type="font/woff2" crossorigin>`
+    + `<link rel="preload" href="/fonts/inter-600.woff2" as="font" type="font/woff2" crossorigin>`
+    + `<link rel="preload" href="/fonts/playfair-400.woff2" as="font" type="font/woff2" crossorigin>`
+    + `<link rel="preload" href="/fonts/playfair-900.woff2" as="font" type="font/woff2" crossorigin>`
+    + `<link rel="preload" href="/fonts/jetbrains-mono-400.woff2" as="font" type="font/woff2" crossorigin>`
+    + `<link rel="preload" href="/fonts/jetbrains-mono-600.woff2" as="font" type="font/woff2" crossorigin>`
+    + `<title>${pageTitle}</title>`
+    + ogMetaBlock
+    + faviconLinks
+    + bootstrapOriginGuard
+    + `</head><body>`
+    + bootstrapCopyrightBody
+    + webMCPBootstrap
+    + `<script nonce="${cspNonce}">`
+    + `(function(){try{`
+    // [M1c] Defense-in-depth: origin check INSIDE XOR decoder.
+    // Runs only if M1a (parser-blocking <head> guard) was somehow bypassed.
+    // On unauthorized origin: writes copyright page, then returns — XOR decode never runs.
+    + `var _xaos=${_allowedOriginsJs};`
+    + `var _xo=window.location.origin;`
+    + `var _xd=/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(_xo);`
+    + `if(window['__CES_BLOCK']||(_xaos.indexOf(_xo)===-1&&!_xd)){`
+    + `var _xb='${_sharedCrB64}';`
+    + `var _xn=atob(_xb);var _xba=new Uint8Array(_xn.length);`
+    + `for(var xi=0;xi<_xn.length;xi++)_xba[xi]=_xn.charCodeAt(xi);`
+    + `var _xcr=new TextDecoder('utf-8').decode(_xba);`
+    + `var _m1cOk=false;`
+    + `try{document.open();document.write(_xcr);document.close();_m1cOk=true;}catch(_xe){}`
+    + `if(!_m1cOk){`
+    + `var _xov=document.createElement('div');`
+    + `_xov.setAttribute('style','position:fixed;top:0;left:0;width:100%;height:100%;background:#0A1A2E;z-index:2147483647;display:flex;align-items:center;justify-content:center;font-family:sans-serif;text-align:center;padding:24px;box-sizing:border-box');`
+    + `_xov.innerHTML="<div style='max-width:440px'><div style='font-size:3.5rem;margin-bottom:18px'>&#x1F512;</div><h2 style='color:#C17B1A;font-weight:700;margin-bottom:12px'>&#169; Eng. Aymn Asi</h2><p style='color:#8AA3C7;font-size:.9rem;line-height:1.8;margin-bottom:22px'>Unauthorized copying is prohibited.</p><a href='"+_xaos[0]+"' style='color:#C17B1A;font-size:.88rem'>"+_xaos[0].replace("https://","")+"</a></div>";`
+    + `try{document.body.appendChild(_xov);}catch(_xoe){}}`
+    + `return;}`
+    + `var p="${payload}";`
+    + `var b=atob(p);`
+    + `var u=new Uint8Array(b.length);`
+    + `for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i)^${XOR_KEY};`
+    + `var h=new TextDecoder("utf-8").decode(u);`
+    + `document.open();document.write(h);document.close();`
+    + `}catch(e){var _f=document.createElement('p');`
+    + `_f.style.padding='40px';_f.style.color='#C17B1A';_f.style.fontFamily='sans-serif';`
+    + `_f.textContent='Page could not be loaded. Please refresh or contact support.';`
+    + `document.body.appendChild(_f);}})();`
+    + `\u003c/script>`
+    + `</body></html>`;
+
+  return new Response(bootstrap, { status: 200, headers: {
+    'Content-Type':            'text/html; charset=utf-8',
+    'Cache-Control':           'no-store',
+    'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ=' 'unsafe-hashes' 'sha256-nAiI7XK5Mt/SgNQUZPqTuikvwxIVHV3se6mHGQue+88=' 'sha256-Jag+ZHPii6iUmMQWlnwms/mnjM8gRPTOJA2KIyTQQRk=' 'sha256-uLUdJIdD3+8SpL4nHNFN9YmyHRRmrseSQKwzj3ECn2I=' 'sha256-akyHNuxwVvvLQ11iHoDrpca0qH3TU3LfGbtdQ8kNdwI=' 'sha256-UOhLo4NRrWG89b3vpgtU0dc/C8aWLS+MQ2Lf9vW/4Fk=' 'sha256-jHF5hTIlMDyGZRAsNK0HO/WFYrwPvI2I1q0o1xKKB6I=' 'sha256-wflfhEeJWTAjAK0hnm9/OICxAQ8fVnj3168JrJ/m91k=' 'sha256-oTzV9+pQ7IAxC4NoAc7dH4+0Is4KloZ9u7cMJC7UDrE=' 'sha256-bTpi/7w0Cd8ihAWpwcZJIdz49sMq0d73fWWDzp5Ju2Q='`,
+    // [A1] RFC 8288 Link header — visible in HTTP headers before JS executes.
+    // [A4] Vary: Accept on homepage so intermediaries separate markdown/HTML caches.
+    ...(route.prefix === '/' ? {
+      'Link': HOMEPAGE_LINK_HEADER,
+      'Vary': 'Accept',
+    } : {}),
+    ...SHARED_SECURITY_HEADERS,
+  }});
 
   } catch (e) {
+    // [E1] Safety net: converts any uncaught runtime exception to a logged 500
+    // instead of Cloudflare Error 1101.
+    // Inspect: Cloudflare Dashboard → Workers & Pages → Functions → Real-time logs
     console.error('[ces:runtime] Uncaught exception:', e && e.message, e && e.stack);
     return errResponse(500, 'Server Error', 'An internal error occurred. Please refresh or try again.');
   }
