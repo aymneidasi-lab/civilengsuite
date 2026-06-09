@@ -53,6 +53,21 @@
  *        the /payment/* _headers block which governs the checkout flow.
  *
  *
+ * 2026-06-10 v20 — FxD: M1a authorized-else branch removes _ces_hide (blank-page fix):
+ *
+ *   [FxD] bootstrapOriginGuard (M1a) authorized-else branch — explicit _ces_hide removal:
+ *         BUG (v19): bootstrapOriginGuard had no else branch. _ces_hide removal relied
+ *         entirely on document.open()+document.write() in the XOR decoder replacing the
+ *         whole document. When document.open() fails (sandboxed context, browser quirk,
+ *         corrupt payload), the XOR decoder catch block appends an error <p> to
+ *         document.body while html{visibility:hidden!important} from _ces_hide persists.
+ *         Result: blank white page — the error paragraph is also invisible.
+ *         FIX: M1a is parser-blocking in <head> and executes AFTER _ces_hide is parsed
+ *         (it is the first child of <head>). For authorized origins the else branch now
+ *         calls getElementById('_ces_hide') + removeChild immediately. _ces_hide removal
+ *         no longer depends on document.open() succeeding anywhere downstream.
+ *         Mirrors the FxC pattern already applied to the source HTML (_ces_hide_src).
+ *
  * 2026-06-09 v19 — CSS pre-hide + M1c overlay visibility fix + copyright message update (FxA, FxB, FxC-msg):
  *
  *   Three hardened protection layers:
@@ -1460,6 +1475,8 @@ export async function onRequest(context) {
     + `window.stop();`
     + `try{document.open();document.write(_cr);document.close();_m1aOk=true;}catch(_m1ae){}`
     + `if(!_m1aOk){window['__CES_BLOCK']=1;}`
+    + `}else{`
+    + `try{var _hs=document.getElementById('_ces_hide');if(_hs&&_hs.parentNode){_hs.parentNode.removeChild(_hs);}}catch(_hse){}`
     + `}`
     + `})();`
     + `\u003c/script>`;
