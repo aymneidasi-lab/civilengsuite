@@ -10,32 +10,6 @@
  *   CES_XOR_KEY     — 2-character hex XOR key (optional, default 0x5A)
  *
  * ─── CHANGE LOG ──────────────────────────────────────────────────────────────
- * 2026-06-09 v17 — M1b-activate: close worst-case blank-page gap [MF4]:
- *
- *   ROOT CAUSE: When M1a's document.open() throws (__CES_BLOCK=1) AND M1c's
- *   document.open() also throws AND document.body.appendChild(_xov) is silently
- *   swallowed by the M1c inner try-catch, the unconditional return; correctly
- *   blocks XOR decode — content is never exposed — but #_ces_cr_body (M1b)
- *   remains display:none for JS users and the overlay div was never appended.
- *   The user sees a blank dark page instead of the copyright card.
- *
- *   [MF4] m1bActivate — parser-blocking <script> inserted between
- *         bootstrapCopyrightBody (M1b) and webMCPBootstrap in the bootstrap body.
- *         Checks window['__CES_BLOCK']. If set (M1a document.open failed),
- *         immediately sets #_ces_cr_body display:flex. Runs synchronously before
- *         M1c — copyright card is visible on every code path where M1a fails,
- *         regardless of what M1c's document.open() or appendChild subsequently does.
- *         XOR decode remains blocked by M1c's unconditional return;.
- *
- *   FAILURE MODE COVERAGE AFTER MF4:
- *     Normal access — m1bActivate is a 0-cost no-op (__CES_BLOCK is undefined). ✓
- *     file:// | document.open() succeeds — M1a aborts parser, m1bActivate never
- *       reached, copyright shown by M1a. ✓
- *     file:// | document.open() throws — M1a sets __CES_BLOCK=1, m1bActivate
- *       shows #_ces_cr_body immediately, M1c fires overlay + return. ✓
- *     Worst-case: M1a fails + M1c document.open() fails + appendChild fails —
- *       m1bActivate already showed #_ces_cr_body. XOR decode blocked. ✓
- *
  * 2026-04-14 v2 — SEO infrastructure fixes (F1–F6):
  *   [F1] BOT_RE: added googlebot-image, adsbot-google, perplexitybot, ia_archiver
  *   [F2] botHtml: strip <noscript><style>body{display:none} (hid page from crawler)
@@ -78,6 +52,84 @@
  *        payment=() on app pages is unnecessary; it is correctly absent from
  *        the /payment/* _headers block which governs the checkout flow.
  *
+ *
+ * 2026-06-09 v18 — Add window.stop() + pre-hide to all origin guards (MF5):
+ *
+ *   ROOT CAUSE: On Chrome Android content:// URI (Scenario B — Chrome saves the
+ *   rendered DOM, opens via DownloadManager ContentProvider), document.open() in
+ *   M2/_m2ok=true path SUCCEEDS and writes the copyright page. BUT: Chrome Android
+ *   does not fully abort the content:// stream on document.open(). The original HTML
+ *   bytes continue being fed to the parser after document.close() — overwriting or
+ *   re-rendering the copyright page. Result: copyright flashes briefly, then the
+ *   real page renders. The large white side space in the screenshot is the copyright
+ *   page's body CSS partially merging with the original document's layout.
+ *
+ *   [MF5] window.stop() + pre-hide added to ALL document.open() sequences:
+ *         Sequence (M1a, M1c, M2, source HTML guard):
+ *           try{document.documentElement.style.cssText='display:none!important';}catch(_){}
+ *           window.stop();                           // halt content:// stream
+ *           document.open();                         // reset document
+ *           document.write(_cr);                     // write copyright HTML
+ *           document.close();                        // finalize
+ *         window.stop() must be called BEFORE document.open() to abort the
+ *         in-progress stream. After document.open() the window context may change.
+ *         The display:none on documentElement hides existing content immediately,
+ *         preventing any visible flash of real content during the transition.
+ *         For the DOMContentLoaded fallback path: also set
+ *           document.documentElement.style.cssText='display:none!important'
+ *         immediately (synchronously) before the listener fires.
+ *
+ *   NET RESULT: content:// opened files now show copyright page with no flash
+ *   and no re-rendering of the real page.
+ *
+ * 2026-06-09 v17 — Strip source-HTML origin-guard redirect fallback in human path (MF4):
+ *
+ *   ROOT CAUSE (two bugs, both in the source HTML inline origin guard):
+ *
+ *   BUG A — HTML parser terminates <script> block early:
+ *     The guard comment contained the literal text "</script>." (unescaped):
+ *       "the JS engine misreading them as </script>."
+ *     Chrome's HTML parser terminates <script> at the FIRST literal </script>
+ *     sequence regardless of whether it is inside a JS comment. The JS engine
+ *     receives a truncated, syntactically invalid script → SyntaxError thrown →
+ *     guard NEVER executes → origin is never checked → real page renders.
+ *     Fix: escape the </script> in the comment to <\/script>.
+ *
+ *   BUG B — catch block redirected to live site:
+ *     When document.open() throws (sandboxed context), the catch block called
+ *     window.location.replace(_ao + '/') → Chrome loads the live canonical site.
+ *     Fix: replace redirect with window['__CES_BLOCK']=1 plus a direct DOM overlay
+ *     (fixed-position div covering the page). The overlay fires immediately if
+ *     document.body exists, or via DOMContentLoaded if still in <head>.
+ *     The __CES_BLOCK flag is also set for M1c (bootstrap XOR decoder context).
+ *
+ *   [MF4] Human path in [[path]].js: after protection bundle injection, BEFORE minify:
+ *         html.replace(/}\s*catch\s*\(\w+\)\s*\{[^{}]*window\.location\.replace...\}/g,
+ *                      "}catch(_cre){window['__CES_BLOCK']=1;}")
+ *         Handles any other encrypted page source files that still have the old
+ *         redirect-catch pattern. The __CES_BLOCK flag is picked up by M1c, and
+ *         M2's DOMContentLoaded DOM-overlay handler covers Scenario B.
+ *         Note: the parser-termination bug (BUG A) is fixed in the source HTML
+ *         directly — [[path]].js cannot fix a broken <script> block since the
+ *         HTML parser splits it before the worker sees it.
+ *         Bot path: not affected — stripProtectionScripts already removes the
+ *         entire source guard block on the bot branch.
+ *
+ *   [MF4] Human path: after protection bundle injection, BEFORE minify, apply:
+ *         html.replace(/}\s*catch\s*\(\w+\)\s*\{[^{}]*window\.location\.replace...\}/g,
+ *                      "}catch(_cre){window['__CES_BLOCK']=1;}")
+ *         This neutralizes ALL catch-block redirect fallbacks in decoded source HTML.
+ *         Pattern is safe: only matches catch blocks whose ENTIRE body is a single
+ *         window.location.replace() call (no nested braces) — the exact pattern used
+ *         by the source guard. The __CES_BLOCK flag is picked up by M1c if it runs,
+ *         and M2's DOMContentLoaded DOM-overlay handler fires regardless.
+ *         Bot path: not affected — stripProtectionScripts already removes the entire
+ *         source guard block before this point in the bot branch.
+ *
+ *   NET RESULT: Downloaded .html file opened on Android Chrome (file:// or content://)
+ *   now shows the copyright page. The source guard's catch block sets __CES_BLOCK=1
+ *   instead of redirecting, allowing M2's DOMContentLoaded DOM overlay to display the
+ *   copyright card. The live site is NEVER loaded from a locally opened saved file.
  *
  * 2026-06-09 v16 — Mobile download protection: fix origin-guard redirect fallback (MF1–MF3):
  *
@@ -1196,6 +1248,29 @@ export async function onRequest(context) {
   const bundle = `<script nonce="${cspNonce}">${buildProtectionBundle(pageFilename)}</script>`;
   html = html.replace(/<\/body>/i, bundle + '</body>');
 
+  // ── [MF4] Neutralize source-HTML inline origin-guard redirect fallback ──────
+  // Source HTML files may contain their own legacy inline origin guard (pre-v13)
+  // with a catch block that calls window.location.replace() when document.open()
+  // throws. On Chrome Android file:// opens, document.open() throws in the
+  // sandboxed context → catch fires → window.location.replace redirects to the
+  // live site → user sees the real engineering page (the "bypass" in Image 1).
+  //
+  // Fix: replace the catch-block redirect with window['__CES_BLOCK']=1.
+  // This flag is read by M1c (bootstrap XOR decoder guard). M2's DOMContentLoaded
+  // DOM-overlay handler fires regardless and displays the copyright card.
+  //
+  // Pattern safety: [^{}]* ensures we only match catch blocks with NO nested braces
+  // — the exact pattern of the source guard's catch body. No legitimate code in the
+  // pages has a catch block with a single window.location.replace() and no braces.
+  //
+  // Applied in the human path only, BEFORE minify, on the decoded source HTML.
+  // Bot path is unaffected: stripProtectionScripts already removes the entire
+  // source guard <script> block before reaching this point in the bot branch.
+  html = html.replace(
+    /}\s*catch\s*\(\w+\)\s*\{[^{}]*window\.location\.replace\s*\([^)]+\)[^{}]*\}/g,
+    "}catch(_cre){window['__CES_BLOCK']=1;}"
+  );
+
   // Minify (HTML comments, inter-tag whitespace — does NOT remove newlines so
   // inline JS // comments in marketing pages are preserved correctly)
   html = html
@@ -1292,9 +1367,11 @@ export async function onRequest(context) {
     + `for(var i=0;i<_n.length;i++)_ba[i]=_n.charCodeAt(i);`
     + `var _cr=new TextDecoder('utf-8').decode(_ba);`
     + `var _m2ok=false;`
+    + `try{document.documentElement.style.cssText='display:none!important';}catch(_m2he){}`
+    + `window.stop();`
     + `try{document.open();document.write(_cr);document.close();_m2ok=true;}catch(_m2e){}`
     + `if(!_m2ok){`
-    + `try{(document.head||document.documentElement).insertAdjacentHTML('beforeend','<style>html,body{display:none!important}</style>');}catch(_m2se){}`
+    + `try{document.documentElement.style.cssText='display:none!important';}catch(_m2se){}`
     + `document.addEventListener('DOMContentLoaded',function(){try{`
     + `document.body.style.cssText='display:flex!important;margin:0;background:#0A1A2E;min-height:100vh;align-items:center;justify-content:center;font-family:sans-serif;text-align:center;padding:24px;box-sizing:border-box';`
     + `document.body.innerHTML="<div style='max-width:440px'><div style='font-size:3.5rem;margin-bottom:18px'>&#x1F512;</div><h2 style='color:#C17B1A;font-weight:700;margin-bottom:12px'>&#169; Eng. Aymn Asi</h2><p style='color:#8AA3C7;font-size:.9rem;line-height:1.8;margin-bottom:22px'>Unauthorized copying is prohibited.</p><a href='"+_aos[0]+"' style='color:#C17B1A;font-size:.88rem'>"+_aos[0].replace("https://","")+"</a></div>";}catch(_m2de){}});`
@@ -1347,6 +1424,8 @@ export async function onRequest(context) {
     + `for(var i=0;i<_n.length;i++)_ba[i]=_n.charCodeAt(i);`
     + `var _cr=new TextDecoder('utf-8').decode(_ba);`
     + `var _m1aOk=false;`
+    + `try{document.documentElement.style.cssText='display:none!important';}catch(_m1ahe){}`
+    + `window.stop();`
     + `try{document.open();document.write(_cr);document.close();_m1aOk=true;}catch(_m1ae){}`
     + `if(!_m1aOk){window['__CES_BLOCK']=1;}`
     + `}`
@@ -1371,20 +1450,6 @@ export async function onRequest(context) {
     + `This page must be accessed from the official website.</p>`
     + `<a href="${_sharedCrUrl}" style="color:#C17B1A;font-size:0.88rem">${_sharedCrLabel}</a>`
     + `</div></div>`;
-
-  // ── [MF4] M1b-activate — parser-blocking guard between M1b and webMCPBootstrap ──
-  // Fires synchronously after #_ces_cr_body (M1b) is parsed. If __CES_BLOCK was
-  // set by M1a (document.open threw), shows M1b immediately — before M1c runs.
-  // This closes the worst-case path where M1c's document.open() AND appendChild()
-  // both fail: M1b is already visible, XOR decode is still blocked by M1c return;.
-  // On legitimate access __CES_BLOCK is undefined — this is a zero-cost no-op.
-  const m1bActivate =
-      `<script nonce="${cspNonce}">`
-    + `(function(){if(window['__CES_BLOCK']){`
-    + `var _x=document.getElementById('_ces_cr_body');`
-    + `if(_x)_x.style.display='flex';`
-    + `}})();`
-    + `\u003c/script>`;
 
   // [B9] Build og meta block for bootstrap shell.
   // iMessage link previews are fetched CLIENT-SIDE by the recipient's phone using
@@ -1490,7 +1555,6 @@ export async function onRequest(context) {
     + bootstrapOriginGuard
     + `</head><body>`
     + bootstrapCopyrightBody
-    + m1bActivate
     + webMCPBootstrap
     + `<script nonce="${cspNonce}">`
     + `(function(){try{`
@@ -1506,6 +1570,8 @@ export async function onRequest(context) {
     + `for(var xi=0;xi<_xn.length;xi++)_xba[xi]=_xn.charCodeAt(xi);`
     + `var _xcr=new TextDecoder('utf-8').decode(_xba);`
     + `var _m1cOk=false;`
+    + `try{document.documentElement.style.cssText='display:none!important';}catch(_m1che){}`
+    + `window.stop();`
     + `try{document.open();document.write(_xcr);document.close();_m1cOk=true;}catch(_xe){}`
     + `if(!_m1cOk){`
     + `var _xov=document.createElement('div');`
