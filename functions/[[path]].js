@@ -53,6 +53,42 @@
  *        the /payment/* _headers block which governs the checkout flow.
  *
  *
+ * 2026-06-09 v16 — Mobile download protection: fix origin-guard redirect fallback (MF1–MF3):
+ *
+ *   ROOT CAUSE: All three origin-guard layers (M1a bootstrapOriginGuard, M1c
+ *   xorDecoderOriginGuard, M2 htmlOriginGuard) shared an identical fallback bug.
+ *   When document.open() throws on Chrome Android opening a downloaded file via
+ *   the native file viewer (file:// or content:// URI), the catch block fired:
+ *       window.location.replace(_aos[0] + path)
+ *   This silently navigated the browser to the LIVE canonical URL. Chrome loaded
+ *   and rendered the real engineering page — the downloaded file appeared to have
+ *   "bypassed" protection, but was actually being redirected to civilengsuite.pages.dev.
+ *
+ *   [MF1] bootstrapOriginGuard (M1a) fallback: window.location.replace() removed.
+ *         Replaced with: attempt document.open() without any redirect on failure.
+ *         On document.open() failure, sets window['__CES_BLOCK']=1 so M1c can
+ *         detect the blocked state when the HTML parser reaches <body>. If M1a's
+ *         document.open() aborts the parser (normal Chrome behavior), M1c is never
+ *         reached and copyright is already shown. If it fails, M1c takes over.
+ *
+ *   [MF2] xorDecoderOriginGuard (M1c): guard condition expanded from
+ *         (_xaos.indexOf(_xo)===-1&&!_xd) to also OR window['__CES_BLOCK'],
+ *         which is set by M1a on document.open failure. Fallback changed from
+ *         window.location.replace() to a fixed-position DOM overlay element
+ *         (document.body is available in the <body> script context). The return
+ *         statement after copyright display is unconditional — XOR decode NEVER
+ *         runs regardless of document.open() success or failure.
+ *
+ *   [MF3] htmlOriginGuard (M2) fallback: window.location.replace() removed.
+ *         Replaced with: (a) inject hide-style into <head> immediately, so real
+ *         content is not visible even if document.open() fails; (b) DOMContentLoaded
+ *         handler that overwrites document.body with the copyright card. Handles
+ *         Scenario B (Chrome Android saves the rendered DOM post document.write).
+ *
+ *   NET RESULT: Downloaded .html file opened on Android Chrome (file:// or
+ *   content://) now shows the copyright page and NEVER silently redirects to
+ *   civilengsuite.pages.dev. The live site is not loaded from a locally opened file.
+ *
  * 2026-06-09 v15 — Inline non-canonical redirect gate + fix _canonicalOrigin derivation (M3b-inline, M3b-fix):
  *
  *   CONTEXT: v14 documented [M3b] as a SEPARATE gsuite_redirect_worker.js file that would
@@ -1229,8 +1265,14 @@ export async function onRequest(context) {
     + `var _n=atob(_b);var _ba=new Uint8Array(_n.length);`
     + `for(var i=0;i<_n.length;i++)_ba[i]=_n.charCodeAt(i);`
     + `var _cr=new TextDecoder('utf-8').decode(_ba);`
-    + `try{document.open();document.write(_cr);document.close();}`
-    + `catch(e){window.location.replace(_aos[0]+'${_sharedCrRP}/');}`
+    + `var _m2ok=false;`
+    + `try{document.open();document.write(_cr);document.close();_m2ok=true;}catch(_m2e){}`
+    + `if(!_m2ok){`
+    + `try{(document.head||document.documentElement).insertAdjacentHTML('beforeend','<style>html,body{display:none!important}</style>');}catch(_m2se){}`
+    + `document.addEventListener('DOMContentLoaded',function(){try{`
+    + `document.body.style.cssText='display:flex!important;margin:0;background:#0A1A2E;min-height:100vh;align-items:center;justify-content:center;font-family:sans-serif;text-align:center;padding:24px;box-sizing:border-box';`
+    + `document.body.innerHTML="<div style='max-width:440px'><div style='font-size:3.5rem;margin-bottom:18px'>&#x1F512;</div><h2 style='color:#C17B1A;font-weight:700;margin-bottom:12px'>&#169; Eng. Aymn Asi</h2><p style='color:#8AA3C7;font-size:.9rem;line-height:1.8;margin-bottom:22px'>Unauthorized copying is prohibited.</p><a href='"+_aos[0]+"' style='color:#C17B1A;font-size:.88rem'>"+_aos[0].replace("https://","")+"</a></div>";}catch(_m2de){}});`
+    + `}`
     + `}`
     + `})();`;
   // Inject right after <meta charset="UTF-8"> — injectNonces below stamps the nonce
@@ -1278,8 +1320,9 @@ export async function onRequest(context) {
     + `var _n=atob(_b);var _ba=new Uint8Array(_n.length);`
     + `for(var i=0;i<_n.length;i++)_ba[i]=_n.charCodeAt(i);`
     + `var _cr=new TextDecoder('utf-8').decode(_ba);`
-    + `try{document.open();document.write(_cr);document.close();}`
-    + `catch(e){window.location.replace(_aos[0]+'${_sharedCrRP}/');}`
+    + `var _m1aOk=false;`
+    + `try{document.open();document.write(_cr);document.close();_m1aOk=true;}catch(_m1ae){}`
+    + `if(!_m1aOk){window['__CES_BLOCK']=1;}`
     + `}`
     + `})();`
     + `\u003c/script>`;
@@ -1303,24 +1346,89 @@ export async function onRequest(context) {
     + `<a href="${_sharedCrUrl}" style="color:#C17B1A;font-size:0.88rem">${_sharedCrLabel}</a>`
     + `</div></div>`;
 
-  const requestHostname = url.hostname;
-  const isCanonical = requestHostname === _canonicalHostname;
-  const isLocalhostRequest = /^(localhost|127\.0\.0\.1)$/.test(requestHostname);
-  const isPreviewSubdomain = requestHostname.endsWith('.civilengsuite.pages.dev');
-  
-  const allowedOriginsList = _allowedHostsRaw
-    .split(',')
-    .map(o => o.trim().replace('https://', '').replace('http://', ''))
-    .filter(o => o);
-  const isAllowedDomain = allowedOriginsList.some(domain => 
-    requestHostname === domain || requestHostname.endsWith(domain)
-  );
-  
-  const isAuthorizedOrigin = isCanonical || isLocalhostRequest || isPreviewSubdomain || isAllowedDomain;
-  
-  const copyrightOnlyHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>\u00A9 Protected \u2014 Civil Engineering Suite</title><style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0A1A2E;display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:sans-serif;text-align:center;padding:24px}.c{max-width:440px}.i{font-size:3.5rem;margin-bottom:18px}.t{color:#C17B1A;font-size:1.35rem;font-weight:700;margin-bottom:12px;line-height:1.4}.m{color:#8AA3C7;font-size:0.9rem;line-height:1.8;margin-bottom:22px}a{color:#C17B1A;text-decoration:none}a:hover{text-decoration:underline}</style></head><body><div class="c"><div class="i">\uD83D\uDD12<\/div><div class="t">\u00A9 Civil Engineering Suite - Protected<\/div><div class="m">Unauthorized copying prohibited.<br><br>Access via official site:<br><strong>${_canonicalOrigin}/<\/strong><\/div><a href="${_canonicalOrigin}/">Visit Official Site<\/a><\/div><\/body><\/html>`;
-  
-  const fullBootstrap = `<!DOCTYPE html><html><head>`
+  // [B9] Build og meta block for bootstrap shell.
+  // iMessage link previews are fetched CLIENT-SIDE by the recipient's phone using
+  // a standard Safari mobile UA — it receives the XOR bootstrap shell, not the bot
+  // path. The document.write runs AFTER the link preview has been computed from the
+  // initial HTML, so og tags inside the encrypted payload are invisible to the
+  // preview renderer. Fix: inject og:image, og:title, og:description, og:url,
+  // twitter:card, and twitter:image directly into the bootstrap <head> so any
+  // client — regardless of UA — gets a valid social preview from the initial HTML.
+  // These tags use absolute URLs with the request host so they're always correct.
+  const ogImageAbsolute = `https://${url.host}${route.ogImage}`;
+  const ogMetaBlock = route.ogTitle ? [
+    `<meta property="og:type" content="website">`,
+    `<meta property="og:site_name" content="Civil Engineering Suite">`,
+    `<meta property="og:title" content="${escHtml(route.ogTitle)}">`,
+    `<meta property="og:description" content="${escHtml(route.ogDescription)}">`,
+    `<meta property="og:url" content="${escHtml(route.ogUrl)}">`,
+    `<meta property="og:image" content="${escHtml(ogImageAbsolute)}">`,
+    `<meta property="og:image:secure_url" content="${escHtml(ogImageAbsolute)}">`,
+    `<meta property="og:image:type" content="image/png">`,
+    `<meta property="og:image:width" content="1200">`,
+    `<meta property="og:image:height" content="630">`,
+    `<meta property="og:image:alt" content="${escHtml(route.ogTitle)}">`,
+    `<meta name="twitter:card" content="summary_large_image">`,
+    `<meta name="twitter:title" content="${escHtml(route.ogTitle)}">`,
+    `<meta name="twitter:description" content="${escHtml(route.ogDescription)}">`,
+    `<meta name="twitter:image" content="${escHtml(ogImageAbsolute)}">`,
+  ].join('') : '';
+
+  // Bootstrap shell — tiny XOR wrapper; view-source shows only this, not real HTML
+  // [A6] WebMCP is injected as the FIRST script in the bootstrap shell so it fires
+  // for every JS-executing client regardless of User-Agent (including scanners whose
+  // UA does not match BOT_RE). The call is wrapped in a feature-detect guard:
+  // if navigator.modelContext is absent it is a complete no-op. The XOR decode
+  // script runs immediately after, replacing the document via document.write.
+  // The navigator.modelContext.provideContext() registration is a browser-level
+  // side-effect that persists independently of DOM state — the document.write does
+  // not undo it.
+  const webMCPBootstrap = `<script nonce="${cspNonce}">`
+    + `(function(){`
+    + `if(!navigator.modelContext||typeof navigator.modelContext.provideContext!=='function')return;`
+    + `try{navigator.modelContext.provideContext({`
+    + `name:'civil-engineering-suite',`
+    + `description:'Civil Engineering Suite \u2014 Free ACI 318-19 structural engineering tools by Eng. Aymn Asi.',`
+    + `tools:[`
+    + `{name:'open_footing_pro',description:'Footing Pro v.2026 \u2014 ACI 318-19 combined footing design, 17 modules.',`
+    + `inputSchema:{type:'object',properties:{},required:[]},`
+    + `execute:function(){window.location.href='/footing-pro/';return{success:true,url:'/footing-pro/'};}},`
+    + `{name:'open_section_property_pro',description:'Section Property Pro \u2014 area, centroid, Ix/Iy, section modulus, radius of gyration.',`
+    + `inputSchema:{type:'object',properties:{},required:[]},`
+    + `execute:function(){window.location.href='/section-property-pro/';return{success:true,url:'/section-property-pro/'};}},`
+    + `{name:'get_suite_info',description:'Returns metadata about all Civil Engineering Suite tools and agent discovery endpoints.',`
+    + `inputSchema:{type:'object',properties:{},required:[]},`
+    + `execute:function(){return{`
+    + `suite:'Civil Engineering Suite',author:'Eng. Aymn Asi',standard:'ACI 318-19',`
+    + `tools:[`
+    + `{name:'Footing Pro v.2026',url:'/footing-pro/',status:'live',modules:17},`
+    + `{name:'Section Property Pro',url:'/section-property-pro/',status:'live'},`
+    + `{name:'Beam Pro',url:'/beam-pro/',status:'coming-2026'},`
+    + `{name:'Column Pro',url:'/column-pro/',status:'coming-2026'},`
+    + `{name:'Deflection Pro',url:'/deflection-pro/',status:'coming-2026'},`
+    + `{name:'Earthquake Pro',url:'/earthquake-pro/',status:'coming-2026'},`
+    + `{name:'Mur Pro',url:'/mur-pro/',status:'coming-2026'},`
+    + `{name:'Add Reft Pro',url:'/add-reft-pro/',status:'coming-2026'}`
+    + `],`
+    + `agentDiscovery:{`
+    + `apiCatalog:'/.well-known/api-catalog',`
+    + `mcpServerCard:'/.well-known/mcp/server-card.json',`
+    + `agentSkills:'/.well-known/agent-skills/index.json',`
+    + `oauthServer:'/.well-known/oauth-authorization-server',`
+    + `oauthResource:'/.well-known/oauth-protected-resource'`
+    + `}};}}]});}catch(e){}})();`
+    + `\u003c/script>`;
+
+  // [PERF] Route-specific LCP preload: hero-bg.png for footing-pro must start
+  // downloading before JS runs. Without this, the browser can't discover the
+  // CSS background-image until the XOR decoder completes + CSS is parsed.
+  const lcpPreload = route.prefix === '/footing-pro'
+    ? '<link rel="preload" as="image" href="/footing-pro/images/hero-bg.avif"'
+      + ' imagesrcset="/footing-pro/images/hero-bg.avif 1x,/footing-pro/images/hero-bg.webp 1x"'
+      + ' imagesizes="100vw" fetchpriority="high">'
+    : '';
+
+  const bootstrap = `<!DOCTYPE html><html><head>`
     + `<meta charset="UTF-8">`
     + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
     + (route.ogDescription ? `<meta name="description" content="${escHtml(route.ogDescription)}">` : '')
@@ -1345,15 +1453,24 @@ export async function onRequest(context) {
     + webMCPBootstrap
     + `<script nonce="${cspNonce}">`
     + `(function(){try{`
+    // [M1c] Defense-in-depth: origin check INSIDE XOR decoder.
+    // Runs only if M1a (parser-blocking <head> guard) was somehow bypassed.
+    // On unauthorized origin: writes copyright page, then returns — XOR decode never runs.
     + `var _xaos=${_allowedOriginsJs};`
     + `var _xo=window.location.origin;`
     + `var _xd=/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(_xo);`
-    + `if(_xaos.indexOf(_xo)===-1&&!_xd){`
+    + `if(window['__CES_BLOCK']||(_xaos.indexOf(_xo)===-1&&!_xd)){`
     + `var _xb='${_sharedCrB64}';`
     + `var _xn=atob(_xb);var _xba=new Uint8Array(_xn.length);`
     + `for(var xi=0;xi<_xn.length;xi++)_xba[xi]=_xn.charCodeAt(xi);`
     + `var _xcr=new TextDecoder('utf-8').decode(_xba);`
-    + `try{document.open();document.write(_xcr);document.close();}catch(_xe){window.location.replace(_xaos[0]+'${_sharedCrRP}/');}`
+    + `var _m1cOk=false;`
+    + `try{document.open();document.write(_xcr);document.close();_m1cOk=true;}catch(_xe){}`
+    + `if(!_m1cOk){`
+    + `var _xov=document.createElement('div');`
+    + `_xov.setAttribute('style','position:fixed;top:0;left:0;width:100%;height:100%;background:#0A1A2E;z-index:2147483647;display:flex;align-items:center;justify-content:center;font-family:sans-serif;text-align:center;padding:24px;box-sizing:border-box');`
+    + `_xov.innerHTML="<div style='max-width:440px'><div style='font-size:3.5rem;margin-bottom:18px'>&#x1F512;</div><h2 style='color:#C17B1A;font-weight:700;margin-bottom:12px'>&#169; Eng. Aymn Asi</h2><p style='color:#8AA3C7;font-size:.9rem;line-height:1.8;margin-bottom:22px'>Unauthorized copying is prohibited.</p><a href='"+_xaos[0]+"' style='color:#C17B1A;font-size:.88rem'>"+_xaos[0].replace("https://","")+"</a></div>";`
+    + `try{document.body.appendChild(_xov);}catch(_xoe){}}`
     + `return;}`
     + `var p="${payload}";`
     + `var b=atob(p);`
@@ -1368,19 +1485,7 @@ export async function onRequest(context) {
     + `\u003c/script>`
     + `</body></html>`;
 
-  const bootstrap = isAuthorizedOrigin ? fullBootstrap : copyrightOnlyHtml;
-
   return new Response(bootstrap, { status: 200, headers: {
-    'Content-Type':            'text/html; charset=utf-8',
-    'Cache-Control':           'no-store',
-    'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ=' 'unsafe-hashes' 'sha256-nAiI7XK5Mt/SgNQUZPqTuikvwxIVHV3se6mHGQue+88=' 'sha256-Jag+ZHPii6iUmMQWlnwms/mnjM8gRPTOJA2KIyTQQRk=' 'sha256-uLUdJIdD3+8SpL4nHNFN9YmyHRRmrseSQKwzj3ECn2I=' 'sha256-akyHNuxwVvvLQ11iHoDrpca0qH3TU3LfGbtdQ8kNdwI=' 'sha256-UOhLo4NRrWG89b3vpgtU0dc/C8aWLS+MQ2Lf9vW/4Fk=' 'sha256-jHF5hTIlMDyGZRAsNK0HO/WFYrwPvI2I1q0o1xKKB6I=' 'sha256-wflfhEeJWTAjAK0hnm9/OICxAQ8fVnj3168JrJ/m91k=' 'sha256-oTzV9+pQ7IAxC4NoAc7dH4+0Is4KloZ9u7cMJC7UDrE=' 'sha256-bTpi/7w0Cd8ihAWpwcZJIdz49sMq0d73fWWDzp5Ju2Q='`,
-    ...(route.prefix === '/' ? {
-      'Link': HOMEPAGE_LINK_HEADER,
-      'Vary': 'Accept',
-    } : {}),
-    ...SHARED_SECURITY_HEADERS,
-  }});
-return new Response(bootstrap, { status: 200, headers: {
     'Content-Type':            'text/html; charset=utf-8',
     'Cache-Control':           'no-store',
     'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ=' 'unsafe-hashes' 'sha256-nAiI7XK5Mt/SgNQUZPqTuikvwxIVHV3se6mHGQue+88=' 'sha256-Jag+ZHPii6iUmMQWlnwms/mnjM8gRPTOJA2KIyTQQRk=' 'sha256-uLUdJIdD3+8SpL4nHNFN9YmyHRRmrseSQKwzj3ECn2I=' 'sha256-akyHNuxwVvvLQ11iHoDrpca0qH3TU3LfGbtdQ8kNdwI=' 'sha256-UOhLo4NRrWG89b3vpgtU0dc/C8aWLS+MQ2Lf9vW/4Fk=' 'sha256-jHF5hTIlMDyGZRAsNK0HO/WFYrwPvI2I1q0o1xKKB6I=' 'sha256-wflfhEeJWTAjAK0hnm9/OICxAQ8fVnj3168JrJ/m91k=' 'sha256-oTzV9+pQ7IAxC4NoAc7dH4+0Is4KloZ9u7cMJC7UDrE=' 'sha256-bTpi/7w0Cd8ihAWpwcZJIdz49sMq0d73fWWDzp5Ju2Q='`,
