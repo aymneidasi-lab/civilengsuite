@@ -53,6 +53,41 @@
  *        the /payment/* _headers block which governs the checkout flow.
  *
  *
+ * 2026-06-09 v17 — CORS-based payload delivery: remove inline XOR payload from bootstrap (P3):
+ *
+ *   ROOT CAUSE (revised): window.location.origin-based guards (M1a, M1c, M2) are
+ *   unreliable on Chrome Android because the exact string returned by
+ *   window.location.origin for downloaded-file URIs (file://, content://, or
+ *   Android's DownloadManager content provider URI) varies by Android version,
+ *   Chrome version, and device OEM. In some environments origin === 'null' and the
+ *   guards fire; in others the browser may navigate to the live URL or return a
+ *   different opaque origin string. No client-side JS value can be fully trusted.
+ *
+ *   [P3] CORS-based payload delivery (server-enforced):
+ *     - The XOR payload is NO LONGER embedded inline in the bootstrap HTML.
+ *     - Bootstrap now contains a tiny fetch('/api/payload?p=<slug>') loader.
+ *     - /api/payload is a new route in this same function that serves the
+ *       XOR-encoded payload WITHOUT any Access-Control-Allow-Origin header.
+ *     - Browser CORS enforcement: fetch() from a null origin (file://, content://)
+ *       page cannot read a cross-origin response unless the server explicitly sets
+ *       Access-Control-Allow-Origin. We never set it for null origins.
+ *       Result: catch() fires → copyright shown. Server is never even implicated.
+ *     - Same-origin fetch from civilengsuite.pages.dev: no Origin header sent
+ *       (same-origin GET) → CORS check not triggered → payload returned → page loads.
+ *     - Downloaded file opened offline: fetch fails (no server) → catch() →
+ *       copyright shown. No network needed for protection to work.
+ *
+ *   M1a (bootstrapOriginGuard) retained as defense-in-depth: handles the offline
+ *   case before fetch even starts. window.__CES_BLOCK fallback retained.
+ *
+ *   /api/payload processes the same HTML pipeline as the previous human path:
+ *   base-href, favicon, M2 guard, protection bundle, minify, XOR encode.
+ *   Nonces are NOT stamped by the server; bootstrap fetch handler stamps the
+ *   bootstrap's own nonce client-side so decoded scripts satisfy the bootstrap CSP.
+ *
+ *   Bootstrap size: ~8 KB (previously ~500 KB with embedded payload).
+ *   Page load: 2 requests (bootstrap + /api/payload); imperceptible on Cloudflare edge.
+ *
  * 2026-06-09 v16 — Mobile download protection: fix origin-guard redirect fallback (MF1–MF3):
  *
  *   ROOT CAUSE: All three origin-guard layers (M1a bootstrapOriginGuard, M1c
@@ -969,6 +1004,138 @@ export async function onRequest(context) {
     });
   }
 
+  // ── [P3] /api/payload — CORS-gated XOR payload delivery ──────────────────
+  // Serves the full XOR-encoded page payload only to same-origin callers.
+  // The bootstrap shell fetches this endpoint at runtime. A fetch() from a
+  // file:// or content:// URI (downloaded bootstrap opened locally) sends
+  // Origin: null and cannot read this response because no
+  // Access-Control-Allow-Origin header is set — the browser's CORS engine
+  // blocks it before JavaScript sees the response. The catch() handler in
+  // the bootstrap then shows the copyright page.
+  //
+  // Same-origin requests (from https://civilengsuite.pages.dev) do not send
+  // an Origin header on a simple GET, so they pass through unrestricted.
+  //
+  // OFFLINE case: fetch fails (no server) → catch() → copyright shown.
+  //   Protection works even without internet access.
+  if (path === '/api/payload') {
+    const _apSlug   = url.searchParams.get('p') || '';
+    const _apRoute  = _apSlug === ''
+      ? ROUTES[0]
+      : ROUTES.slice(1).find(r => r.prefix === '/' + _apSlug);
+    if (!_apRoute) return errResponse(404, 'Not Found', 'Unknown payload.');
+
+    const _apKeyHex = (env.CES_DECRYPT_KEY || '').trim();
+    if (!_apKeyHex || _apKeyHex.length !== 64)
+      return errResponse(500, 'Config Error', 'CES_DECRYPT_KEY missing or invalid.');
+    const _apXorHex = (env.CES_XOR_KEY || '').trim();
+    const _AP_XOR   = (_apXorHex.length === 2 && /^[0-9A-Fa-f]{2}$/.test(_apXorHex))
+      ? parseInt(_apXorHex, 16) : 0x5A;
+
+    let _apHtml;
+    try {
+      const _apEncResp = await env.ASSETS.fetch(new URL(`/public/${_apRoute.encFile}`, url.origin));
+      if (!_apEncResp.ok) throw new Error(`HTTP ${_apEncResp.status}`);
+      const _apEncData = (await _apEncResp.text()).trim();
+      _apHtml = await decryptEnc(_apEncData, _apKeyHex);
+    } catch (_ape) {
+      console.error('[ces:payload] decrypt error:', _ape && _ape.message);
+      return errResponse(500, 'Server Error', 'Payload unavailable.');
+    }
+
+    // Base href
+    _apHtml = _apHtml.replace(/(<head[^>]*>)/i, `$1<base href="${_apRoute.baseHref}">`);
+
+    // Favicon (inject if not already present)
+    if (_apRoute.faviconLinks && !/<link[^>]+rel=["'](?:icon|shortcut icon|apple-touch-icon)["']/i.test(_apHtml))
+      _apHtml = _apHtml.replace(/(<\/head>)/i, `${_apRoute.faviconLinks}$1`);
+
+    // Allowed-origins (same derivation as human path)
+    const _apCanOrigin = `https://${_canonicalHostname}`;
+    const _apExtraO    = _allowedHostsRaw.filter(o => o !== _apCanOrigin);
+    const _apAosJs     = JSON.stringify([_apCanOrigin, ...new Set(_apExtraO)]);
+
+    // M2 guard (Scenario B: Chrome saves rendered DOM after fetch+decode)
+    const _apCrRP   = _apRoute.prefix === '/' ? '' : _apRoute.prefix;
+    const _apCrUrl  = `${_apCanOrigin}${_apCrRP}/`;
+    const _apCrLbl  = `${_canonicalHostname}${_apCrRP}/`;
+    const _apTitleM = _apHtml.match(/<title>([^<]*)<\/title>/i);
+    const _apPT     = escHtml(_apTitleM ? _apTitleM[1] : (_apRoute.ogTitle || 'Civil Engineering Suite'));
+    const _apCrHtml =
+        `<!DOCTYPE html><html><head><meta charset="UTF-8">`
+      + `<meta name="viewport" content="width=device-width,initial-scale=1">`
+      + `<title>\u00A9 Protected \u2014 ${_apPT}<\/title>`
+      + `<style>*{box-sizing:border-box;margin:0;padding:0}`
+      + `body{background:#0A1A2E;display:flex;align-items:center;justify-content:center;`
+      + `min-height:100vh;font-family:sans-serif;text-align:center;padding:24px}`
+      + `.card{max-width:440px}.icon{font-size:3.5rem;margin-bottom:18px}`
+      + `.title{color:#C17B1A;font-size:1.35rem;font-weight:700;margin-bottom:12px;line-height:1.4}`
+      + `.msg{color:#8AA3C7;font-size:0.9rem;line-height:1.8;margin-bottom:22px}`
+      + `a{color:#C17B1A;font-size:0.88rem;text-decoration:none}`
+      + `a:hover{text-decoration:underline}<\/style><\/head><body>`
+      + `<div class="card"><div class="icon">&#x1F512;<\/div>`
+      + `<div class="title">&#169; Eng. Aymn Asi &#8212; ${_apPT}<\/div>`
+      + `<div class="msg">Unauthorized copying is prohibited.<br>`
+      + `This page must be accessed from the official website.<\/div>`
+      + `<a href="${_apCrUrl}">${_apCrLbl}<\/a>`
+      + `<\/div><\/body><\/html>`;
+    const _apCrB64  = u8ToB64(new TextEncoder().encode(_apCrHtml));
+    const _apM2Code =
+        `(function(){'use strict';`
+      + `var _aos=${_apAosJs};`
+      + `var _o=(typeof window!=='undefined')?window.location.origin:'';`
+      + `var _dev=/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(_o);`
+      + `if(_aos.indexOf(_o)===-1&&!_dev){`
+      + `var _b='${_apCrB64}';`
+      + `var _n=atob(_b);var _ba=new Uint8Array(_n.length);`
+      + `for(var i=0;i<_n.length;i++)_ba[i]=_n.charCodeAt(i);`
+      + `var _cr=new TextDecoder('utf-8').decode(_ba);`
+      + `var _m2ok=false;`
+      + `try{document.open();document.write(_cr);document.close();_m2ok=true;}catch(_m2e){}`
+      + `if(!_m2ok){`
+      + `try{(document.head||document.documentElement).insertAdjacentHTML('beforeend','<style>html,body{display:none!important}</style>');}catch(_s){}`
+      + `document.addEventListener('DOMContentLoaded',function(){try{`
+      + `document.body.style.cssText='display:flex!important;margin:0;background:#0A1A2E;min-height:100vh;align-items:center;justify-content:center;font-family:sans-serif;text-align:center;padding:24px;box-sizing:border-box';`
+      + `document.body.innerHTML="<div style='max-width:440px'><div style='font-size:3.5rem;margin-bottom:18px'>&#x1F512;</div><h2 style='color:#C17B1A;font-weight:700;margin-bottom:12px'>&#169; Eng. Aymn Asi</h2><p style='color:#8AA3C7;font-size:.9rem;line-height:1.8;margin-bottom:22px'>Unauthorized copying is prohibited.</p><a href='"+_aos[0]+"' style='color:#C17B1A;font-size:.88rem'>"+_aos[0].replace("https://","")+"</a></div>";}catch(_de){}});`
+      + `}`
+      + `}`
+      + `})();`;
+    _apHtml = _apHtml.replace(/(<meta charset="UTF-8">)/i, `$1<script>${_apM2Code}<\/script>`);
+
+    // Protection bundle (Ctrl+S → saves copyright; devtools / context menu block)
+    const _apBundle = buildProtectionBundle(_apRoute.pageFilename);
+    _apHtml = _apHtml.replace(/<\/body>/i, `<script>${_apBundle}<\/script></body>`);
+
+    // Minify
+    _apHtml = _apHtml
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/>\s+</g, '><')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+    _apHtml = minifyBotCSS(_apHtml);
+    // NOTE: injectNonces deliberately SKIPPED.
+    // The bootstrap fetch handler stamps its own nonce on all <script> tags
+    // before document.write() so they satisfy the bootstrap response's CSP.
+
+    // XOR encode
+    const _apRaw   = new TextEncoder().encode(_apHtml);
+    const _apXored = new Uint8Array(_apRaw.length);
+    for (let i = 0; i < _apRaw.length; i++) _apXored[i] = _apRaw[i] ^ _AP_XOR;
+    const _apPayload = u8ToB64(_apXored);
+
+    return new Response(_apPayload, {
+      status: 200,
+      headers: {
+        'Content-Type':  'text/plain; charset=utf-8',
+        'Cache-Control': 'no-store',
+        // ↑ NO Access-Control-Allow-Origin header intentionally.
+        // Browser CORS: fetch() from null origin (file://) → response blocked.
+        // fetch() from same origin (civilengsuite.pages.dev) → no preflight, succeeds.
+        ...SHARED_SECURITY_HEADERS,
+      },
+    });
+  }
+
   // ── Route matching: exact app root paths only ─────────────────────────────
   const route = (path === '' || path === '/' || path === '/index.html')
     ? ROUTES[0]
@@ -1166,71 +1333,16 @@ export async function onRequest(context) {
   // HUMAN PATH — Full protection active
   // ═══════════════════════════════════════════════════════════════════════════
 
-  // Inject protection bundle at end of body
-  const bundle = `<script nonce="${cspNonce}">${buildProtectionBundle(pageFilename)}</script>`;
-  html = html.replace(/<\/body>/i, bundle + '</body>');
+  // [v17] Human path: bootstrap shell with fetch-based payload loader.
+  // XOR payload is NOT embedded inline — served separately by /api/payload.
+  // Browser CORS blocks fetch() from null-origin (file://) pages.
 
-  // Minify (HTML comments, inter-tag whitespace — does NOT remove newlines so
-  // inline JS // comments in marketing pages are preserved correctly)
-  html = html
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/>\s+</g, '><')
-    .replace(/\s{2,}/g, ' ')
-    .trim();
-
-  // ── [M2] Decoded-HTML origin guard — Scenario B coverage ─────────────────
-  // Injected HERE (after minify, BEFORE injectNonces) so the <script> tag
-  // receives a nonce from injectNonces and executes in the decoded-HTML CSP
-  // context (which inherits the bootstrap response's 'nonce-X' policy).
-  //
-  // Scenario B: Chrome Android saves the rendered DOM (post document.write)
-  // rather than the bootstrap HTTP response. The saved file IS the decoded
-  // real HTML. When opened as file://, this guard fires in <head> before any
-  // content renders and replaces the document with the copyright page.
-  //
-  // On legitimate access (origin === 'https://civilengsuite.pages.dev'):
-  //   guard check fails → no-op → page renders normally. ✓
-  // On file:// open (origin === 'null') or unauthorized host:
-  //   guard fires → copyright shown. ✓
-  //
-  // ── [M3] v14 — Runtime allowed-origins list ──────────────────────────────
-  // ROOT CAUSE: gsuite.pages.dev is a second Cloudflare Pages project (the
-  // default *.pages.dev alias). Before v14, all 3 guard layers (M1a, M1c, M2)
-  // hardcoded 'https://civilengsuite.pages.dev' as the sole allowed origin.
-  // When Chrome Android's native Download button made a GET to gsuite.pages.dev,
-  // the bootstrap it received had M1a checking for the canonical domain — but
-  // because the download came from gsuite.pages.dev, window.location.origin on
-  // re-open would be 'null' (file://) which M1a DOES block correctly.
-  //
-  // The actual bypass: gsuite.pages.dev has NO Pages Function deployed, so it
-  // serves raw/unencrypted static files directly from Cloudflare's CDN edge
-  // without this worker running at all. The fix has two parts:
-  //   1. gsuite.pages.dev must redirect all traffic to civilengsuite.pages.dev
-  //      (deploy functions/[[path]].js to that project — see gsuite_redirect_worker.js)
-  //   2. All 3 origin guards now use a runtime-computed _aos array (not a hardcoded
-  //      string) so the canonical domain is always derived from the live request host,
-  //      and custom domains added later require only an env-var change, not a redeploy.
-  //
-  // ALLOWED_ORIGINS env var (optional): comma-separated additional origins.
-  //   Example: "https://civilengsuite.com,https://www.civilengsuite.com"
-  //   If absent, only https://{request host} is allowed (plus localhost).
-  // [M3b-fix] _canonicalOrigin uses _canonicalHostname (from CANONICAL_HOST env var),
-  // NOT url.host. If [[path]].js were deployed to gsuite.pages.dev without the
-  // redirect gate, url.host would be 'gsuite.pages.dev' — making gsuite.pages.dev
-  // the allowed origin in all 3 guards (M1a, M1c, M2), completely neutralizing
-  // protection. With the redirect gate above, url.hostname IS always the canonical
-  // host by this point, but using _canonicalHostname is semantically correct and
-  // safe regardless. _allowedHostsRaw reused from the redirect gate block above.
-  //   If absent, only https://{CANONICAL_HOST} is allowed (plus localhost).
+  // ── Allowed-origins + copyright page (reused in M1a guard and /api/payload) ──
   const _canonicalOrigin = `https://${_canonicalHostname}`;
   const _extraOrigins = _allowedHostsRaw.filter(o => o !== _canonicalOrigin);
   const _allAllowedOrigins = [_canonicalOrigin, ...new Set(_extraOrigins)];
-  // Values are safe: _canonicalHostname from CANONICAL_HOST env var,
-  // _allowedHostsRaw from ALLOWED_ORIGINS env var (both operator-controlled).
   const _allowedOriginsJs = JSON.stringify(_allAllowedOrigins);
 
-  // _sharedCrB64 is hoisted here and reused for M1 (bootstrapOriginGuard
-  // and bootstrapCopyrightBody) later — copyright page computed only once.
   const _sharedCrRP    = route.prefix === '/' ? '' : route.prefix;
   const _sharedCrTM    = html.match(/<title>([^<]*)<\/title>/i);
   const _sharedCrPT    = escHtml(_sharedCrTM ? _sharedCrTM[1] : (route.ogTitle || 'Civil Engineering Suite'));
@@ -1255,60 +1367,11 @@ export async function onRequest(context) {
     + `<a href="${_sharedCrUrl}">${_sharedCrLabel}<\/a>`
     + `<\/div><\/body><\/html>`;
   const _sharedCrB64 = u8ToB64(new TextEncoder().encode(_sharedCrHtml));
-  const _m2Code =
-      `(function(){'use strict';`
-    + `var _aos=${_allowedOriginsJs};`
-    + `var _o=(typeof window!=='undefined')?window.location.origin:'';`
-    + `var _dev=/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(_o);`
-    + `if(_aos.indexOf(_o)===-1&&!_dev){`
-    + `var _b='${_sharedCrB64}';`
-    + `var _n=atob(_b);var _ba=new Uint8Array(_n.length);`
-    + `for(var i=0;i<_n.length;i++)_ba[i]=_n.charCodeAt(i);`
-    + `var _cr=new TextDecoder('utf-8').decode(_ba);`
-    + `var _m2ok=false;`
-    + `try{document.open();document.write(_cr);document.close();_m2ok=true;}catch(_m2e){}`
-    + `if(!_m2ok){`
-    + `try{(document.head||document.documentElement).insertAdjacentHTML('beforeend','<style>html,body{display:none!important}</style>');}catch(_m2se){}`
-    + `document.addEventListener('DOMContentLoaded',function(){try{`
-    + `document.body.style.cssText='display:flex!important;margin:0;background:#0A1A2E;min-height:100vh;align-items:center;justify-content:center;font-family:sans-serif;text-align:center;padding:24px;box-sizing:border-box';`
-    + `document.body.innerHTML="<div style='max-width:440px'><div style='font-size:3.5rem;margin-bottom:18px'>&#x1F512;</div><h2 style='color:#C17B1A;font-weight:700;margin-bottom:12px'>&#169; Eng. Aymn Asi</h2><p style='color:#8AA3C7;font-size:.9rem;line-height:1.8;margin-bottom:22px'>Unauthorized copying is prohibited.</p><a href='"+_aos[0]+"' style='color:#C17B1A;font-size:.88rem'>"+_aos[0].replace("https://","")+"</a></div>";}catch(_m2de){}});`
-    + `}`
-    + `}`
-    + `})();`;
-  // Inject right after <meta charset="UTF-8"> — injectNonces below stamps the nonce
-  html = html.replace(/(<meta charset="UTF-8">)/i, `$1<script>${_m2Code}<\/script>`);
-
-  // Stamp nonce on every <script> tag (including the M2 guard injected above)
-  html = injectNonces(html, cspNonce);
-
-  // [PSI-09] Minify inline <style> blocks before XOR encoding.
-  // Reduces encrypted payload size (~2.9 KiB savings). Uses the same
-  // minifyBotCSS function already applied on the bot path. Safe: does not
-  // touch <style> blocks inside <noscript> or <script> tags.
-  html = minifyBotCSS(html);
-
-  // XOR + base64 obfuscation (same algorithm as api/decrypt.js)
-  const raw   = new TextEncoder().encode(html);
-  const xored = new Uint8Array(raw.length);
-  for (let i = 0; i < raw.length; i++) xored[i] = raw[i] ^ XOR_KEY;
-  const payload = u8ToB64(xored);   // chunked — safe for 500KB+ payloads
 
   const titleM    = html.match(/<title>([^<]*)<\/title>/i);
   const pageTitle = titleM ? titleM[1] : 'Civil Engineering Suite';
 
-  // ── [M1] Bootstrap shell mobile-download protection ──────────────────────
-  // Build origin guard (M1a) and copyright body (M1b) from _sharedCrB64
-  // computed above in the M2 block. Same copyright page; no duplicate work.
-  //
-  // M1a — bootstrapOriginGuard: fires BEFORE <body> is parsed, so the XOR
-  //        decoder script in <body> is never reached on unauthorized opens.
-  // M1b — bootstrapCopyrightBody: first <body> child.
-  //        display:none for legitimate access (XOR decoder replaces the doc
-  //        before first paint). <noscript> makes it display:flex when JS is
-  //        disabled so no-JS viewers see copyright instead of blank screen.
-  //        position:fixed / z-index:2147483647 covers partial-render edge cases.
-  //        Text editors (Notepad, VS Code) see this copyright HTML before
-  //        encountering the base64 XOR payload blob.
+  // ── [M1a] bootstrapOriginGuard ────────────────────────────────────────────
   const bootstrapOriginGuard =
     `<script nonce="${cspNonce}">`
     + `(function(){'use strict';`
@@ -1346,15 +1409,7 @@ export async function onRequest(context) {
     + `<a href="${_sharedCrUrl}" style="color:#C17B1A;font-size:0.88rem">${_sharedCrLabel}</a>`
     + `</div></div>`;
 
-  // [B9] Build og meta block for bootstrap shell.
-  // iMessage link previews are fetched CLIENT-SIDE by the recipient's phone using
-  // a standard Safari mobile UA — it receives the XOR bootstrap shell, not the bot
-  // path. The document.write runs AFTER the link preview has been computed from the
-  // initial HTML, so og tags inside the encrypted payload are invisible to the
-  // preview renderer. Fix: inject og:image, og:title, og:description, og:url,
-  // twitter:card, and twitter:image directly into the bootstrap <head> so any
-  // client — regardless of UA — gets a valid social preview from the initial HTML.
-  // These tags use absolute URLs with the request host so they're always correct.
+  // [B9] OG meta block
   const ogImageAbsolute = `https://${url.host}${route.ogImage}`;
   const ogMetaBlock = route.ogTitle ? [
     `<meta property="og:type" content="website">`,
@@ -1374,15 +1429,6 @@ export async function onRequest(context) {
     `<meta name="twitter:image" content="${escHtml(ogImageAbsolute)}">`,
   ].join('') : '';
 
-  // Bootstrap shell — tiny XOR wrapper; view-source shows only this, not real HTML
-  // [A6] WebMCP is injected as the FIRST script in the bootstrap shell so it fires
-  // for every JS-executing client regardless of User-Agent (including scanners whose
-  // UA does not match BOT_RE). The call is wrapped in a feature-detect guard:
-  // if navigator.modelContext is absent it is a complete no-op. The XOR decode
-  // script runs immediately after, replacing the document via document.write.
-  // The navigator.modelContext.provideContext() registration is a browser-level
-  // side-effect that persists independently of DOM state — the document.write does
-  // not undo it.
   const webMCPBootstrap = `<script nonce="${cspNonce}">`
     + `(function(){`
     + `if(!navigator.modelContext||typeof navigator.modelContext.provideContext!=='function')return;`
@@ -1419,14 +1465,51 @@ export async function onRequest(context) {
     + `}};}}]});}catch(e){}})();`
     + `\u003c/script>`;
 
-  // [PERF] Route-specific LCP preload: hero-bg.png for footing-pro must start
-  // downloading before JS runs. Without this, the browser can't discover the
-  // CSS background-image until the XOR decoder completes + CSS is parsed.
-  const lcpPreload = route.prefix === '/footing-pro'
-    ? '<link rel="preload" as="image" href="/footing-pro/images/hero-bg.avif"'
-      + ' imagesrcset="/footing-pro/images/hero-bg.avif 1x,/footing-pro/images/hero-bg.webp 1x"'
-      + ' imagesizes="100vw" fetchpriority="high">'
-    : '';
+  
+
+  // API slug for /api/payload
+  const _apiSlug = route.prefix === '/' ? '' : route.prefix.replace(/^\//, '');
+
+  // ── [P3] Fetch-based payload loader ──────────────────────────────────────
+  // Fetches /api/payload at runtime. CORS blocks null-origin (file://) requests.
+  // M1a handles offline opens before fetch starts.
+  // Nonce stamping: bootstrap nonce applied client-side to all decoded <script>
+  // tags so they satisfy the bootstrap CSP header (same-nonce inheritance rule).
+  const payloadLoaderScript =
+    `<script nonce="${cspNonce}">`
+    + `(function(){'use strict';`
+    + `if(window['__CES_BLOCK']){`
+    + `var _b='${_sharedCrB64}';var _n=atob(_b);var _ba=new Uint8Array(_n.length);`
+    + `for(var i=0;i<_n.length;i++)_ba[i]=_n.charCodeAt(i);`
+    + `var _cr=new TextDecoder('utf-8').decode(_ba);`
+    + `try{document.open();document.write(_cr);document.close();}catch(_e){`
+    + `var _ov=document.createElement('div');`
+    + `_ov.setAttribute('style','position:fixed;top:0;left:0;width:100%;height:100%;background:#0A1A2E;z-index:2147483647;display:flex;align-items:center;justify-content:center;font-family:sans-serif;text-align:center;padding:24px;box-sizing:border-box');`
+    + `_ov.innerHTML="<div style='max-width:440px'><div style='font-size:3.5rem;margin-bottom:18px'>&#x1F512;</div><h2 style='color:#C17B1A;font-weight:700;margin-bottom:12px'>&#169; Eng. Aymn Asi</h2><p style='color:#8AA3C7;font-size:.9rem;line-height:1.8;margin-bottom:22px'>Unauthorized copying is prohibited.</p><a href='${_sharedCrUrl}' style='color:#C17B1A;font-size:.88rem'>${_sharedCrLabel}</a></div>";`
+    + `try{document.body.appendChild(_ov);}catch(_e2){}}`
+    + `return;}`
+    + `var _nn='${cspNonce}';`
+    + `var _xk=${XOR_KEY};`
+    + `fetch('/api/payload?p=${_apiSlug}',{credentials:'same-origin'})`
+    + `.then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.text();})`
+    + `.then(function(p){`
+    + `var b=atob(p);var u=new Uint8Array(b.length);`
+    + `for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i)^_xk;`
+    + `var h=new TextDecoder('utf-8').decode(u);`
+    + `h=h.replace(/<script(\\b[^>]*?)>/gi,function(m,a){if(/\\bnonce\\b/.test(a))return m;return'<script'+a+' nonce="'+_nn+'">';});`
+    + `document.open();document.write(h);document.close();})`
+    + `.catch(function(){`
+    + `var _b='${_sharedCrB64}';var _n=atob(_b);var _ba=new Uint8Array(_n.length);`
+    + `for(var i=0;i<_n.length;i++)_ba[i]=_n.charCodeAt(i);`
+    + `var _cr=new TextDecoder('utf-8').decode(_ba);`
+    + `var _ok=false;`
+    + `try{document.open();document.write(_cr);document.close();_ok=true;}catch(_e){}`
+    + `if(!_ok){var _ov=document.createElement('div');`
+    + `_ov.setAttribute('style','position:fixed;top:0;left:0;width:100%;height:100%;background:#0A1A2E;z-index:2147483647;display:flex;align-items:center;justify-content:center;font-family:sans-serif;text-align:center;padding:24px;box-sizing:border-box');`
+    + `_ov.innerHTML="<div style='max-width:440px'><div style='font-size:3.5rem;margin-bottom:18px'>&#x1F512;</div><h2 style='color:#C17B1A;font-weight:700;margin-bottom:12px'>&#169; Eng. Aymn Asi</h2><p style='color:#8AA3C7;font-size:.9rem;line-height:1.8;margin-bottom:22px'>Unauthorized copying is prohibited.</p><a href='${_sharedCrUrl}' style='color:#C17B1A;font-size:.88rem'>${_sharedCrLabel}</a></div>";`
+    + `try{document.body.appendChild(_ov);}catch(_e2){}}`
+    + `});})();`
+    + `\u003c/script>`;
 
   const bootstrap = `<!DOCTYPE html><html><head>`
     + `<meta charset="UTF-8">`
@@ -1451,46 +1534,13 @@ export async function onRequest(context) {
     + `</head><body>`
     + bootstrapCopyrightBody
     + webMCPBootstrap
-    + `<script nonce="${cspNonce}">`
-    + `(function(){try{`
-    // [M1c] Defense-in-depth: origin check INSIDE XOR decoder.
-    // Runs only if M1a (parser-blocking <head> guard) was somehow bypassed.
-    // On unauthorized origin: writes copyright page, then returns — XOR decode never runs.
-    + `var _xaos=${_allowedOriginsJs};`
-    + `var _xo=window.location.origin;`
-    + `var _xd=/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(_xo);`
-    + `if(window['__CES_BLOCK']||(_xaos.indexOf(_xo)===-1&&!_xd)){`
-    + `var _xb='${_sharedCrB64}';`
-    + `var _xn=atob(_xb);var _xba=new Uint8Array(_xn.length);`
-    + `for(var xi=0;xi<_xn.length;xi++)_xba[xi]=_xn.charCodeAt(xi);`
-    + `var _xcr=new TextDecoder('utf-8').decode(_xba);`
-    + `var _m1cOk=false;`
-    + `try{document.open();document.write(_xcr);document.close();_m1cOk=true;}catch(_xe){}`
-    + `if(!_m1cOk){`
-    + `var _xov=document.createElement('div');`
-    + `_xov.setAttribute('style','position:fixed;top:0;left:0;width:100%;height:100%;background:#0A1A2E;z-index:2147483647;display:flex;align-items:center;justify-content:center;font-family:sans-serif;text-align:center;padding:24px;box-sizing:border-box');`
-    + `_xov.innerHTML="<div style='max-width:440px'><div style='font-size:3.5rem;margin-bottom:18px'>&#x1F512;</div><h2 style='color:#C17B1A;font-weight:700;margin-bottom:12px'>&#169; Eng. Aymn Asi</h2><p style='color:#8AA3C7;font-size:.9rem;line-height:1.8;margin-bottom:22px'>Unauthorized copying is prohibited.</p><a href='"+_xaos[0]+"' style='color:#C17B1A;font-size:.88rem'>"+_xaos[0].replace("https://","")+"</a></div>";`
-    + `try{document.body.appendChild(_xov);}catch(_xoe){}}`
-    + `return;}`
-    + `var p="${payload}";`
-    + `var b=atob(p);`
-    + `var u=new Uint8Array(b.length);`
-    + `for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i)^${XOR_KEY};`
-    + `var h=new TextDecoder("utf-8").decode(u);`
-    + `document.open();document.write(h);document.close();`
-    + `}catch(e){var _f=document.createElement('p');`
-    + `_f.style.padding='40px';_f.style.color='#C17B1A';_f.style.fontFamily='sans-serif';`
-    + `_f.textContent='Page could not be loaded. Please refresh or contact support.';`
-    + `document.body.appendChild(_f);}})();`
-    + `\u003c/script>`
+    + payloadLoaderScript
     + `</body></html>`;
 
   return new Response(bootstrap, { status: 200, headers: {
     'Content-Type':            'text/html; charset=utf-8',
     'Cache-Control':           'no-store',
-    'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ=' 'unsafe-hashes' 'sha256-nAiI7XK5Mt/SgNQUZPqTuikvwxIVHV3se6mHGQue+88=' 'sha256-Jag+ZHPii6iUmMQWlnwms/mnjM8gRPTOJA2KIyTQQRk=' 'sha256-uLUdJIdD3+8SpL4nHNFN9YmyHRRmrseSQKwzj3ECn2I=' 'sha256-akyHNuxwVvvLQ11iHoDrpca0qH3TU3LfGbtdQ8kNdwI=' 'sha256-UOhLo4NRrWG89b3vpgtU0dc/C8aWLS+MQ2Lf9vW/4Fk=' 'sha256-jHF5hTIlMDyGZRAsNK0HO/WFYrwPvI2I1q0o1xKKB6I=' 'sha256-wflfhEeJWTAjAK0hnm9/OICxAQ8fVnj3168JrJ/m91k=' 'sha256-oTzV9+pQ7IAxC4NoAc7dH4+0Is4KloZ9u7cMJC7UDrE=' 'sha256-bTpi/7w0Cd8ihAWpwcZJIdz49sMq0d73fWWDzp5Ju2Q='`,
-    // [A1] RFC 8288 Link header — visible in HTTP headers before JS executes.
-    // [A4] Vary: Accept on homepage so intermediaries separate markdown/HTML caches.
+    ''Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ=' 'unsafe-hashes' 'sha256-nAiI7XK5Mt/SgNQUZPqTuikvwxIVHV3se6mHGQue+88=' 'sha256-Jag+ZHPii6iUmMQWlnwms/mnjM8gRPTOJA2KIyTQQRk=' 'sha256-uLUdJIdD3+8SpL4nHNFN9YmyHRRmrseSQKwzj3ECn2I=' 'sha256-akyHNuxwVvvLQ11iHoDrpca0qH3TU3LfGbtdQ8kNdwI=' 'sha256-UOhLo4NRrWG89b3vpgtU0dc/C8aWLS+MQ2Lf9vW/4Fk=' 'sha256-jHF5hTIlMDyGZRAsNK0HO/WFYrwPvI2I1q0o1xKKB6I=' 'sha256-wflfhEeJWTAjAK0hnm9/OICxAQ8fVnj3168JrJ/m91k=' 'sha256-oTzV9+pQ7IAxC4NoAc7dH4+0Is4KloZ9u7cMJC7UDrE=' 'sha256-bTpi/7w0Cd8ihAWpwcZJIdz49sMq0d73fWWDzp5Ju2Q='``,
     ...(route.prefix === '/' ? {
       'Link': HOMEPAGE_LINK_HEADER,
       'Vary': 'Accept',
