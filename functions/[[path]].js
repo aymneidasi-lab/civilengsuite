@@ -10,6 +10,32 @@
  *   CES_XOR_KEY     — 2-character hex XOR key (optional, default 0x5A)
  *
  * ─── CHANGE LOG ──────────────────────────────────────────────────────────────
+ * 2026-06-09 v17 — M1b-activate: close worst-case blank-page gap [MF4]:
+ *
+ *   ROOT CAUSE: When M1a's document.open() throws (__CES_BLOCK=1) AND M1c's
+ *   document.open() also throws AND document.body.appendChild(_xov) is silently
+ *   swallowed by the M1c inner try-catch, the unconditional return; correctly
+ *   blocks XOR decode — content is never exposed — but #_ces_cr_body (M1b)
+ *   remains display:none for JS users and the overlay div was never appended.
+ *   The user sees a blank dark page instead of the copyright card.
+ *
+ *   [MF4] m1bActivate — parser-blocking <script> inserted between
+ *         bootstrapCopyrightBody (M1b) and webMCPBootstrap in the bootstrap body.
+ *         Checks window['__CES_BLOCK']. If set (M1a document.open failed),
+ *         immediately sets #_ces_cr_body display:flex. Runs synchronously before
+ *         M1c — copyright card is visible on every code path where M1a fails,
+ *         regardless of what M1c's document.open() or appendChild subsequently does.
+ *         XOR decode remains blocked by M1c's unconditional return;.
+ *
+ *   FAILURE MODE COVERAGE AFTER MF4:
+ *     Normal access — m1bActivate is a 0-cost no-op (__CES_BLOCK is undefined). ✓
+ *     file:// | document.open() succeeds — M1a aborts parser, m1bActivate never
+ *       reached, copyright shown by M1a. ✓
+ *     file:// | document.open() throws — M1a sets __CES_BLOCK=1, m1bActivate
+ *       shows #_ces_cr_body immediately, M1c fires overlay + return. ✓
+ *     Worst-case: M1a fails + M1c document.open() fails + appendChild fails —
+ *       m1bActivate already showed #_ces_cr_body. XOR decode blocked. ✓
+ *
  * 2026-04-14 v2 — SEO infrastructure fixes (F1–F6):
  *   [F1] BOT_RE: added googlebot-image, adsbot-google, perplexitybot, ia_archiver
  *   [F2] botHtml: strip <noscript><style>body{display:none} (hid page from crawler)
@@ -1346,6 +1372,20 @@ export async function onRequest(context) {
     + `<a href="${_sharedCrUrl}" style="color:#C17B1A;font-size:0.88rem">${_sharedCrLabel}</a>`
     + `</div></div>`;
 
+  // ── [MF4] M1b-activate — parser-blocking guard between M1b and webMCPBootstrap ──
+  // Fires synchronously after #_ces_cr_body (M1b) is parsed. If __CES_BLOCK was
+  // set by M1a (document.open threw), shows M1b immediately — before M1c runs.
+  // This closes the worst-case path where M1c's document.open() AND appendChild()
+  // both fail: M1b is already visible, XOR decode is still blocked by M1c return;.
+  // On legitimate access __CES_BLOCK is undefined — this is a zero-cost no-op.
+  const m1bActivate =
+      `<script nonce="${cspNonce}">`
+    + `(function(){if(window['__CES_BLOCK']){`
+    + `var _x=document.getElementById('_ces_cr_body');`
+    + `if(_x)_x.style.display='flex';`
+    + `}})();`
+    + `\u003c/script>`;
+
   // [B9] Build og meta block for bootstrap shell.
   // iMessage link previews are fetched CLIENT-SIDE by the recipient's phone using
   // a standard Safari mobile UA — it receives the XOR bootstrap shell, not the bot
@@ -1450,6 +1490,7 @@ export async function onRequest(context) {
     + bootstrapOriginGuard
     + `</head><body>`
     + bootstrapCopyrightBody
+    + m1bActivate
     + webMCPBootstrap
     + `<script nonce="${cspNonce}">`
     + `(function(){try{`
