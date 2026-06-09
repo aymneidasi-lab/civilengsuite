@@ -53,81 +53,51 @@
  *        the /payment/* _headers block which governs the checkout flow.
  *
  *
- * 2026-06-09 v16 — Mobile download protection: fix origin-guard redirect fallback (MF1–MF3):
+ * 2026-06-09 v15 — Android Chrome download bypass fix: __CES_BLOCKED flag + CSS fallback (M4):
  *
- *   ROOT CAUSE: All three origin-guard layers (M1a bootstrapOriginGuard, M1c
- *   xorDecoderOriginGuard, M2 htmlOriginGuard) shared an identical fallback bug.
- *   When document.open() throws on Chrome Android opening a downloaded file via
- *   the native file viewer (file:// or content:// URI), the catch block fired:
- *       window.location.replace(_aos[0] + path)
- *   This silently navigated the browser to the LIVE canonical URL. Chrome loaded
- *   and rendered the real engineering page — the downloaded file appeared to have
- *   "bypassed" protection, but was actually being redirected to civilengsuite.pages.dev.
+ *   ROOT CAUSE: document.open() + document.write() silently fails on Android Chrome when
+ *   opening local file:// downloads. Chrome has progressively restricted document.write()
+ *   since v76+, with stricter enforcement on mobile / local file contexts. When document.write
+ *   fails in M1a (bootstrap <head> guard), the previous fallback was window.location.replace()
+ *   to the live site — which fails silently when the device is offline. Result: HTML parser
+ *   continues → <body> is parsed → M1c origin check runs but its document.write also fails
+ *   → its location.replace also fails offline → XOR decoder executes → REAL PAGE RENDERS.
+ *   For Scenario B (Chrome saves post-document.write rendered DOM): M2 guard in decoded HTML
+ *   has the same document.write + offline-redirect failure → real page renders.
  *
- *   [MF1] bootstrapOriginGuard (M1a) fallback: window.location.replace() removed.
- *         Replaced with: attempt document.open() without any redirect on failure.
- *         On document.open() failure, sets window['__CES_BLOCK']=1 so M1c can
- *         detect the blocked state when the HTML parser reaches <body>. If M1a's
- *         document.open() aborts the parser (normal Chrome behavior), M1c is never
- *         reached and copyright is already shown. If it fails, M1c takes over.
+ *   [M4a] bootstrapOriginGuard (M1a) — two hardened offline-safe mechanisms:
+ *         (1) window.__CES_BLOCKED = 1 set BEFORE the document.write attempt. The flag
+ *             persists in the window object regardless of whether document.write succeeds.
+ *             When body is subsequently parsed (because document.write failed), M1c reads
+ *             the flag and immediately returns without executing the XOR decoder.
+ *         (2) CSS fallback: when document.write fails, injects a <style> tag into
+ *             document.head with rule: #_ces_cr_body{display:flex!important}.
+ *             bootstrapCopyrightBody (#_ces_cr_body) is already position:fixed; top:0;
+ *             left:0; width:100%; height:100%; z-index:2147483647 — once display:flex
+ *             it covers the entire viewport before any real content is visible.
+ *         OLD fallback: window.location.replace(origin) — fails silently offline.
+ *         NEW fallback: CSS injection — works offline, zero network required.
  *
- *   [MF2] xorDecoderOriginGuard (M1c): guard condition expanded from
- *         (_xaos.indexOf(_xo)===-1&&!_xd) to also OR window['__CES_BLOCK'],
- *         which is set by M1a on document.open failure. Fallback changed from
- *         window.location.replace() to a fixed-position DOM overlay element
- *         (document.body is available in the <body> script context). The return
- *         statement after copyright display is unconditional — XOR decode NEVER
- *         runs regardless of document.open() success or failure.
+ *   [M4b] XOR decoder script (M1c) — new Tier-0 check at start of IIFE (before origin check):
+ *         if(window.__CES_BLOCKED) → shows #_ces_cr_body via inline style → return.
+ *         XOR decoder never executes. Catches the exact failure mode: M1a document.write
+ *         failed but __CES_BLOCKED was set. M1c also now sets window.__CES_BLOCKED=1 before
+ *         its own document.write attempt, and replaces window.location.replace fallback
+ *         with direct #_ces_cr_body DOM show — works offline, no network required.
  *
- *   [MF3] htmlOriginGuard (M2) fallback: window.location.replace() removed.
- *         Replaced with: (a) inject hide-style into <head> immediately, so real
- *         content is not visible even if document.open() fails; (b) DOMContentLoaded
- *         handler that overwrites document.body with the copyright card. Handles
- *         Scenario B (Chrome Android saves the rendered DOM post document.write).
+ *   [M4c] M2 decoded-HTML guard — offline-safe fallback when document.write fails:
+ *         OLD: window.location.replace(allowedOrigin) — fails offline.
+ *         NEW: (1) window.stop() — best-effort halt of HTML parser (stops remaining
+ *                  <head> CSS/JS and all of <body> from being parsed on most browsers).
+ *              (2) CSS injection: body>*{display:none!important} hides all body content;
+ *                  #_ces_m2_ov{display:flex!important} exception reveals copyright overlay.
+ *              (3) Copyright overlay div injected via DOMContentLoaded + setTimeout(200ms)
+ *                  fallback. Overlay inner HTML is pre-encoded as _m2CrIB64 (base64) and
+ *                  decoded client-side — fully self-contained, no network required.
+ *         SECURITY: Even if window.stop() has no effect on file:// parsing (no network
+ *         requests to stop), the CSS body-hide + fixed overlay ensures only the copyright
+ *         message is visible regardless of what other page content parses or executes.
  *
- *   NET RESULT: Downloaded .html file opened on Android Chrome (file:// or
- *   content://) now shows the copyright page and NEVER silently redirects to
- *   civilengsuite.pages.dev. The live site is not loaded from a locally opened file.
- *
- * 2026-06-09 v15 — Inline non-canonical redirect gate + fix _canonicalOrigin derivation (M3b-inline, M3b-fix):
- *
- *   CONTEXT: v14 documented [M3b] as a SEPARATE gsuite_redirect_worker.js file that would
- *   be deployed independently to the gsuite.pages.dev project. In practice this requires
- *   maintaining two repos/deployments. v15 folds both responsibilities into this single
- *   [[path]].js — the same file now acts as both the canonical serving handler and a
- *   full redirect worker when deployed to any non-canonical Pages project.
- *
- *   [M3b-inline] Non-canonical host redirect gate added at the top of onRequest().
- *         Runs BEFORE STATIC_PASSTHROUGH — every request to a non-canonical host
- *         (e.g., gsuite.pages.dev) is intercepted and 301-redirected to the canonical
- *         domain, including font, image, and .well-known requests. This closes the
- *         CDN bypass at the network layer: no raw file is ever served from any
- *         non-canonical host.
- *         Canonical host: CANONICAL_HOST env var (default: 'civilengsuite.pages.dev').
- *         Add custom domains: ALLOWED_ORIGINS env var (unchanged — comma-separated https:// origins).
- *         Cloudflare preview deployments (*.civilengsuite.pages.dev) are exempt via
- *         subdomain suffix check so preview URLs work without adding them to ALLOWED_ORIGINS.
- *         Localhost / 127.0.0.1 (any port) is always exempt for local wrangler dev.
- *         _canonicalHostname and _allowedHostsRaw computed here are reused below in
- *         [M3a] to build _allowedOriginsJs — no duplicate env-var reads.
- *
- *   [M3b-fix]  _canonicalOrigin no longer derived from url.host.
- *         v14 set: const _canonicalOrigin = `https://${url.host}`;
- *         Critical defect: if [[path]].js is deployed to gsuite.pages.dev WITHOUT the
- *         redirect gate (i.e., v14 only, before this fix), url.host would be
- *         'gsuite.pages.dev', and _canonicalOrigin would be 'https://gsuite.pages.dev'.
- *         All three guard layers (M1a bootstrapOriginGuard, M1c xorDecoderOriginGuard,
- *         M2 htmlOriginGuard) would then emit gsuite.pages.dev as the ALLOWED origin —
- *         completely neutralizing protection for any request served from that host.
- *         Fix: _canonicalOrigin = `https://${_canonicalHostname}` where _canonicalHostname
- *         comes from CANONICAL_HOST env var. By the time [M3a] runs, the redirect gate
- *         has already guaranteed url.hostname IS the canonical host, making this
- *         semantically equivalent but safe for multi-project deployments.
- *
- *   [M3b-urls] _sharedCrUrl and _sharedCrLabel (the copyright page's clickable link)
- *         now use _canonicalOrigin / _canonicalHostname instead of the hardcoded
- *         literal 'https://civilengsuite.pages.dev'. Ensures the copyright page link
- *         is always correct for custom domain deployments.
  *
  * 2026-06-08 v14 — Runtime allowed-origins + gsuite.pages.dev redirect gate (M3):
  *
@@ -863,48 +833,6 @@ export async function onRequest(context) {
   const url  = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, '') || '/';
 
-  // ── [M3b-inline] Non-canonical host redirect gate ────────────────────────
-  // Deployed to the canonical project (civilengsuite.pages.dev): url.hostname
-  // matches _canonicalHostname → gate is a no-op → normal serving continues.
-  //
-  // Deployed to a non-canonical project (e.g., gsuite.pages.dev): url.hostname
-  // does NOT match → 301 redirect to canonical → zero raw content served.
-  //
-  // MUST run before STATIC_PASSTHROUGH so that font/image/well-known requests
-  // from non-canonical hosts are also redirected rather than passed through.
-  //
-  // _canonicalHostname and _allowedHostsRaw are computed once here and reused
-  // below in [M3a] for building _allowedOriginsJs — no duplicate env reads.
-  //
-  // Canonical host  : CANONICAL_HOST env var (default: 'civilengsuite.pages.dev')
-  // Additional hosts: ALLOWED_ORIGINS env var (comma-separated https:// origins)
-  // Always exempt   : localhost / 127.0.0.1 (any port) for wrangler pages dev
-  // Always exempt   : *.civilengsuite.pages.dev preview-deployment subdomains
-  const _canonicalHostname = ((env.CANONICAL_HOST || 'civilengsuite.pages.dev')).trim().toLowerCase();
-  const _allowedHostsRaw = (env.ALLOWED_ORIGINS || '')
-    .split(',').map(s => s.trim())
-    .filter(s => s.length > 0 && /^https?:\/\//.test(s));
-  const _allowedHostsSet = new Set([
-    _canonicalHostname,
-    ..._allowedHostsRaw.map(o => {
-      try { return new URL(o).hostname.toLowerCase(); } catch(e) { return ''; }
-    }).filter(Boolean),
-  ]);
-  const _reqHostLower  = url.hostname.toLowerCase();
-  const _isLocalhostReq = /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(url.host);
-  // Allow Cloudflare preview deployments: *.civilengsuite.pages.dev
-  const _isPreviewDeploy = _reqHostLower.endsWith('.' + _canonicalHostname);
-  if (!_allowedHostsSet.has(_reqHostLower) && !_isLocalhostReq && !_isPreviewDeploy) {
-    return new Response(null, {
-      status: 301,
-      headers: {
-        'Location':      `https://${_canonicalHostname}${url.pathname}${url.search}`,
-        'Cache-Control': 'no-store',
-        ...SHARED_SECURITY_HEADERS,
-      },
-    });
-  }
-
   // ── Always pass through static/SEO files — never intercept these ──────────
   // [P1] ADDED: payment(?:\/.*)? and api\/payment\/.* — payment checkout pages
   //      are static HTML served directly by Cloudflare Pages file serving.
@@ -1214,19 +1142,15 @@ export async function onRequest(context) {
   // ALLOWED_ORIGINS env var (optional): comma-separated additional origins.
   //   Example: "https://civilengsuite.com,https://www.civilengsuite.com"
   //   If absent, only https://{request host} is allowed (plus localhost).
-  // [M3b-fix] _canonicalOrigin uses _canonicalHostname (from CANONICAL_HOST env var),
-  // NOT url.host. If [[path]].js were deployed to gsuite.pages.dev without the
-  // redirect gate, url.host would be 'gsuite.pages.dev' — making gsuite.pages.dev
-  // the allowed origin in all 3 guards (M1a, M1c, M2), completely neutralizing
-  // protection. With the redirect gate above, url.hostname IS always the canonical
-  // host by this point, but using _canonicalHostname is semantically correct and
-  // safe regardless. _allowedHostsRaw reused from the redirect gate block above.
-  //   If absent, only https://{CANONICAL_HOST} is allowed (plus localhost).
-  const _canonicalOrigin = `https://${_canonicalHostname}`;
-  const _extraOrigins = _allowedHostsRaw.filter(o => o !== _canonicalOrigin);
+  const _canonicalOrigin = `https://${url.host}`;
+  const _extraOrigins = (env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(s => s.length > 0 && /^https?:\/\//.test(s));
   const _allAllowedOrigins = [_canonicalOrigin, ...new Set(_extraOrigins)];
-  // Values are safe: _canonicalHostname from CANONICAL_HOST env var,
-  // _allowedHostsRaw from ALLOWED_ORIGINS env var (both operator-controlled).
+  // Serialize as a JS array literal to be inlined into the guard scripts.
+  // Values are already safe: derived from url.host (CF-validated hostname) and
+  // env.ALLOWED_ORIGINS (operator-controlled). escHtml used for double-quote safety.
   const _allowedOriginsJs = JSON.stringify(_allAllowedOrigins);
 
   // _sharedCrB64 is hoisted here and reused for M1 (bootstrapOriginGuard
@@ -1234,8 +1158,8 @@ export async function onRequest(context) {
   const _sharedCrRP    = route.prefix === '/' ? '' : route.prefix;
   const _sharedCrTM    = html.match(/<title>([^<]*)<\/title>/i);
   const _sharedCrPT    = escHtml(_sharedCrTM ? _sharedCrTM[1] : (route.ogTitle || 'Civil Engineering Suite'));
-  const _sharedCrUrl   = `${_canonicalOrigin}${_sharedCrRP}/`;
-  const _sharedCrLabel = `${_canonicalHostname}${_sharedCrRP}/`;
+  const _sharedCrUrl   = `https://civilengsuite.pages.dev${_sharedCrRP}/`;
+  const _sharedCrLabel = `civilengsuite.pages.dev${_sharedCrRP}/`;
   const _sharedCrHtml  =
     `<!DOCTYPE html><html><head><meta charset="UTF-8">`
     + `<meta name="viewport" content="width=device-width,initial-scale=1">`
@@ -1255,6 +1179,20 @@ export async function onRequest(context) {
     + `<a href="${_sharedCrUrl}">${_sharedCrLabel}<\/a>`
     + `<\/div><\/body><\/html>`;
   const _sharedCrB64 = u8ToB64(new TextEncoder().encode(_sharedCrHtml));
+  // [M4c] Pre-encode copyright overlay inner HTML for M2 offline fallback.
+  // Decoded client-side when document.open/write/close fails (Android Chrome, file:// loads).
+  const _m2CrInner =
+      `<div style="font-size:3.5rem;margin-bottom:18px">&#x1F512;<\/div>`
+    + `<div style="color:#C17B1A;font-size:1.35rem;font-weight:700;margin-bottom:12px">`
+    + `&#169; Eng. Aymn Asi &#8212; ${escHtml(_sharedCrPT)}<\/div>`
+    + `<p style="color:#8AA3C7;font-size:0.9rem;line-height:1.8;margin-bottom:22px">`
+    + `Unauthorized copying is prohibited.<br>`
+    + `This page must be accessed from the official website.<\/p>`
+    + `<a href="${escHtml(_sharedCrUrl)}" style="color:#C17B1A;font-size:0.88rem">`
+    + `${escHtml(_sharedCrLabel)}<\/a>`;
+  const _m2CrIB64 = u8ToB64(new TextEncoder().encode(_m2CrInner));
+
+  // [M4c] M2 guard: document.write primary + window.stop + CSS-overlay offline fallback.
   const _m2Code =
       `(function(){'use strict';`
     + `var _aos=${_allowedOriginsJs};`
@@ -1265,13 +1203,32 @@ export async function onRequest(context) {
     + `var _n=atob(_b);var _ba=new Uint8Array(_n.length);`
     + `for(var i=0;i<_n.length;i++)_ba[i]=_n.charCodeAt(i);`
     + `var _cr=new TextDecoder('utf-8').decode(_ba);`
-    + `var _m2ok=false;`
-    + `try{document.open();document.write(_cr);document.close();_m2ok=true;}catch(_m2e){}`
-    + `if(!_m2ok){`
-    + `try{(document.head||document.documentElement).insertAdjacentHTML('beforeend','<style>html,body{display:none!important}</style>');}catch(_m2se){}`
-    + `document.addEventListener('DOMContentLoaded',function(){try{`
-    + `document.body.style.cssText='display:flex!important;margin:0;background:#0A1A2E;min-height:100vh;align-items:center;justify-content:center;font-family:sans-serif;text-align:center;padding:24px;box-sizing:border-box';`
-    + `document.body.innerHTML="<div style='max-width:440px'><div style='font-size:3.5rem;margin-bottom:18px'>&#x1F512;</div><h2 style='color:#C17B1A;font-weight:700;margin-bottom:12px'>&#169; Eng. Aymn Asi</h2><p style='color:#8AA3C7;font-size:.9rem;line-height:1.8;margin-bottom:22px'>Unauthorized copying is prohibited.</p><a href='"+_aos[0]+"' style='color:#C17B1A;font-size:.88rem'>"+_aos[0].replace("https://","")+"</a></div>";}catch(_m2de){}});`
+    + `var _m2w=false;`
+    + `try{document.open();document.write(_cr);document.close();_m2w=true;}catch(e){}`
+    + `if(!_m2w){`
+    + `try{window.stop();}catch(_m2ws){}`
+    + `try{var _m2s=document.createElement('style');`
+    + `_m2s.id='_ces_m2_kill';`
+    + `_m2s.textContent='body>*{display:none!important}#_ces_m2_ov{display:flex!important;`
+    + `position:fixed;top:0;left:0;width:100%;height:100%;background:#0A1A2E;`
+    + `align-items:center;justify-content:center;font-family:sans-serif;`
+    + `z-index:2147483647;text-align:center;padding:24px}';`
+    + `document.head.appendChild(_m2s);}catch(_m2ss){}`
+    + `var _m2ib='${_m2CrIB64}';`
+    + `var _m2id=atob(_m2ib);var _m2iu=new Uint8Array(_m2id.length);`
+    + `for(var _m2i=0;_m2i<_m2id.length;_m2i++)_m2iu[_m2i]=_m2id.charCodeAt(_m2i);`
+    + `var _m2ic=new TextDecoder('utf-8').decode(_m2iu);`
+    + `var _m2done=false;`
+    + `var _m2inj=function(){`
+    + `if(_m2done)return;_m2done=true;`
+    + `try{if(!document.getElementById('_ces_m2_ov')&&document.body){`
+    + `var _m2ov=document.createElement('div');`
+    + `_m2ov.id='_ces_m2_ov';`
+    + `_m2ov.innerHTML='<div style="max-width:440px">'+_m2ic+'<\\/div>';`
+    + `document.body.insertBefore(_m2ov,document.body.firstChild);}`
+    + `}catch(_m2inje){}};`
+    + `if(document.readyState!=='loading'){_m2inj();}`
+    + `else{document.addEventListener('DOMContentLoaded',_m2inj);setTimeout(_m2inj,200);}`
     + `}`
     + `}`
     + `})();`;
@@ -1309,6 +1266,9 @@ export async function onRequest(context) {
   //        position:fixed / z-index:2147483647 covers partial-render edge cases.
   //        Text editors (Notepad, VS Code) see this copyright HTML before
   //        encountering the base64 XOR payload blob.
+  // [M4a] bootstrapOriginGuard: sets __CES_BLOCKED flag before document.write attempt.
+  // If document.write fails (Android Chrome, file:// loads), CSS fallback makes #_ces_cr_body
+  // visible. M1c reads __CES_BLOCKED and returns before XOR decode. Works fully offline.
   const bootstrapOriginGuard =
     `<script nonce="${cspNonce}">`
     + `(function(){'use strict';`
@@ -1316,13 +1276,17 @@ export async function onRequest(context) {
     + `var _o=(typeof window!=='undefined')?window.location.origin:'';`
     + `var _dev=/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(_o);`
     + `if(_aos.indexOf(_o)===-1&&!_dev){`
+    + `window.__CES_BLOCKED=1;`
     + `var _b='${_sharedCrB64}';`
     + `var _n=atob(_b);var _ba=new Uint8Array(_n.length);`
     + `for(var i=0;i<_n.length;i++)_ba[i]=_n.charCodeAt(i);`
     + `var _cr=new TextDecoder('utf-8').decode(_ba);`
-    + `var _m1aOk=false;`
-    + `try{document.open();document.write(_cr);document.close();_m1aOk=true;}catch(_m1ae){}`
-    + `if(!_m1aOk){window['__CES_BLOCK']=1;}`
+    + `var _m1aw=false;`
+    + `try{document.open();document.write(_cr);document.close();_m1aw=true;}catch(e){}`
+    + `if(!_m1aw){`
+    + `try{var _m1as=document.createElement('style');`
+    + `_m1as.textContent='#_ces_cr_body{display:flex!important}';`
+    + `document.head.appendChild(_m1as);}catch(_m1ase){}}`
     + `}`
     + `})();`
     + `\u003c/script>`;
@@ -1453,24 +1417,35 @@ export async function onRequest(context) {
     + webMCPBootstrap
     + `<script nonce="${cspNonce}">`
     + `(function(){try{`
+    // [M1c-NEW M4b] Tier-0: __CES_BLOCKED check fires before M1c origin check.
+    // Set by M1a when document.write failed. Shows copyright body div → returns.
+    // XOR decoder never executes. Closes the Android Chrome offline bypass.
+    + `if(window.__CES_BLOCKED){`
+    + `var _m1cb=document.getElementById('_ces_cr_body');`
+    + `if(_m1cb)_m1cb.style.cssText='display:flex!important;position:fixed;top:0;left:0;`
+    + `width:100%;height:100%;background:#0A1A2E;font-family:sans-serif;`
+    + `align-items:center;justify-content:center;min-height:100vh;`
+    + `text-align:center;z-index:2147483647;';`
+    + `return;}`
     // [M1c] Defense-in-depth: origin check INSIDE XOR decoder.
     // Runs only if M1a (parser-blocking <head> guard) was somehow bypassed.
     // On unauthorized origin: writes copyright page, then returns — XOR decode never runs.
     + `var _xaos=${_allowedOriginsJs};`
     + `var _xo=window.location.origin;`
     + `var _xd=/^https?:\\/\\/(localhost|127\\.0\\.0\\.1)(:\\d+)?$/.test(_xo);`
-    + `if(window['__CES_BLOCK']||(_xaos.indexOf(_xo)===-1&&!_xd)){`
+    + `if(_xaos.indexOf(_xo)===-1&&!_xd){`
+    + `window.__CES_BLOCKED=1;`
     + `var _xb='${_sharedCrB64}';`
     + `var _xn=atob(_xb);var _xba=new Uint8Array(_xn.length);`
     + `for(var xi=0;xi<_xn.length;xi++)_xba[xi]=_xn.charCodeAt(xi);`
     + `var _xcr=new TextDecoder('utf-8').decode(_xba);`
-    + `var _m1cOk=false;`
-    + `try{document.open();document.write(_xcr);document.close();_m1cOk=true;}catch(_xe){}`
-    + `if(!_m1cOk){`
-    + `var _xov=document.createElement('div');`
-    + `_xov.setAttribute('style','position:fixed;top:0;left:0;width:100%;height:100%;background:#0A1A2E;z-index:2147483647;display:flex;align-items:center;justify-content:center;font-family:sans-serif;text-align:center;padding:24px;box-sizing:border-box');`
-    + `_xov.innerHTML="<div style='max-width:440px'><div style='font-size:3.5rem;margin-bottom:18px'>&#x1F512;</div><h2 style='color:#C17B1A;font-weight:700;margin-bottom:12px'>&#169; Eng. Aymn Asi</h2><p style='color:#8AA3C7;font-size:.9rem;line-height:1.8;margin-bottom:22px'>Unauthorized copying is prohibited.</p><a href='"+_xaos[0]+"' style='color:#C17B1A;font-size:.88rem'>"+_xaos[0].replace("https://","")+"</a></div>";`
-    + `try{document.body.appendChild(_xov);}catch(_xoe){}}`
+    + `var _m1cw=false;`
+    + `try{document.open();document.write(_xcr);document.close();_m1cw=true;}catch(_xe){}`
+    + `if(!_m1cw){var _m1cbc=document.getElementById('_ces_cr_body');`
+    + `if(_m1cbc)_m1cbc.style.cssText='display:flex!important;position:fixed;top:0;left:0;`
+    + `width:100%;height:100%;background:#0A1A2E;font-family:sans-serif;`
+    + `align-items:center;justify-content:center;min-height:100vh;`
+    + `text-align:center;z-index:2147483647;';}`
     + `return;}`
     + `var p="${payload}";`
     + `var b=atob(p);`
