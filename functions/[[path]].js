@@ -53,6 +53,39 @@
  *        the /payment/* _headers block which governs the checkout flow.
  *
  *
+ * 2026-06-09 v19 — CSS pre-hide + M1c overlay visibility fix + copyright message update (FxA, FxB, FxC-msg):
+ *
+ *   Three hardened protection layers:
+ *
+ *   [FxA] M1c overlay visibility fix:
+ *         BUG: When M1a fires and sets html {display:none!important}, then document.open()
+ *         throws, M1c enters the !_m1cOk branch and appends a position:fixed overlay to
+ *         document.body. BUT html is still display:none — the CSS rendering tree excludes
+ *         it entirely; fixed-position children are NOT rendered. Overlay is invisible.
+ *         FIX: Before appending the overlay, reset html cssText to:
+ *           'display:block!important;background:#0A1A2E'
+ *         The background:#0A1A2E prevents any flash of real page content between the
+ *         display:block reset and the first paint of the overlay.
+ *
+ *   [FxB] CSS pre-hide nuclear layer in bootstrap:
+ *         Adds <style id="_ces_hide">html{visibility:hidden!important;pointer-events:none!important}</style>
+ *         as the FIRST child of bootstrap <head>, before ALL preloads, metas, and scripts.
+ *         Fires at CSS parse time — before M1a, before any script, before any preload is
+ *         initiated. For authorized users, document.open()+document.write() inside the XOR
+ *         decoder replaces the entire document, removing _ces_hide automatically with it.
+ *         For unauthorized users, M1a sets display:none!important (stronger than visibility)
+ *         and writes the copyright page. The pre-hide closes the window between parse start
+ *         and M1a first execution — a zero-JS fallback for the moment before M1a fires.
+ *         visibility:hidden (not display:none) preserves layout so the pre-hide itself does
+ *         not cause layout thrash; the body is never fully painted during this window.
+ *
+ *   [FxC-msg] Copyright message standardization:
+ *         All user-visible copyright overlays and copyright pages now use the canonical
+ *         message: "© Civil Engineering Suite — Protected Content"
+ *         with "Access via civilengsuite.pages.dev" as the action line.
+ *         Updated in: _sharedCrHtml, buildProtectionBundle crHtml, bootstrapCopyrightBody,
+ *         M1c !_m1cOk overlay innerHTML, M2 DOMContentLoaded fallback innerHTML.
+ *
  * 2026-06-09 v18 — Add window.stop() + pre-hide to all origin guards (MF5):
  *
  *   ROOT CAUSE: On Chrome Android content:// URI (Scenario B — Chrome saves the
@@ -763,8 +796,8 @@ function buildProtectionBundle(pageFilename) {
   const crHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Protected</title></head>`
     + `<body style="margin:0;background:#0A1A2E;display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:sans-serif">`
     + `<div style="text-align:center;padding:40px"><div style="font-size:3rem;margin-bottom:20px">&#x1F512;</div>`
-    + `<h2 style="color:#C17B1A;margin-bottom:12px">&#169; Civil Engineering Suite</h2>`
-    + `<p style="color:#8AA3C7;line-height:1.8">Eng. Aymn Asi &#8212; All Rights Reserved<br>Unauthorized copying or reproduction is strictly prohibited.</p>`
+    + `<h2 style="color:#C17B1A;margin-bottom:12px">&#169; Civil Engineering Suite &#8212; Protected Content</h2>`
+    + `<p style="color:#8AA3C7;line-height:1.8">Access via https://civilengsuite.pages.dev</p>`
     + `</div></body></html>`;
   const crB64 = u8ToB64(new TextEncoder().encode(crHtml));
   return `(function(){'use strict';`
@@ -1350,9 +1383,8 @@ export async function onRequest(context) {
     + `a{color:#C17B1A;font-size:0.88rem;text-decoration:none}`
     + `a:hover{text-decoration:underline}<\/style><\/head><body>`
     + `<div class="card"><div class="icon">&#x1F512;<\/div>`
-    + `<div class="title">&#169; Eng. Aymn Asi &#8212; ${_sharedCrPT}<\/div>`
-    + `<div class="msg">Unauthorized copying is prohibited.<br>`
-    + `This page must be accessed from the official website.<\/div>`
+    + `<div class="title">&#169; Civil Engineering Suite &#8212; Protected Content<\/div>`
+    + `<div class="msg">Access via the official website.<\/div>`
     + `<a href="${_sharedCrUrl}">${_sharedCrLabel}<\/a>`
     + `<\/div><\/body><\/html>`;
   const _sharedCrB64 = u8ToB64(new TextEncoder().encode(_sharedCrHtml));
@@ -1374,7 +1406,7 @@ export async function onRequest(context) {
     + `try{document.documentElement.style.cssText='display:none!important';}catch(_m2se){}`
     + `document.addEventListener('DOMContentLoaded',function(){try{`
     + `document.body.style.cssText='display:flex!important;margin:0;background:#0A1A2E;min-height:100vh;align-items:center;justify-content:center;font-family:sans-serif;text-align:center;padding:24px;box-sizing:border-box';`
-    + `document.body.innerHTML="<div style='max-width:440px'><div style='font-size:3.5rem;margin-bottom:18px'>&#x1F512;</div><h2 style='color:#C17B1A;font-weight:700;margin-bottom:12px'>&#169; Eng. Aymn Asi</h2><p style='color:#8AA3C7;font-size:.9rem;line-height:1.8;margin-bottom:22px'>Unauthorized copying is prohibited.</p><a href='"+_aos[0]+"' style='color:#C17B1A;font-size:.88rem'>"+_aos[0].replace("https://","")+"</a></div>";}catch(_m2de){}});`
+    + `document.body.innerHTML="<div style='max-width:440px'><div style='font-size:3.5rem;margin-bottom:18px'>&#x1F512;</div><h2 style='color:#C17B1A;font-weight:700;margin-bottom:12px'>&#169; Civil Engineering Suite &#8212; Protected Content</h2><p style='color:#8AA3C7;font-size:.9rem;line-height:1.8;margin-bottom:22px'>Access via the official website.</p><a href='"+_aos[0]+"' style='color:#C17B1A;font-size:.88rem'>"+_aos[0].replace("https://","")+"</a></div>";}catch(_m2de){}});`
     + `}`
     + `}`
     + `})();`;
@@ -1444,10 +1476,9 @@ export async function onRequest(context) {
     + `<div style="padding:40px;max-width:440px">`
     + `<div style="font-size:3.5rem;margin-bottom:18px">&#x1F512;</div>`
     + `<h2 style="font-size:1.35rem;font-weight:700;margin-bottom:12px;line-height:1.4">`
-    + `&#169; Eng. Aymn Asi &#8212; ${escHtml(pageTitle)}</h2>`
+    + `&#169; Civil Engineering Suite &#8212; Protected Content</h2>`
     + `<p style="color:#8AA3C7;font-size:0.9rem;line-height:1.8;margin-bottom:22px">`
-    + `Unauthorized copying is prohibited.<br>`
-    + `This page must be accessed from the official website.</p>`
+    + `Access via the official website.</p>`
     + `<a href="${_sharedCrUrl}" style="color:#C17B1A;font-size:0.88rem">${_sharedCrLabel}</a>`
     + `</div></div>`;
 
@@ -1533,7 +1564,14 @@ export async function onRequest(context) {
       + ' imagesizes="100vw" fetchpriority="high">'
     : '';
 
+  // [FxB] CSS pre-hide: fires at CSS parse time — before M1a script, before any preload,
+  // before any layout. Closes the race window between document parse start and M1a execution.
+  // visibility:hidden (not display:none) avoids layout recalc overhead during this window.
+  // Removed automatically for authorized users when document.open()+document.write() in the
+  // XOR decoder replaces the entire document. Unauthorized users are already covered by M1a
+  // display:none before this rule would ever be seen by the page's own JS.
   const bootstrap = `<!DOCTYPE html><html><head>`
+    + `<style id="_ces_hide">html{visibility:hidden!important;pointer-events:none!important}</style>`
     + `<meta charset="UTF-8">`
     + `<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">`
     + (route.ogDescription ? `<meta name="description" content="${escHtml(route.ogDescription)}">` : '')
@@ -1574,9 +1612,10 @@ export async function onRequest(context) {
     + `window.stop();`
     + `try{document.open();document.write(_xcr);document.close();_m1cOk=true;}catch(_xe){}`
     + `if(!_m1cOk){`
+    + `try{document.documentElement.style.cssText='display:block!important;background:#0A1A2E';}catch(_m1cde){}`
     + `var _xov=document.createElement('div');`
     + `_xov.setAttribute('style','position:fixed;top:0;left:0;width:100%;height:100%;background:#0A1A2E;z-index:2147483647;display:flex;align-items:center;justify-content:center;font-family:sans-serif;text-align:center;padding:24px;box-sizing:border-box');`
-    + `_xov.innerHTML="<div style='max-width:440px'><div style='font-size:3.5rem;margin-bottom:18px'>&#x1F512;</div><h2 style='color:#C17B1A;font-weight:700;margin-bottom:12px'>&#169; Eng. Aymn Asi</h2><p style='color:#8AA3C7;font-size:.9rem;line-height:1.8;margin-bottom:22px'>Unauthorized copying is prohibited.</p><a href='"+_xaos[0]+"' style='color:#C17B1A;font-size:.88rem'>"+_xaos[0].replace("https://","")+"</a></div>";`
+    + `_xov.innerHTML="<div style='max-width:440px'><div style='font-size:3.5rem;margin-bottom:18px'>&#x1F512;</div><h2 style='color:#C17B1A;font-weight:700;margin-bottom:12px'>&#169; Civil Engineering Suite &#8212; Protected Content</h2><p style='color:#8AA3C7;font-size:.9rem;line-height:1.8;margin-bottom:22px'>Access via the official website.</p><a href='"+_xaos[0]+"' style='color:#C17B1A;font-size:.88rem'>"+_xaos[0].replace("https://","")+"</a></div>";`
     + `try{document.body.appendChild(_xov);}catch(_xoe){}}`
     + `return;}`
     + `var p="${payload}";`
