@@ -53,6 +53,28 @@
  *        the /payment/* _headers block which governs the checkout flow.
  *
  *
+ * 2026-06-10 v21 — FxE: M1a mobile fallback overlay (mobile download copyright fix):
+ *
+ *   [FxE] bootstrapOriginGuard (M1a) document.open() failure fallback — mobile-safe overlay:
+ *         BUG (v20): when document.open() fails in M1a (sandboxed content:// on Chrome Android),
+ *         only window['__CES_BLOCK']=1 was set. html remained display:none!important from the
+ *         pre-hide set just before window.stop(). Because window.stop() was already called,
+ *         M1c in <body> may never execute on content:// contexts — the parser is halted.
+ *         Result: blank page; no copyright overlay ever rendered on mobile download open.
+ *         FIX: mirrors the M1c (!_m1cOk) fallback pattern (already fixed in v19/FxA).
+ *         When document.open() fails:
+ *           1. window['__CES_BLOCK']=1 (unchanged — M1c still picks it up if parser resumes)
+ *           2. html.style.cssText reset to display:block!important;visibility:visible!important
+ *              to reverse both _ces_hide (visibility:hidden) and the prior display:none set
+ *              by the guard's own pre-hide step.
+ *           3. A position:fixed full-screen overlay (z-index:2147483647) is created inline.
+ *              If document.body exists (DOMContentLoaded or partially parsed): appended immediately.
+ *              If not (still in <head>, window.stop() halted parser early): queued via
+ *              DOMContentLoaded event. In the DOMContentLoaded case the html reset at step 2
+ *              still fires synchronously, ensuring no visible flash before the overlay paints.
+ *         This closes the one guard layer that was missing the overlay fallback. M1c and M2
+ *         already had this pattern; M1a now matches.
+ *
  * 2026-06-10 v20 — FxD: M1a authorized-else branch removes _ces_hide (blank-page fix):
  *
  *   [FxD] bootstrapOriginGuard (M1a) authorized-else branch — explicit _ces_hide removal:
@@ -1475,7 +1497,16 @@ export async function onRequest(context) {
     + `try{document.documentElement.style.cssText='display:none!important';}catch(_m1ahe){}`
     + `window.stop();`
     + `try{document.open();document.write(_cr);document.close();_m1aOk=true;}catch(_m1ae){}`
-    + `if(!_m1aOk){window['__CES_BLOCK']=1;}`
+    + `if(!_m1aOk){`
+    + `window['__CES_BLOCK']=1;`
+    + `try{document.documentElement.style.cssText='display:block!important;visibility:visible!important;background:#0A1A2E';}catch(_m1afde){}`
+    + `var _m1aov=document.createElement('div');`
+    + `_m1aov.id='__ces_m1a_fb';`
+    + `_m1aov.setAttribute('style','position:fixed;top:0;left:0;width:100%;height:100%;background:#0A1A2E;z-index:2147483647;display:flex;align-items:center;justify-content:center;font-family:sans-serif;text-align:center;padding:24px;box-sizing:border-box;visibility:visible!important');`
+    + `_m1aov.innerHTML="<div style='max-width:440px'><div style='font-size:3.5rem;margin-bottom:18px'>&#x1F512;<\/div><h2 style='color:#C17B1A;font-weight:700;margin-bottom:12px'>&#169; Civil Engineering Suite &#8212; Protected Content<\/h2><p style='color:#8AA3C7;font-size:.9rem;line-height:1.8;margin-bottom:22px'>Access via the official website.<\/p><a href='"+_aos[0]+"' style='color:#C17B1A;font-size:.88rem'>"+(_aos[0]||'').replace('https://','')+"<\/a><\/div>";`
+    + `if(document.body){try{document.body.appendChild(_m1aov);}catch(_m1abae){}}`
+    + `else{document.addEventListener('DOMContentLoaded',function(){if(document.body){try{document.body.appendChild(_m1aov);}catch(_m1adce){}}});}`
+    + `}`
     + `}else{`
     + `try{var _hs=document.getElementById('_ces_hide');if(_hs&&_hs.parentNode){_hs.parentNode.removeChild(_hs);}}catch(_hse){}`
     + `}`
