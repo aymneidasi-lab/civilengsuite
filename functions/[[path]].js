@@ -1420,6 +1420,7 @@ export async function onRequest(context) {
     + `if(!_m2ok){`
     + `try{document.documentElement.style.cssText='display:none!important';}catch(_m2se){}`
     + `document.addEventListener('DOMContentLoaded',function(){try{`
+    + `document.documentElement.style.cssText='display:block!important;visibility:visible!important;background:#0A1A2E';`
     + `document.body.style.cssText='display:flex!important;margin:0;background:#0A1A2E;min-height:100vh;align-items:center;justify-content:center;font-family:sans-serif;text-align:center;padding:24px;box-sizing:border-box';`
     + `document.body.innerHTML="<div style='max-width:440px'><div style='font-size:3.5rem;margin-bottom:18px'>&#x1F512;</div><h2 style='color:#C17B1A;font-weight:700;margin-bottom:12px'>&#169; Civil Engineering Suite &#8212; Protected Content</h2><p style='color:#8AA3C7;font-size:.9rem;line-height:1.8;margin-bottom:22px'>Access via the official website.</p><a href='"+_aos[0]+"' style='color:#C17B1A;font-size:.88rem'>"+_aos[0].replace("https://","")+"</a></div>";}catch(_m2de){}});`
     + `}`
@@ -1629,9 +1630,9 @@ export async function onRequest(context) {
     + `window.stop();`
     + `try{document.open();document.write(_xcr);document.close();_m1cOk=true;}catch(_xe){}`
     + `if(!_m1cOk){`
-    + `try{document.documentElement.style.cssText='display:block!important;background:#0A1A2E';}catch(_m1cde){}`
+    + `try{document.documentElement.style.cssText='display:block!important;visibility:visible!important;background:#0A1A2E';}catch(_m1cde){}`
     + `var _xov=document.createElement('div');`
-    + `_xov.setAttribute('style','position:fixed;top:0;left:0;width:100%;height:100%;background:#0A1A2E;z-index:2147483647;display:flex;align-items:center;justify-content:center;font-family:sans-serif;text-align:center;padding:24px;box-sizing:border-box');`
+    + `_xov.setAttribute('style','position:fixed;top:0;left:0;width:100%;height:100%;background:#0A1A2E;z-index:2147483647;display:flex;align-items:center;justify-content:center;font-family:sans-serif;text-align:center;padding:24px;box-sizing:border-box;visibility:visible!important');`
     + `_xov.innerHTML="<div style='max-width:440px'><div style='font-size:3.5rem;margin-bottom:18px'>&#x1F512;</div><h2 style='color:#C17B1A;font-weight:700;margin-bottom:12px'>&#169; Civil Engineering Suite &#8212; Protected Content</h2><p style='color:#8AA3C7;font-size:.9rem;line-height:1.8;margin-bottom:22px'>Access via the official website.</p><a href='"+_xaos[0]+"' style='color:#C17B1A;font-size:.88rem'>"+_xaos[0].replace("https://","")+"</a></div>";`
     + `try{document.body.appendChild(_xov);}catch(_xoe){}}`
     + `return;}`
