@@ -53,30 +53,70 @@
  *        the /payment/* _headers block which governs the checkout flow.
  *
  *
- * 2026-06-10 v19.1 — HOTFIX: blank page regression from Fix B (FxB-clean):
+ * 2026-06-10 v21 — MHTML mobile download fix: adoptedStyleSheets + DOM overlay (MHTML-FIX):
  *
- *   ROOT CAUSE: Fix B added <style id="_ces_hide"> as the first child of
- *   bootstrap <head>. The design assumed document.open()+document.write() in the
- *   XOR decoder would replace the document and remove _ces_hide automatically.
- *   This assumption holds when document.open() succeeds. BUT if document.open()
- *   throws for ANY reason (CSP edge case, browser quirk, sandboxed context), the
- *   catch block appends an error element to document.body — while html is still
- *   visibility:hidden from _ces_hide. Result: persistent blank white page with no
- *   user-visible error. This manifested immediately on the live desktop site.
+ *   ROOT CAUSE: Chrome Android's "Download page" (toolbar ⋮ → Download) saves the
+ *   RENDERED DOM as MHTML and strips ALL <script> blocks from the archive. When the
+ *   saved file is reopened, zero JavaScript executes. The old FxC approach in the
+ *   source HTML origin guard's authorized-else branch called:
+ *       _ces_hide_src.parentNode.removeChild(_ces_hide_src)
+ *   This DOM mutation was captured in the MHTML snapshot. On re-open: _ces_hide_src
+ *   was absent from the MHTML DOM → html{visibility:hidden} never applied → real page
+ *   fully visible. All JS guards (M1a, M1c, M2) irrelevant — MHTML stripped them.
  *
- *   FIX: Added an else branch to bootstrapOriginGuard (M1a) that runs when the
- *   origin IS in the allowed list (authorized access). The else branch removes
- *   _ces_hide immediately, before <body> is parsed. M1a is a parser-blocking
- *   <script> in <head>; _ces_hide is parsed before M1a and is already in the DOM,
- *   so document.getElementById('_ces_hide') finds it reliably. After removal, html
- *   is visible for the rest of the parse. The XOR decoder's document.open() then
- *   replaces the entire document as before — this is now redundant cleanup rather
- *   than the sole un-hiding mechanism, which is the correct design.
+ *   [MHTML-FIX-A] Source HTML — _ces_cr_src_style overlay CSS block (DOM):
+ *         Added <style id="_ces_cr_src_style"> immediately after <style id="_ces_hide_src">.
+ *         Contains: #_ces_cr_src_overlay{visibility:visible!important;position:fixed;...}
+ *         Both style blocks stay in DOM for authorized access (no removeChild).
+ *         MHTML captures both. On MHTML re-open with scripts stripped:
+ *           _ces_hide_src → html{visibility:hidden} → real content hidden ✓
+ *           _ces_cr_src_style → #_ces_cr_src_overlay{visibility:visible!important} ✓
  *
- *   SECURITY IMPACT: None. For unauthorized origins, M1a enters the if-branch
- *   (not the else), sets display:none, writes copyright page. _ces_hide is
- *   irrelevant in that path. For authorized origins, _ces_hide is removed in M1a
- *   (else branch) and the XOR decoder runs as before.
+ *   [MHTML-FIX-B] Source HTML — #_ces_cr_src_overlay DOM element (first body child):
+ *         Full copyright card (🔒, title, message, link) rendered in fixed overlay.
+ *         Visible by default from _ces_cr_src_style. Hidden for authorized live access
+ *         via adoptedStyleSheets (CSSOM — see MHTML-FIX-C). MHTML serializes DOM nodes
+ *         only, not CSSOM, so the overlay stays visible in saved MHTML.
+ *
+ *   [MHTML-FIX-C] Source HTML — authorized-else branch → adoptedStyleSheets (CSSOM):
+ *         REPLACED the old removeChild(_ces_hide_src) DOM mutation with:
+ *           var _ss = new CSSStyleSheet();
+ *           _ss.replaceSync('html{visibility:visible!important;...}
+ *                            #_ces_cr_src_overlay{display:none!important}');
+ *           document.adoptedStyleSheets = [...].concat([_ss]);
+ *         CSSOM adoptedStyleSheets are NOT serialized by Chrome's MHTML writer.
+ *         Live access: CSSOM overrides _ces_hide_src → page visible, overlay hidden ✓
+ *         MHTML save: DOM unchanged (both style blocks still there), CSSOM gone →
+ *           on MHTML re-open: page hidden, overlay visible ✓
+ *         Fallback for pre-Chrome 73 / pre-Safari 16.4 (<1% 2026): DOM mutation
+ *           (MHTML protection not guaranteed on these ancient browsers; acceptable).
+ *
+ *   [MHTML-FIX-D] Worker [[path]].js — stripProtectionScripts bot-path cleanup:
+ *         Added four new stripping rules for the bot path:
+ *           1. <style id="_ces_hide_src">    — remove from bot HTML (clean crawler output)
+ *           2. <style id="_ces_cr_src_style"> — remove from bot HTML (new element)
+ *           3. <div id="_ces_cr_src_overlay"> — remove from bot HTML (new element)
+ *           4. Source origin guard script via /* _ces_src_guard_v21 * / marker
+ *         Previously: source HTML origin guard and _ces_hide_src were NOT stripped
+ *         from the bot path. Googlebot's Chromium renderer executed the guard's else
+ *         branch to make the page visible. This still works after the adoptedStyleSheets
+ *         change. The new rules add explicit stripping for a clean bot-path response
+ *         with no protection artifacts visible in Google's HTML cache.
+ *
+ * 2026-06-10 v20 — FxD: M1a authorized-else branch removes _ces_hide (blank-page fix):
+ *
+ *   [FxD] bootstrapOriginGuard (M1a) authorized-else branch — explicit _ces_hide removal:
+ *         BUG (v19): bootstrapOriginGuard had no else branch. _ces_hide removal relied
+ *         entirely on document.open()+document.write() in the XOR decoder replacing the
+ *         whole document. When document.open() fails (sandboxed context, browser quirk,
+ *         corrupt payload), the XOR decoder catch block appends an error <p> to
+ *         document.body while html{visibility:hidden!important} from _ces_hide persists.
+ *         Result: blank white page — the error paragraph is also invisible.
+ *         FIX: M1a is parser-blocking in <head> and executes AFTER _ces_hide is parsed
+ *         (it is the first child of <head>). For authorized origins the else branch now
+ *         calls getElementById('_ces_hide') + removeChild immediately. _ces_hide removal
+ *         no longer depends on document.open() succeeding anywhere downstream.
+ *         Mirrors the FxC pattern already applied to the source HTML (_ces_hide_src).
  *
  * 2026-06-09 v19 — CSS pre-hide + M1c overlay visibility fix + copyright message update (FxA, FxB, FxC-msg):
  *
@@ -915,6 +955,29 @@ function stripProtectionScripts(html) {
   // [B7] Remove oncontextmenu attribute from <body> tag.
   html = html.replace(/<body([^>]*)\soncontextmenu="[^"]*"/gi, '<body$1');
 
+  // [MHTML-FIX-D] Strip MHTML-protection artifacts from bot-path HTML.
+  // These elements are deliberately present in the human-path source HTML to protect
+  // against Chrome Android MHTML download. The bot path must return clean HTML with
+  // no protection CSS or overlay elements that would confuse crawlers or Google's
+  // HTML cache snapshot.
+
+  // [MHTML-FIX-D1] Strip <style id="_ces_hide_src"> — html{visibility:hidden}
+  // Previously not stripped; Googlebot's renderer executed the origin guard's else
+  // branch to override it. Explicit stripping now produces a cleaner bot response.
+  html = html.replace(/<style\s+id="_ces_hide_src"[^>]*>[\s\S]*?<\/style>/gi, '');
+
+  // [MHTML-FIX-D2] Strip <style id="_ces_cr_src_style"> — overlay CSS (new in v21).
+  html = html.replace(/<style\s+id="_ces_cr_src_style"[^>]*>[\s\S]*?<\/style>/gi, '');
+
+  // [MHTML-FIX-D3] Strip <div id="_ces_cr_src_overlay"> — copyright overlay (new in v21).
+  // The overlay contains only nested inline-styled children; no closing-tag ambiguity.
+  html = html.replace(/<div\s+id="_ces_cr_src_overlay"[^>]*>[\s\S]*?<\/div>\s*(?=<)/gi, '');
+
+  // [MHTML-FIX-D4] Strip source HTML origin guard via the _ces_src_guard_v21 marker.
+  // The guard's unique comment /* _ces_src_guard_v21 */ was added to pc_suite_V1-FIXED_v21.html.
+  // safeScriptRe ensures we never cross </script> boundaries.
+  html = html.replace(safeScriptRe('_ces_src_guard_v21'), '');
+
   return html;
 }
 
@@ -1430,6 +1493,7 @@ export async function onRequest(context) {
     + `if(!_m2ok){`
     + `try{document.documentElement.style.cssText='display:none!important';}catch(_m2se){}`
     + `document.addEventListener('DOMContentLoaded',function(){try{`
+    + `document.documentElement.style.cssText='display:block!important;visibility:visible!important;background:#0A1A2E';`
     + `document.body.style.cssText='display:flex!important;margin:0;background:#0A1A2E;min-height:100vh;align-items:center;justify-content:center;font-family:sans-serif;text-align:center;padding:24px;box-sizing:border-box';`
     + `document.body.innerHTML="<div style='max-width:440px'><div style='font-size:3.5rem;margin-bottom:18px'>&#x1F512;</div><h2 style='color:#C17B1A;font-weight:700;margin-bottom:12px'>&#169; Civil Engineering Suite &#8212; Protected Content</h2><p style='color:#8AA3C7;font-size:.9rem;line-height:1.8;margin-bottom:22px'>Access via the official website.</p><a href='"+_aos[0]+"' style='color:#C17B1A;font-size:.88rem'>"+_aos[0].replace("https://","")+"</a></div>";}catch(_m2de){}});`
     + `}`
@@ -1486,8 +1550,7 @@ export async function onRequest(context) {
     + `try{document.open();document.write(_cr);document.close();_m1aOk=true;}catch(_m1ae){}`
     + `if(!_m1aOk){window['__CES_BLOCK']=1;}`
     + `}else{`
-    + `try{var _ph=document.getElementById('_ces_hide');`
-    + `if(_ph&&_ph.parentNode){_ph.parentNode.removeChild(_ph);}}catch(_phe){}`
+    + `try{var _hs=document.getElementById('_ces_hide');if(_hs&&_hs.parentNode){_hs.parentNode.removeChild(_hs);}}catch(_hse){}`
     + `}`
     + `})();`
     + `\u003c/script>`;
@@ -1640,9 +1703,9 @@ export async function onRequest(context) {
     + `window.stop();`
     + `try{document.open();document.write(_xcr);document.close();_m1cOk=true;}catch(_xe){}`
     + `if(!_m1cOk){`
-    + `try{document.documentElement.style.cssText='display:block!important;background:#0A1A2E';}catch(_m1cde){}`
+    + `try{document.documentElement.style.cssText='display:block!important;visibility:visible!important;background:#0A1A2E';}catch(_m1cde){}`
     + `var _xov=document.createElement('div');`
-    + `_xov.setAttribute('style','position:fixed;top:0;left:0;width:100%;height:100%;background:#0A1A2E;z-index:2147483647;display:flex;align-items:center;justify-content:center;font-family:sans-serif;text-align:center;padding:24px;box-sizing:border-box');`
+    + `_xov.setAttribute('style','position:fixed;top:0;left:0;width:100%;height:100%;background:#0A1A2E;z-index:2147483647;display:flex;align-items:center;justify-content:center;font-family:sans-serif;text-align:center;padding:24px;box-sizing:border-box;visibility:visible!important');`
     + `_xov.innerHTML="<div style='max-width:440px'><div style='font-size:3.5rem;margin-bottom:18px'>&#x1F512;</div><h2 style='color:#C17B1A;font-weight:700;margin-bottom:12px'>&#169; Civil Engineering Suite &#8212; Protected Content</h2><p style='color:#8AA3C7;font-size:.9rem;line-height:1.8;margin-bottom:22px'>Access via the official website.</p><a href='"+_xaos[0]+"' style='color:#C17B1A;font-size:.88rem'>"+_xaos[0].replace("https://","")+"</a></div>";`
     + `try{document.body.appendChild(_xov);}catch(_xoe){}}`
     + `return;}`
