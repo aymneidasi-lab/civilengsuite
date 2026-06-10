@@ -1124,9 +1124,9 @@ function buildWebMCPScript() {
 // Without [E0], ANY throw before [E1] — redirect gate, ASSETS.fetch, route match,
 // markdown negotiation — escapes all catches and produces Cloudflare Error 1101.
 // With [E0], every uncaught exception becomes a logged 500 instead of 1101.
-export async function onRequest(context) {
+export default {
+  async fetch(request, env, ctx) {
 try {
-  const { request, env } = context;
   const url  = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, '') || '/';
 
@@ -1193,7 +1193,7 @@ try {
   //      .enc decryption required. _headers rules for /footing-pro/engineers/*
   //      apply directly (Cloudflare Pages _headers applies to static responses).
   const STATIC_PASSTHROUGH = /^\/(?:robots\.txt|manifest\.json|favicon\.ico|og-image\.png|images\/.*|footing-pro\/images\/.*|footing-pro\/engineers\/?.*|footing-pro\/offices\/?.*|footing-pro\/students\/?.*|beam-pro\/images\/.*|column-pro\/images\/.*|deflection-pro\/images\/.*|earthquake-pro\/images\/.*|mur-pro\/images\/.*|add-reft-pro\/images\/.*|section-property-pro\/images\/.*|google[0-9a-f]+\.html|sitemap\.xsl|fonts\/.*|\.well-known\/.*|payment(?:\/.*)?|api\/payment\/.*)$/i;
-  if (STATIC_PASSTHROUGH.test(path)) return context.next();
+  if (STATIC_PASSTHROUGH.test(path)) return env.ASSETS.fetch(request);
 
   // ── [S1] Sitemap — explicit handler with clean minimal headers ───────────
   // The _headers /* catch-all applies Content-Security-Policy to every path
@@ -1242,7 +1242,7 @@ try {
     : ROUTES.slice(1).find(r => path === r.prefix);
 
   // Not an encrypted route → serve static file / apply _redirects
-  if (!route) return context.next();
+  if (!route) return env.ASSETS.fetch(request);
 
   const { encFile, baseHref, faviconLinks, pageFilename } = route;
 
@@ -1859,4 +1859,5 @@ try {
     });
   } catch (_) { /* last resort — nothing more to do */ }
 }
-}
+  }
+};
