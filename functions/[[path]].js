@@ -53,68 +53,6 @@
  *        the /payment/* _headers block which governs the checkout flow.
  *
  *
- * 2026-06-11 v22 — MHTML "open with text" fix: body-swap lifecycle guards (v22-TEXT-FIX)
- *                   + outer safety net [E0] to eliminate Error 1101 (v22-E0):
- *
- *   ROOT CAUSE: v21 (MHTML-FIX) solved "open as HTML" for mobile-saved MHTML files.
- *   RESIDUAL GAP: "open with text" in a text editor on the saved MHTML still showed
- *   the full real engineering page HTML source. A text editor reads raw markup —
- *   CSS visibility rules have no effect. The MHTML HTML part contains the entire
- *   rendered DOM (real content) regardless of CSS hiding. ✗
- *
- *   DESKTOP REFERENCE BEHAVIOR:
- *     Desktop Ctrl+S → buildProtectionBundle intercepts, saves a Blob(crHtml).
- *     crHtml = copyright HTML only (~1 KB). No real HTML ever in the file.
- *     "Open with text" → copyright HTML source. ✓
- *
- *   [v22-TEXT-FIX-A] index.html (source HTML) — authorized-else branch:
- *     Added a body-swap IIFE that attaches Page Lifecycle API listeners:
- *       pagehide / freeze / visibilitychange=hidden → _swapOut():
- *         Removes all body children EXCEPT #_ces_cr_src_overlay from the DOM.
- *         Stores them in a JS closure variable (NOT a DocumentFragment — JS heap only).
- *         Body = copyright overlay only at this point.
- *       pageshow / resume / visibilitychange=visible → _swapIn():
- *         Re-inserts stored children after the overlay. Page resumes normally.
- *       Also hooked: beforeprint / afterprint (defense-in-depth for print-path saves).
- *     Coverage: Chrome Android "Download page" triggers pagehide before DOM serialization
- *     in Chrome 115+. Tab switch / app switch trigger visibilitychange. Both paths
- *     produce MHTML body = copyright overlay only → "open with text" = copyright HTML. ✓
- *
- *   [v22-TEXT-FIX-B] [[path]].js worker — M2 htmlOriginGuard authorized-else:
- *     Injected the same body-swap guard (_m2BodySwap) into the M2 code string.
- *     M2 is embedded in the decoded HTML payload (Scenario B: Chrome saves rendered DOM
- *     from XOR decoder's document.write). The same lifecycle hooks run in the decoded
- *     page context and provide the same protection for the Scenario B MHTML case.
- *
- *   LIVE ACCESS: zero regression.
- *     _swapIn fires on first visible frame. Real content never visibly disappears.
- *     The double-rAF in the visible handler ensures repaint completes before restore,
- *     preventing any flash of blank/copyright content during normal use.
- *
- *   ARCHITECTURAL LIMIT DOCUMENTED:
- *     If Chrome's MHTML writer fires AFTER pageshow/resume/visible restores content
- *     (i.e., between restore and next hide), the MHTML captures real content.
- *     This window occurs only if the user triggers Download immediately upon tab focus.
- *     In practice, the user must first wait for the page to render, then interact,
- *     then tap Download — by which point visibilitychange=visible has fired and
- *     content is restored. Edge-case risk is negligible for normal use patterns.
- *     Complete elimination requires lazy-loading all content via JS fetch.
- *
- *   [v22-E0] Outer safety net — Cloudflare Error 1101 elimination:
- *     ROOT CAUSE: Cloudflare Error 1101 ("Worker threw exception") occurs when an
- *     exception escapes ALL try-catch blocks inside onRequest(). The existing [E1]
- *     safety net only wraps post-decryption code (base href inject → bootstrap build).
- *     Code that runs BEFORE [E1] — redirect gate (M3b-inline), STATIC_PASSTHROUGH
- *     test, sitemap ASSETS.fetch, route matching, markdown negotiation, keyHex read —
- *     had NO catch. Any throw in these sections produced Error 1101 instead of a
- *     clean 500 response.
- *     FIX: Wrapped the ENTIRE onRequest() body in an outer try-catch [E0].
- *     E0 catches anything that escaped E1 and returns a plain-text 500.
- *     E1 is retained in place — it continues to log precisely which post-decrypt
- *     step failed, with full stack traces, before the outer E0 would ever fire.
- *     E0 is the last resort: if even errResponse() fails (e.g., escHtml throws),
- *     E0 still returns a minimal Response(500) without using any helper functions.
- *
  * 2026-06-10 v21 — MHTML mobile download fix: adoptedStyleSheets + DOM overlay (MHTML-FIX):
  *
  *   ROOT CAUSE: Chrome Android's "Download page" (toolbar ⋮ → Download) saves the
@@ -1119,14 +1057,8 @@ function buildWebMCPScript() {
 }
 
 // ── Main request handler ──────────────────────────────────────────────────────
-// [E0] OUTER SAFETY NET: wraps the entire function body.
-// [E1] (inner try-catch, post-decryption only) is retained for logging precision.
-// Without [E0], ANY throw before [E1] — redirect gate, ASSETS.fetch, route match,
-// markdown negotiation — escapes all catches and produces Cloudflare Error 1101.
-// With [E0], every uncaught exception becomes a logged 500 instead of 1101.
-export default {
-  async fetch(request, env, ctx) {
-try {
+export async function onRequest(context) {
+  const { request, env } = context;
   const url  = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, '') || '/';
 
@@ -1193,7 +1125,7 @@ try {
   //      .enc decryption required. _headers rules for /footing-pro/engineers/*
   //      apply directly (Cloudflare Pages _headers applies to static responses).
   const STATIC_PASSTHROUGH = /^\/(?:robots\.txt|manifest\.json|favicon\.ico|og-image\.png|images\/.*|footing-pro\/images\/.*|footing-pro\/engineers\/?.*|footing-pro\/offices\/?.*|footing-pro\/students\/?.*|beam-pro\/images\/.*|column-pro\/images\/.*|deflection-pro\/images\/.*|earthquake-pro\/images\/.*|mur-pro\/images\/.*|add-reft-pro\/images\/.*|section-property-pro\/images\/.*|google[0-9a-f]+\.html|sitemap\.xsl|fonts\/.*|\.well-known\/.*|payment(?:\/.*)?|api\/payment\/.*)$/i;
-  if (STATIC_PASSTHROUGH.test(path)) return env.ASSETS.fetch(request);
+  if (STATIC_PASSTHROUGH.test(path)) return context.next();
 
   // ── [S1] Sitemap — explicit handler with clean minimal headers ───────────
   // The _headers /* catch-all applies Content-Security-Policy to every path
@@ -1242,7 +1174,7 @@ try {
     : ROUTES.slice(1).find(r => path === r.prefix);
 
   // Not an encrypted route → serve static file / apply _redirects
-  if (!route) return env.ASSETS.fetch(request);
+  if (!route) return context.next();
 
   const { encFile, baseHref, faviconLinks, pageFilename } = route;
 
@@ -1544,41 +1476,6 @@ try {
     + `<a href="${_sharedCrUrl}">${_sharedCrLabel}<\/a>`
     + `<\/div><\/body><\/html>`;
   const _sharedCrB64 = u8ToB64(new TextEncoder().encode(_sharedCrHtml));
-  // [v22-TEXT-FIX] Body-swap JS fragment injected into AUTHORIZED ELSE path of M2.
-  // Mirrors the same technique in index.html (source HTML).
-  // This runs inside the DECODED HTML after origin verification passes.
-  // On pagehide/freeze/visibilitychange=hidden: removes real body children from DOM.
-  // On pageshow/resume/visibilitychange=visible: restores them.
-  // Result: Chrome MHTML writer firing at hide-time captures body = copyright overlay only.
-  // "Open with text" on the MHTML shows copyright HTML source only. ✓
-  const _m2BodySwap =
-      `(function(){`
-    + `var _rn=null,_sw=false;`
-    + `function _so(){if(_sw)return;`
-    + `try{var _b=document.body;if(!_b)return;`
-    + `var _c=[],_ch=_b.firstChild;`
-    + `while(_ch){var _nx=_ch.nextSibling;`
-    + `if((_ch.id||'')!=='_ces_cr_src_overlay'){_b.removeChild(_ch);_c.push(_ch);}`
-    + `_ch=_nx;}`
-    + `if(_c.length){_rn=_c;_sw=true;}}catch(_e){}}`
-    + `function _si(){if(!_sw||!_rn)return;`
-    + `try{var _b=document.body;if(!_b)return;`
-    + `for(var _i=0;_i<_rn.length;_i++)_b.appendChild(_rn[_i]);`
-    + `_rn=null;_sw=false;}catch(_e){}}`
-    + `function _ah(){`
-    + `window.addEventListener('pagehide',_so,{capture:true,passive:true});`
-    + `window.addEventListener('pageshow',_si,{capture:true,passive:true});`
-    + `window.addEventListener('freeze',_so,{capture:true,passive:true});`
-    + `window.addEventListener('resume',_si,{capture:true,passive:true});`
-    + `window.addEventListener('beforeprint',_so,{capture:true,passive:true});`
-    + `window.addEventListener('afterprint',_si,{capture:true,passive:true});`
-    + `document.addEventListener('visibilitychange',function(){`
-    + `if(document.visibilityState==='hidden'){_so();}`
-    + `else{try{requestAnimationFrame(function(){requestAnimationFrame(_si);});}catch(_e){_si();}}`
-    + `},{capture:true,passive:true});}`
-    + `if(document.body){_ah();}else{document.addEventListener('DOMContentLoaded',_ah,{once:true});}`
-    + `})();`;
-
   const _m2Code =
       `(function(){'use strict';`
     + `var _aos=${_allowedOriginsJs};`
@@ -1601,7 +1498,6 @@ try {
     + `document.body.innerHTML="<div style='max-width:440px'><div style='font-size:3.5rem;margin-bottom:18px'>&#x1F512;</div><h2 style='color:#C17B1A;font-weight:700;margin-bottom:12px'>&#169; Civil Engineering Suite &#8212; Protected Content</h2><p style='color:#8AA3C7;font-size:.9rem;line-height:1.8;margin-bottom:22px'>Access via the official website.</p><a href='"+_aos[0]+"' style='color:#C17B1A;font-size:.88rem'>"+_aos[0].replace("https://","")+"</a></div>";}catch(_m2de){}});`
     + `}`
     + `}`
-    + `else{${_m2BodySwap}}`
     + `})();`;
   // Inject right after <meta charset="UTF-8"> — injectNonces below stamps the nonce
   html = html.replace(/(<meta charset="UTF-8">)/i, `$1<script>${_m2Code}<\/script>`);
@@ -1846,18 +1742,4 @@ try {
     console.error('[ces:runtime] Uncaught exception:', e && e.message, e && e.stack);
     return errResponse(500, 'Server Error', 'An internal error occurred. Please refresh or try again.');
   }
-
-} catch (e0) {
-  // [E0] Outer safety net: catches anything that escaped [E1] — redirect gate throws,
-  // env access errors, URL parse failures, anything before the E1 try block.
-  // Produces a clean 500 instead of Cloudflare Error 1101.
-  console.error('[ces:outer] Unhandled exception:', e0 && e0.message, e0 && e0.stack);
-  try {
-    return new Response('Internal Server Error', {
-      status: 500,
-      headers: { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' },
-    });
-  } catch (_) { /* last resort — nothing more to do */ }
 }
-  }
-};
