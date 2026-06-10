@@ -53,7 +53,8 @@
  *        the /payment/* _headers block which governs the checkout flow.
  *
  *
- * 2026-06-11 v22 — MHTML "open with text" fix: body-swap lifecycle guards (v22-TEXT-FIX):
+ * 2026-06-11 v22 — MHTML "open with text" fix: body-swap lifecycle guards (v22-TEXT-FIX)
+ *                   + outer safety net [E0] to eliminate Error 1101 (v22-E0):
  *
  *   ROOT CAUSE: v21 (MHTML-FIX) solved "open as HTML" for mobile-saved MHTML files.
  *   RESIDUAL GAP: "open with text" in a text editor on the saved MHTML still showed
@@ -98,6 +99,21 @@
  *     then tap Download — by which point visibilitychange=visible has fired and
  *     content is restored. Edge-case risk is negligible for normal use patterns.
  *     Complete elimination requires lazy-loading all content via JS fetch.
+ *
+ *   [v22-E0] Outer safety net — Cloudflare Error 1101 elimination:
+ *     ROOT CAUSE: Cloudflare Error 1101 ("Worker threw exception") occurs when an
+ *     exception escapes ALL try-catch blocks inside onRequest(). The existing [E1]
+ *     safety net only wraps post-decryption code (base href inject → bootstrap build).
+ *     Code that runs BEFORE [E1] — redirect gate (M3b-inline), STATIC_PASSTHROUGH
+ *     test, sitemap ASSETS.fetch, route matching, markdown negotiation, keyHex read —
+ *     had NO catch. Any throw in these sections produced Error 1101 instead of a
+ *     clean 500 response.
+ *     FIX: Wrapped the ENTIRE onRequest() body in an outer try-catch [E0].
+ *     E0 catches anything that escaped E1 and returns a plain-text 500.
+ *     E1 is retained in place — it continues to log precisely which post-decrypt
+ *     step failed, with full stack traces, before the outer E0 would ever fire.
+ *     E0 is the last resort: if even errResponse() fails (e.g., escHtml throws),
+ *     E0 still returns a minimal Response(500) without using any helper functions.
  *
  * 2026-06-10 v21 — MHTML mobile download fix: adoptedStyleSheets + DOM overlay (MHTML-FIX):
  *
@@ -1103,7 +1119,13 @@ function buildWebMCPScript() {
 }
 
 // ── Main request handler ──────────────────────────────────────────────────────
+// [E0] OUTER SAFETY NET: wraps the entire function body.
+// [E1] (inner try-catch, post-decryption only) is retained for logging precision.
+// Without [E0], ANY throw before [E1] — redirect gate, ASSETS.fetch, route match,
+// markdown negotiation — escapes all catches and produces Cloudflare Error 1101.
+// With [E0], every uncaught exception becomes a logged 500 instead of 1101.
 export async function onRequest(context) {
+try {
   const { request, env } = context;
   const url  = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, '') || '/';
@@ -1824,4 +1846,17 @@ export async function onRequest(context) {
     console.error('[ces:runtime] Uncaught exception:', e && e.message, e && e.stack);
     return errResponse(500, 'Server Error', 'An internal error occurred. Please refresh or try again.');
   }
+
+} catch (e0) {
+  // [E0] Outer safety net: catches anything that escaped [E1] — redirect gate throws,
+  // env access errors, URL parse failures, anything before the E1 try block.
+  // Produces a clean 500 instead of Cloudflare Error 1101.
+  console.error('[ces:outer] Unhandled exception:', e0 && e0.message, e0 && e0.stack);
+  try {
+    return new Response('Internal Server Error', {
+      status: 500,
+      headers: { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' },
+    });
+  } catch (_) { /* last resort — nothing more to do */ }
+}
 }
