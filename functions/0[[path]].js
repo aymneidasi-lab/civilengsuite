@@ -1365,17 +1365,9 @@ export async function onRequest(context) {
   // HUMAN PATH — Full protection active
   // ═══════════════════════════════════════════════════════════════════════════
 
-  // [DEV-TOGGLE] DevTools guard — toggled by ces_toggle.py.
-  // PROD: reads env.DEV_ALLOW_DEVTOOLS (Cloudflare Dashboard var).
-  //       Set 'true' there to enable live-server DevTools without redeployment.
-  // DEV:  ces_toggle.py replaces the line below with _skipDevGuard = true.
-  const _skipDevGuard = true; // [CES-DEV:path-devtools-guard]
-
   // Inject protection bundle at end of body
-  if (!_skipDevGuard) {
-    const bundle = `<script nonce="${cspNonce}">${buildProtectionBundle(pageFilename)}</script>`;
-    html = html.replace(/<\/body>/i, bundle + '</body>');
-  }
+  const bundle = `<script nonce="${cspNonce}">${buildProtectionBundle(pageFilename)}</script>`;
+  html = html.replace(/<\/body>/i, bundle + '</body>');
 
   // ── [MF4] Neutralize source-HTML inline origin-guard redirect fallback ──────
   // Source HTML files may contain their own legacy inline origin guard (pre-v13)
