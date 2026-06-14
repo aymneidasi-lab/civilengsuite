@@ -1369,7 +1369,7 @@ export async function onRequest(context) {
   // PROD: reads env.DEV_ALLOW_DEVTOOLS (Cloudflare Dashboard var).
   //       Set 'true' there to enable live-server DevTools without redeployment.
   // DEV:  ces_toggle.py replaces the line below with _skipDevGuard = true.
-  const _skipDevGuard = true; // [CES-DEV:path-devtools-guard]
+  const _skipDevGuard = (env.DEV_ALLOW_DEVTOOLS || '').trim().toLowerCase() === 'true';
 
   // Inject protection bundle at end of body
   if (!_skipDevGuard) {
