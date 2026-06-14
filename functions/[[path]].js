@@ -857,7 +857,7 @@ function errResponse(status, title, message) {
 // ── Client-side protection bundle (injected for human browsers ONLY) ──────────
 // [SECURITY] This bundle is NEVER sent to crawlers. The BOT_RE branch returns
 // before this function is ever called in the bot path.
-function buildProtectionBundle(pageFilename) {
+function buildProtectionBundle(pageFilename, skipDevGuard) {
   const crHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Protected</title></head>`
     + `<body style="margin:0;background:#0A1A2E;display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:sans-serif">`
     + `<div style="text-align:center;padding:40px"><div style="font-size:3rem;margin-bottom:20px">&#x1F512;</div>`
@@ -866,18 +866,20 @@ function buildProtectionBundle(pageFilename) {
     + `</div></body></html>`;
   const crB64 = u8ToB64(new TextEncoder().encode(crHtml));
   return `(function(){'use strict';`
-    + `var _ov=null,_do=false;`
-    + `function _sov(){if(_ov)return;_ov=document.createElement('div');`
-    + `_ov.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:#0A1A2E;z-index:2147483647;display:flex;align-items:center;justify-content:center;';`
-    + `_ov.innerHTML='<div style="text-align:center;color:#C17B1A;font-family:sans-serif;padding:40px"><div style="font-size:4rem;margin-bottom:16px">&#x1F512;</div><h2>Developer Tools Detected</h2><p style="color:#8AA3C7;margin-top:12px">Please close DevTools to continue.</p></div>';`
-    + `document.body.appendChild(_ov);}`
-    + `function _hov(){if(_ov){document.body.removeChild(_ov);_ov=null;}}`
-    + `function _ck(){var t=false;var d=new Date();debugger;if(new Date()-d>100)t=true;`
-    + `if(window.outerWidth-window.innerWidth>160||window.outerHeight-window.innerHeight>160)t=true;`
-    + `if(t&&!_do){_do=true;_sov();}else if(!t&&_do){_do=false;_hov();}}`
-    + `_ck();setInterval(_ck,1500);`
-    + `window.addEventListener('resize',_ck,true);`
-    + `document.addEventListener('visibilitychange',function(){if(!document.hidden)_ck();},true);`
+    + (skipDevGuard ? '' : (
+        `var _ov=null,_do=false;`
+      + `function _sov(){if(_ov)return;_ov=document.createElement('div');`
+      + `_ov.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;background:#0A1A2E;z-index:2147483647;display:flex;align-items:center;justify-content:center;';`
+      + `_ov.innerHTML='<div style="text-align:center;color:#C17B1A;font-family:sans-serif;padding:40px"><div style="font-size:4rem;margin-bottom:16px">&#x1F512;</div><h2>Developer Tools Detected</h2><p style="color:#8AA3C7;margin-top:12px">Please close DevTools to continue.</p></div>';`
+      + `document.body.appendChild(_ov);}`
+      + `function _hov(){if(_ov){document.body.removeChild(_ov);_ov=null;}}`
+      + `function _ck(){var t=false;var d=new Date();debugger;if(new Date()-d>100)t=true;`
+      + `if(window.outerWidth-window.innerWidth>160||window.outerHeight-window.innerHeight>160)t=true;`
+      + `if(t&&!_do){_do=true;_sov();}else if(!t&&_do){_do=false;_hov();}}`
+      + `_ck();setInterval(_ck,1500);`
+      + `window.addEventListener('resize',_ck,true);`
+      + `document.addEventListener('visibilitychange',function(){if(!document.hidden)_ck();},true);`
+    ))
     + `document.addEventListener('contextmenu',function(e){e.preventDefault();e.stopPropagation();return false;},true);`
     + `document.addEventListener('keydown',function(e){`
     + `var c=e.keyCode||e.which,ctrl=e.ctrlKey||e.metaKey;`
@@ -1365,8 +1367,13 @@ export async function onRequest(context) {
   // HUMAN PATH — Full protection active
   // ═══════════════════════════════════════════════════════════════════════════
 
+  // ── [DEV-GUARD] DevTools detection toggle ─────────────────────────────────
+  // PROD: env.DEV_ALLOW_DEVTOOLS=true disables detection; default = detection active
+  // DEV:  ces_toggle_v10.py swaps this line to the hardcoded-true variant
+  const _skipDevGuard = (env.DEV_ALLOW_DEVTOOLS || '').trim().toLowerCase() === 'true'; /* [CES-DEV-CLOSE:devtools-guard] */
+
   // Inject protection bundle at end of body
-  const bundle = `<script nonce="${cspNonce}">${buildProtectionBundle(pageFilename)}</script>`;
+  const bundle = `<script nonce="${cspNonce}">${buildProtectionBundle(pageFilename, _skipDevGuard)}</script>`;
   html = html.replace(/<\/body>/i, bundle + '</body>');
 
   // ── [MF4] Neutralize source-HTML inline origin-guard redirect fallback ──────
