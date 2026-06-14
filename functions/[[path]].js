@@ -53,25 +53,6 @@
  *        the /payment/* _headers block which governs the checkout flow.
  *
  *
- * 2026-06-14 v22 — CSP frame-src blob: fix (C1):
- *
- *   ROOT CAUSE: CSP_COMMON had no explicit frame-src directive; Chrome fell back to
- *   default-src 'self'. Chrome's CSP Level 3 implementation does NOT match
- *   blob:https://origin/uuid against 'self' for the frame-src check — the blob:
- *   scheme must be listed explicitly. The v7 base64 wrapper (ces_b64_wrapper_v7.py)
- *   creates a blob-URL <iframe> after XOR decode to render real content while keeping
- *   the main document DOM untouched (MHTML protection). Chrome blocked the iframe
- *   navigation with a frame-src violation (blocked-uri: blob, disposition: enforce),
- *   firing a CSP report to /api/csp-report and leaving the page blank — the copyright
- *   overlay was hidden by adoptedStyleSheets but the iframe never loaded.
- *
- *   [C1] CSP_COMMON: added "frame-src 'self' blob:" between connect-src and
- *        frame-ancestors. 'self' covers any future same-origin iframe src.
- *        blob: covers the ephemeral blob URL created by the b64 wrapper.
- *        frame-ancestors 'none' (clickjacking guard) is unaffected — it is a
- *        separate directive that governs who can embed THIS page, not what
- *        THIS page can embed.
- *
  * 2026-06-10 v21 — MHTML mobile download fix: adoptedStyleSheets + DOM overlay (MHTML-FIX):
  *
  *   ROOT CAUSE: Chrome Android's "Download page" (toolbar ⋮ → Download) saves the
@@ -688,14 +669,6 @@ const CSP_COMMON = [
   "font-src 'self'",
   "img-src 'self' data:",
   "connect-src 'self'",
-  // [C1] frame-src must be declared explicitly with blob: so Chrome allows the
-  // blob-URL <iframe> created by the v7 base64 wrapper after XOR decode.
-  // Chrome does NOT match blob:https://origin/uuid against 'self' for frame-src —
-  // it requires the blob: scheme to be listed explicitly. Without this, Chrome fires
-  // a frame-src CSP violation (blocked-uri: blob) and the iframe never loads, leaving
-  // the page blank after the copyright overlay is hidden. 'self' is retained so that
-  // any future same-origin iframe src also works without a CSP change.
-  "frame-src 'self' blob:",
   "frame-ancestors 'none'",
   "base-uri 'self'",
   "form-action 'self' https://civilengsuite.is-a.dev",
@@ -1392,9 +1365,17 @@ export async function onRequest(context) {
   // HUMAN PATH — Full protection active
   // ═══════════════════════════════════════════════════════════════════════════
 
+  // [DEV-TOGGLE] DevTools guard — toggled by ces_toggle.py.
+  // PROD: reads env.DEV_ALLOW_DEVTOOLS (Cloudflare Dashboard var).
+  //       Set 'true' there to enable live-server DevTools without redeployment.
+  // DEV:  ces_toggle.py replaces the line below with _skipDevGuard = true.
+  const _skipDevGuard = (env.DEV_ALLOW_DEVTOOLS || '').trim().toLowerCase() === 'true';
+
   // Inject protection bundle at end of body
-  const bundle = `<script nonce="${cspNonce}">${buildProtectionBundle(pageFilename)}</script>`;
-  html = html.replace(/<\/body>/i, bundle + '</body>');
+  if (!_skipDevGuard) {
+    const bundle = `<script nonce="${cspNonce}">${buildProtectionBundle(pageFilename)}</script>`;
+    html = html.replace(/<\/body>/i, bundle + '</body>');
+  }
 
   // ── [MF4] Neutralize source-HTML inline origin-guard redirect fallback ──────
   // Source HTML files may contain their own legacy inline origin guard (pre-v13)
