@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "include": ["/*"],
+  "exclude": [
+    "/images/*",
+    "/fonts/*",
+    "/footing-pro/images/*",
+    "/footing-pro/engineers/*",
+    "/footing-pro/offices/*",
+    "/footing-pro/students/*",
+    "/beam-pro/images/*",
+    "/column-pro/images/*",
+    "/deflection-pro/images/*",
+    "/earthquake-pro/images/*",
+    "/mur-pro/images/*",
+    "/add-reft-pro/images/*",
+    "/section-property-pro/images/*",
+    "/favicon.ico",
+    "/og-image.png",
+    "/manifest.json",
+    "/sitemap.xsl",
+    "/robots.txt",
+    "/.well-known/*",
+    "/payment/*",
+    "/api/payment/*"
+  ]
+}
