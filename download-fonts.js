@@ -1,15 +1,33 @@
 /**
- * Civil Engineering Suite — Font Downloader  v4
+ * Civil Engineering Suite — Font Downloader  v5
  * Run: node download-fonts.js
  * Output: creates public/fonts/ directory with all required woff2 files
  *
  * Fonts needed (matches @font-face declarations in both HTML files):
+ *   Fraunces:         400, 500, 600, 700, 800, 900 (EN heading display — PRIMARY --font-serif, v5)
  *   Cairo:            400, 600, 700, 800  (Arabic + Latin)
  *   Inter:            400, 500, 600, 700
  *   Playfair Display: 400, 700, 900
  *   JetBrains Mono:   400, 600
  *   Amiri:            400, 700            (Arabic display — headings/hero in AR mode)
  *   Tajawal:          300, 400, 500, 700, 800 (Arabic body/UI in AR mode)
+ *   Cormorant Garamond: 300, 400, 500, 600, 700 (EN heading display — fallback only as of v5)
+ *   DM Sans:          300, 400, 500, 600, 700, 800 (EN body/UI — PRIMARY --font-sans, unchanged)
+ *
+ * CHANGELOG v5 (2026):
+ *   [F9] Fraunces 400/500/600/700/800/900 added — warm, high-contrast old-style
+ *        display serif. Promoted to PRIMARY --font-serif for h1-h4/.hero-title/
+ *        .sec-title/.cta-h in EN mode (Cormorant Garamond + Playfair Display
+ *        demoted to fallbacks). Native 700/800/900 cuts mean .hero-title's
+ *        font-weight:900 and .h-stat .num's font-weight:800 are true weights,
+ *        not browser-substituted 700.
+ *        Output files: fraunces-{400,500,600,700,800,900}.woff2
+ *        Matches new @font-face src:url('/fonts/fraunces-*.woff2')
+ *   [F10] Companion typographic pass (HTML-side, no script changes needed):
+ *        body font-size 18px->22px (+22%), and .hero-title / .hero-title .sub /
+ *        .sec-title / .cta-h font-size clamp() ranges scaled x1.2 in both EN and
+ *        AR, in both HTML files, preserving the existing Amiri optical-size
+ *        compensation ratios between EN and AR.
  *
  * CHANGELOG v4 (2026):
  *   [F7] Cormorant Garamond 300/400/500/600/700 added — calligraphic classical EN display font.
@@ -58,6 +76,8 @@ const FONT_CSS_URLS = [
   'https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;500;600;700&display=swap',
   // [F8] v4: DM Sans — EN geometric body/UI (counterpart to Tajawal)
   'https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700;800&display=swap',
+  // [F9] v5: Fraunces — EN display serif, now PRIMARY --font-serif (Cormorant/Playfair are fallbacks)
+  'https://fonts.googleapis.com/css2?family=Fraunces:wght@400;500;600;700;800;900&display=swap',
 ];
 
 // [F1][F2][F3] Weight map — output filenames match @font-face src urls in HTML
@@ -73,6 +93,8 @@ const WEIGHT_NAMES = {
   'Cormorant Garamond': { '300': 'cormorant-300', '400': 'cormorant-400', '500': 'cormorant-500', '600': 'cormorant-600', '700': 'cormorant-700' },
   // [F8] v4: EN body/UI font — geometric modern counterpart to Tajawal
   'DM Sans':          { '300': 'dmsans-300', '400': 'dmsans-400', '500': 'dmsans-500', '600': 'dmsans-600', '700': 'dmsans-700', '800': 'dmsans-800' },
+  // [F9] v5: EN display font — PRIMARY --font-serif (warm high-contrast old-style serif)
+  'Fraunces':         { '400': 'fraunces-400', '500': 'fraunces-500', '600': 'fraunces-600', '700': 'fraunces-700', '800': 'fraunces-800', '900': 'fraunces-900' },
 };
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36';
