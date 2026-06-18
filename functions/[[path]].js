@@ -1370,7 +1370,7 @@ export async function onRequest(context) {
   // ── [DEV-GUARD] DevTools detection toggle ─────────────────────────────────
   // PROD: env.DEV_ALLOW_DEVTOOLS=true disables detection; default = detection active
   // DEV:  ces_toggle_v10.py swaps this line to the hardcoded-true variant
-  const _skipDevGuard = (env.DEV_ALLOW_DEVTOOLS || '').trim().toLowerCase() === 'true'; /* [CES-DEV-CLOSE:devtools-guard] */
+  const _skipDevGuard = true; /* [CES-DEV:devtools-guard] */
 
   // Inject protection bundle at end of body
   const bundle = `<script nonce="${cspNonce}">${buildProtectionBundle(pageFilename, _skipDevGuard)}</script>`;
