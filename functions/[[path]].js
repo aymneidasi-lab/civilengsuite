@@ -53,6 +53,44 @@
  *        the /payment/* _headers block which governs the checkout flow.
  *
  *
+ * 2026-06-20 v22 — [WM-FIX] Watermark stamp: remove dark overlay background:
+ *
+ *   ROOT CAUSE: #ces-watermark element carried background/background-color/
+ *   background-image CSS properties that rendered a dark translucent overlay
+ *   over the entire viewport. On dark-background page sections (live site),
+ *   stamp text color matched the overlay → watermarks invisible (Image 2).
+ *   On white-background local file the overlay created contrast → stamps
+ *   visible (Image 1). The overlay is cosmetically unintended: the stamp
+ *   text children are the functional artifact, not the container background.
+ *
+ *   [WM-FIX-1] Human-path inline-style cleanup (Pass 1):
+ *         regex strips background-* properties from the #ces-watermark
+ *         element's inline style= attribute in the decoded HTML BEFORE XOR
+ *         encoding. The protection bundle (buildProtectionBundle) captures
+ *         _ws = _wm.style.cssText at runtime post-DOMContentLoaded. Since
+ *         the markup is cleaned pre-encode, _ws is background-free from the
+ *         first snapshot — the MutationObserver will never restore a dark
+ *         background. Also handles style-before-id attribute ordering via
+ *         a second pass.
+ *
+ *   [WM-FIX-2] Human-path <head> stylesheet override (Pass 2 — belt-and-suspenders):
+ *         Injects <style id='_ces_wm_bg_fix'> with !important declarations
+ *         immediately before </head> in the decoded HTML.
+ *         CSS cascade: !important in author stylesheet beats non-!important
+ *         inline style. MutationObserver watches attribute mutations (style/
+ *         class/hidden attrs), NOT computed-style changes from stylesheets —
+ *         the override is never undone by the protection bundle.
+ *         Placed last in <head> → wins over any earlier same-specificity rule.
+ *
+ *   [WM-FIX-3] Human-path <style>-block cleanup (Pass 3):
+ *         Strips background-* from any <style> block in the decoded HTML that
+ *         contains a #ces-watermark rule. Guards against background being set
+ *         via CSS class rather than inline style. Skips our own _ces_wm_bg_fix
+ *         style block to prevent self-removal.
+ *
+ *   Bot path: unaffected. WM-FIX injections are in the human-path block only,
+ *   after the BOT_RE early return. Crawlers receive unchanged HTML.
+ *
  * 2026-06-10 v21 — MHTML mobile download fix: adoptedStyleSheets + DOM overlay (MHTML-FIX):
  *
  *   ROOT CAUSE: Chrome Android's "Download page" (toolbar ⋮ → Download) saves the
@@ -1406,6 +1444,55 @@ export async function onRequest(context) {
   html = html.replace(
     /}\s*catch\s*\(\w+\)\s*\{[^{}]*window\.location\.replace\s*\([^)]+\)[^{}]*\}/g,
     "}catch(_cre){window['__CES_BLOCK']=1;}"
+  );
+  // ── [WM-FIX] Watermark stamp: remove dark overlay background ───────────────
+  // ROOT CAUSE: #ces-watermark background-* properties create a dark translucent
+  // overlay. On dark-background page sections the stamp text color blends with
+  // the overlay → invisible (Image 2 vs Image 1). The text-stamp children are
+  // the functional artifact; the container background is cosmetically harmful.
+  //
+  // The protection bundle MutationObserver monitors opacity/visibility/display
+  // ONLY — NOT background. A <head> <style> with !important survives it.
+  // Three-pass approach for complete coverage:
+
+  // [WM-FIX-1] Pass 1a: id-before-style attribute ordering
+  html = html.replace(
+    /(<[^>]+\bid="ces-watermark"[^>]+\bstyle=")([^"]*?)(")(?=[^>]*>)/gi,
+    (m, pre, styles, post) => {
+      const c = styles
+        .replace(/\bbackground(?:-color|-image|-position|-size|-repeat|-origin|-clip|-attachment)?:[^;]*;?\s*/gi, '')
+        .replace(/;{2,}/g, ';').trim().replace(/;$/, '');
+      return `${pre}${c}${post}`;
+    }
+  );
+  // [WM-FIX-1] Pass 1b: style-before-id attribute ordering
+  html = html.replace(
+    /(\bstyle=")([^"]*?)("(?=[^<>]*\bid="ces-watermark"))/gi,
+    (m, pre, styles, post) => {
+      const c = styles
+        .replace(/\bbackground(?:-color|-image|-position|-size|-repeat|-origin|-clip|-attachment)?:[^;]*;?\s*/gi, '')
+        .replace(/;{2,}/g, ';').trim().replace(/;$/, '');
+      return `${pre}${c}${post}`;
+    }
+  );
+  // [WM-FIX-2] Pass 2: <head> stylesheet override — !important beats normal inline
+  // style; MutationObserver never sees stylesheet-sourced computed-style changes.
+  html = html.replace(
+    /(<\/head>)/i,
+    '<style id="_ces_wm_bg_fix">#ces-watermark{background:none!important;background-color:transparent!important;background-image:none!important;box-shadow:none!important}</style>$1'
+  );
+  // [WM-FIX-3] Pass 3: strip background from <style> block CSS rules targeting
+  // #ces-watermark (handles background set via CSS class, not inline style).
+  html = html.replace(
+    /<style([^>]*)>([\s\S]*?)<\/style>/gi,
+    (match, attrs, css) => {
+      if (/_ces_wm_bg_fix/.test(attrs)) return match; // skip our own injected fix
+      const fixedCss = css.replace(
+        /(#ces-watermark\s*\{[^}]*)background(?:-color|-image|-position|-size|-repeat|-origin|-clip|-attachment)?:[^;]*;?/gi,
+        '$1'
+      );
+      return `<style${attrs}>${fixedCss}</style>`;
+    }
   );
 
   // Minify (HTML comments, inter-tag whitespace — does NOT remove newlines so
