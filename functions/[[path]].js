@@ -858,11 +858,20 @@ function errResponse(status, title, message) {
 // [SECURITY] This bundle is NEVER sent to crawlers. The BOT_RE branch returns
 // before this function is ever called in the bot path.
 function buildProtectionBundle(pageFilename, skipDevGuard) {
-  const crHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Protected</title></head>`
-    + `<body style="margin:0;background:#0A1A2E;display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:sans-serif">`
-    + `<div style="text-align:center;padding:40px"><div style="font-size:3rem;margin-bottom:20px">&#x1F512;</div>`
-    + `<h2 style="color:#C17B1A;margin-bottom:12px">&#169; Civil Engineering Suite &#8212; Protected Content</h2>`
-    + `<p style="color:#8AA3C7;line-height:1.8">Access via https://civilengsuite.pages.dev</p>`
+  const crHtml = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">`
+    + `<meta name="viewport" content="width=device-width,initial-scale=1">`
+    + `<title>&#169; Protected &#8212; Civil Engineering Suite</title>`
+    + `<style>*{box-sizing:border-box;margin:0;padding:0}html,body{background:#0A1A2E;background-image:linear-gradient(#0A1A2E,#0A1A2E);min-height:100vh}`
+    + `body{display:flex;align-items:center;justify-content:center;font-family:'DM Sans','Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;text-align:center;padding:24px}`
+    + `.card{max-width:440px;width:100%;background:rgba(255,255,255,0.04);border:1px solid rgba(193,123,26,0.25);border-radius:24px;padding:44px 36px;box-shadow:0 24px 48px rgba(0,0,0,0.45),inset 0 1px 0 rgba(255,255,255,0.06)}`
+    + `.icon{font-size:3.2rem;margin-bottom:20px;line-height:1}.title{color:#C17B1A;font-size:1.3rem;font-weight:700;margin-bottom:14px;line-height:1.45;letter-spacing:-0.01em}`
+    + `.msg{color:#8AA3C7;font-size:0.875rem;line-height:1.75;margin-bottom:0}.div{height:1px;background:linear-gradient(90deg,transparent,rgba(193,123,26,0.3),transparent);margin:22px 0}`
+    + `a{display:inline-flex;align-items:center;gap:6px;color:#FAD98B;font-size:0.88rem;font-weight:600;text-decoration:none;background:rgba(193,123,26,0.15);border:1px solid rgba(193,123,26,0.35);padding:10px 22px;border-radius:40px}`
+    + `</style></head><body><div class="card"><div class="icon">&#x1F512;</div>`
+    + `<div class="title">&#169; Civil Engineering Suite &#8212; Protected Content</div>`
+    + `<div class="msg">Access via the official website.</div>`
+    + `<div class="div"></div>`
+    + `<a href="https://civilengsuite.pages.dev/">civilengsuite.pages.dev/</a>`
     + `</div></body></html>`;
   const crB64 = u8ToB64(new TextEncoder().encode(crHtml));
   return `(function(){'use strict';`
@@ -1466,20 +1475,19 @@ export async function onRequest(context) {
   const _sharedCrUrl   = `${_canonicalOrigin}${_sharedCrRP}/`;
   const _sharedCrLabel = `${_canonicalHostname}${_sharedCrRP}/`;
   const _sharedCrHtml  =
-    `<!DOCTYPE html><html><head><meta charset="UTF-8">`
+    `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">`
     + `<meta name="viewport" content="width=device-width,initial-scale=1">`
     + `<title>\u00A9 Protected \u2014 ${_sharedCrPT}<\/title>`
-    + `<style>*{box-sizing:border-box;margin:0;padding:0}`
-    + `body{background:#0A1A2E;display:flex;align-items:center;justify-content:center;`
-    + `min-height:100vh;font-family:sans-serif;text-align:center;padding:24px}`
-    + `.card{max-width:440px}.icon{font-size:3.5rem;margin-bottom:18px}`
-    + `.title{color:#C17B1A;font-size:1.35rem;font-weight:700;margin-bottom:12px;line-height:1.4}`
-    + `.msg{color:#8AA3C7;font-size:0.9rem;line-height:1.8;margin-bottom:22px}`
-    + `a{color:#C17B1A;font-size:0.88rem;text-decoration:none}`
-    + `a:hover{text-decoration:underline}<\/style><\/head><body>`
-    + `<div class="card"><div class="icon">&#x1F512;<\/div>`
+    + `<style>*{box-sizing:border-box;margin:0;padding:0}html,body{background:#0A1A2E;background-image:linear-gradient(#0A1A2E,#0A1A2E);min-height:100vh}`
+    + `body{display:flex;align-items:center;justify-content:center;font-family:'DM Sans','Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;text-align:center;padding:24px}`
+    + `.card{max-width:440px;width:100%;background:rgba(255,255,255,0.04);border:1px solid rgba(193,123,26,0.25);border-radius:24px;padding:44px 36px;box-shadow:0 24px 48px rgba(0,0,0,0.45),inset 0 1px 0 rgba(255,255,255,0.06)}`
+    + `.icon{font-size:3.2rem;margin-bottom:20px;line-height:1}.title{color:#C17B1A;font-size:1.3rem;font-weight:700;margin-bottom:14px;line-height:1.45;letter-spacing:-0.01em}`
+    + `.msg{color:#8AA3C7;font-size:0.875rem;line-height:1.75;margin-bottom:0}.div{height:1px;background:linear-gradient(90deg,transparent,rgba(193,123,26,0.3),transparent);margin:22px 0}`
+    + `a{display:inline-flex;align-items:center;gap:6px;color:#FAD98B;font-size:0.88rem;font-weight:600;text-decoration:none;background:rgba(193,123,26,0.15);border:1px solid rgba(193,123,26,0.35);padding:10px 22px;border-radius:40px}`
+    + `<\/style><\/head><body><div class="card"><div class="icon">&#x1F512;<\/div>`
     + `<div class="title">&#169; Civil Engineering Suite &#8212; Protected Content<\/div>`
     + `<div class="msg">Access via the official website.<\/div>`
+    + `<div class="div"><\/div>`
     + `<a href="${_sharedCrUrl}">${_sharedCrLabel}<\/a>`
     + `<\/div><\/body><\/html>`;
   const _sharedCrB64 = u8ToB64(new TextEncoder().encode(_sharedCrHtml));
@@ -1501,8 +1509,13 @@ export async function onRequest(context) {
     + `try{document.documentElement.style.cssText='display:none!important';}catch(_m2se){}`
     + `document.addEventListener('DOMContentLoaded',function(){try{`
     + `document.documentElement.style.cssText='display:block!important;visibility:visible!important;background:#0A1A2E';`
-    + `document.body.style.cssText='display:flex!important;margin:0;background:#0A1A2E;min-height:100vh;align-items:center;justify-content:center;font-family:sans-serif;text-align:center;padding:24px;box-sizing:border-box';`
-    + `document.body.innerHTML="<div style='max-width:440px'><div style='font-size:3.5rem;margin-bottom:18px'>&#x1F512;</div><h2 style='color:#C17B1A;font-weight:700;margin-bottom:12px'>&#169; Civil Engineering Suite &#8212; Protected Content</h2><p style='color:#8AA3C7;font-size:.9rem;line-height:1.8;margin-bottom:22px'>Access via the official website.</p><a href='"+_aos[0]+"' style='color:#C17B1A;font-size:.88rem'>"+_aos[0].replace("https://","")+"</a></div>";}catch(_m2de){}});`
+    + `document.body.style.cssText='display:flex!important;margin:0;background:#0A1A2E;background-image:linear-gradient(#0A1A2E,#0A1A2E);min-height:100vh;align-items:center;justify-content:center;font-family:\\'DM Sans\\',\\'Inter\\',-apple-system,system-ui,sans-serif;text-align:center;padding:24px;box-sizing:border-box';`
+    + `document.body.innerHTML="<div style='max-width:440px;width:100%;background:rgba(255,255,255,0.04);border:1px solid rgba(193,123,26,0.25);border-radius:24px;padding:44px 36px;box-shadow:0 24px 48px rgba(0,0,0,0.45)'>"`
+    + `+"<div style='font-size:3.2rem;margin-bottom:20px;line-height:1'>&#x1F512;</div>"`
+    + `+"<h2 style='color:#C17B1A;font-size:1.3rem;font-weight:700;margin-bottom:14px;line-height:1.45'>&#169; Civil Engineering Suite &#8212; Protected Content</h2>"`
+    + `+"<p style='color:#8AA3C7;font-size:.875rem;line-height:1.75;margin-bottom:0'>Access via the official website.</p>"`
+    + `+"<div style='height:1px;background:linear-gradient(90deg,transparent,rgba(193,123,26,0.3),transparent);margin:22px 0'></div>"`
+    + `+"<a href='"+_aos[0]+"' style='display:inline-flex;align-items:center;color:#FAD98B;font-size:.88rem;font-weight:600;text-decoration:none;background:rgba(193,123,26,0.15);border:1px solid rgba(193,123,26,0.35);padding:10px 22px;border-radius:40px'>"+_aos[0].replace("https://","")+"</a></div>";}catch(_m2de){}});`
     + `}`
     + `}`
     + `})();`;
@@ -1564,20 +1577,21 @@ export async function onRequest(context) {
 
   const bootstrapCopyrightBody =
     `<style>`
-    + `#_ces_cr_body{display:none;margin:0;background:#0A1A2E;color:#C17B1A;`
-    + `font-family:sans-serif;align-items:center;justify-content:center;`
-    + `min-height:100vh;text-align:center;position:fixed;top:0;left:0;`
-    + `width:100%;height:100%;z-index:2147483647}`
+    + `#_ces_cr_body{display:none;margin:0;background:#0A1A2E;background-image:linear-gradient(#0A1A2E,#0A1A2E);`
+    + `font-family:'DM Sans','Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;`
+    + `align-items:center;justify-content:center;min-height:100vh;text-align:center;`
+    + `position:fixed;top:0;left:0;width:100%;height:100%;z-index:2147483647;padding:24px;box-sizing:border-box}`
     + `</style>`
     + `<noscript><style>#_ces_cr_body{display:flex!important}</style></noscript>`
     + `<div id="_ces_cr_body">`
-    + `<div style="padding:40px;max-width:440px">`
-    + `<div style="font-size:3.5rem;margin-bottom:18px">&#x1F512;</div>`
-    + `<h2 style="font-size:1.35rem;font-weight:700;margin-bottom:12px;line-height:1.4">`
+    + `<div style="max-width:440px;width:100%;background:rgba(255,255,255,0.04);border:1px solid rgba(193,123,26,0.25);border-radius:24px;padding:44px 36px;box-shadow:0 24px 48px rgba(0,0,0,0.45),inset 0 1px 0 rgba(255,255,255,0.06)">`
+    + `<div style="font-size:3.2rem;margin-bottom:20px;line-height:1">&#x1F512;</div>`
+    + `<h2 style="color:#C17B1A;font-size:1.3rem;font-weight:700;margin-bottom:14px;line-height:1.45;letter-spacing:-0.01em">`
     + `&#169; Civil Engineering Suite &#8212; Protected Content</h2>`
-    + `<p style="color:#8AA3C7;font-size:0.9rem;line-height:1.8;margin-bottom:22px">`
+    + `<p style="color:#8AA3C7;font-size:0.875rem;line-height:1.75;margin-bottom:0">`
     + `Access via the official website.</p>`
-    + `<a href="${_sharedCrUrl}" style="color:#C17B1A;font-size:0.88rem">${_sharedCrLabel}</a>`
+    + `<div style="height:1px;background:linear-gradient(90deg,transparent,rgba(193,123,26,0.3),transparent);margin:22px 0"></div>`
+    + `<a href="${_sharedCrUrl}" style="display:inline-flex;align-items:center;color:#FAD98B;font-size:0.88rem;font-weight:600;text-decoration:none;background:rgba(193,123,26,0.15);border:1px solid rgba(193,123,26,0.35);padding:10px 22px;border-radius:40px">${_sharedCrLabel}</a>`
     + `</div></div>`;
 
   // [B9] Build og meta block for bootstrap shell.
@@ -1712,8 +1726,13 @@ export async function onRequest(context) {
     + `if(!_m1cOk){`
     + `try{document.documentElement.style.cssText='display:block!important;visibility:visible!important;background:#0A1A2E';}catch(_m1cde){}`
     + `var _xov=document.createElement('div');`
-    + `_xov.setAttribute('style','position:fixed;top:0;left:0;width:100%;height:100%;background:#0A1A2E;z-index:2147483647;display:flex;align-items:center;justify-content:center;font-family:sans-serif;text-align:center;padding:24px;box-sizing:border-box;visibility:visible!important');`
-    + `_xov.innerHTML="<div style='max-width:440px'><div style='font-size:3.5rem;margin-bottom:18px'>&#x1F512;</div><h2 style='color:#C17B1A;font-weight:700;margin-bottom:12px'>&#169; Civil Engineering Suite &#8212; Protected Content</h2><p style='color:#8AA3C7;font-size:.9rem;line-height:1.8;margin-bottom:22px'>Access via the official website.</p><a href='"+_xaos[0]+"' style='color:#C17B1A;font-size:.88rem'>"+_xaos[0].replace("https://","")+"</a></div>";`
+    + `_xov.setAttribute('style','position:fixed;top:0;left:0;width:100%;height:100%;background:#0A1A2E;background-image:linear-gradient(#0A1A2E,#0A1A2E);z-index:2147483647;display:flex;align-items:center;justify-content:center;font-family:\\'DM Sans\\',\\'Inter\\',-apple-system,system-ui,sans-serif;text-align:center;padding:24px;box-sizing:border-box;visibility:visible!important');`
+    + `_xov.innerHTML="<div style='max-width:440px;width:100%;background:rgba(255,255,255,0.04);border:1px solid rgba(193,123,26,0.25);border-radius:24px;padding:44px 36px;box-shadow:0 24px 48px rgba(0,0,0,0.45)'>"`
+    + `+"<div style='font-size:3.2rem;margin-bottom:20px;line-height:1'>&#x1F512;</div>"`
+    + `+"<h2 style='color:#C17B1A;font-size:1.3rem;font-weight:700;margin-bottom:14px;line-height:1.45'>&#169; Civil Engineering Suite &#8212; Protected Content</h2>"`
+    + `+"<p style='color:#8AA3C7;font-size:.875rem;line-height:1.75;margin-bottom:0'>Access via the official website.</p>"`
+    + `+"<div style='height:1px;background:linear-gradient(90deg,transparent,rgba(193,123,26,0.3),transparent);margin:22px 0'></div>"`
+    + `+"<a href='"+_xaos[0]+"' style='display:inline-flex;align-items:center;color:#FAD98B;font-size:.88rem;font-weight:600;text-decoration:none;background:rgba(193,123,26,0.15);border:1px solid rgba(193,123,26,0.35);padding:10px 22px;border-radius:40px'>"+_xaos[0].replace("https://","")+"</a></div>";`
     + `try{document.body.appendChild(_xov);}catch(_xoe){}}`
     + `return;}`
     + `var p="${payload}";`
