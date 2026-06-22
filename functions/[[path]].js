@@ -53,6 +53,54 @@
  *        the /payment/* _headers block which governs the checkout flow.
  *
  *
+ * 2026-06-22 v23 — Analytics layer: CSP fix + session tracking (V23-CSP, V23-SID):
+ *
+ *   [V23-CSP] CRITICAL FIX: script-src was missing 'strict-dynamic' and analytics
+ *        domain allowlists. External analytics scripts (GA4 gtag.js from
+ *        googletagmanager.com, Clarity tag from clarity.ms) added to decoded HTML
+ *        source files before encryption were blocked by CSP. Clarity's inline bootstrap
+ *        creates <script> elements dynamically — without 'strict-dynamic', dynamically
+ *        created scripts are blocked regardless of domain allowlists.
+ *        Fix: 'strict-dynamic' propagates trust from nonced parent scripts to their
+ *        dynamic children. Domain allowlists (GTM, Clarity) serve as CSP Level 2
+ *        fallback for browsers predating strict-dynamic support.
+ *        Applied to BOTH bot-path and human-path response Content-Security-Policy headers.
+ *
+ *   [V23-SID] Session token via sessionStorage._ces_sid injected in bootstrapBeacon:
+ *        Adds per-tab session continuity across page navigations in the same tab.
+ *        Token generated once per tab: Math.random().toString(36) + Date.now().toString(36)
+ *        Stored in sessionStorage (not cookies — no GDPR consent banner required).
+ *        Survives document.write() because sessionStorage is per-origin-per-tab,
+ *        not per-document. Sent as field 's' in every /api/track POST.
+ *        Also readable by GA4 snippet in decoded HTML for consistent attribution.
+ *        Enables cross-page journey: which pages does a single session visit?
+ *        Replaces the useless time-bucketed client_id in GA4 Measurement Protocol.
+ *
+ * 2026-06-22 v22 — Analytics infrastructure: AE server-side + sendBeacon (V22-AE, V22-BEACON):
+ *
+ *   [V22-AE] Server-side hit tracking via Cloudflare Analytics Engine (env.CES_ANALYTICS):
+ *        writeDataPoint() fires synchronously for every request (bot + human) immediately
+ *        after nonce generation. Zero latency on response path. Captures: pathname,
+ *        bot/human label, CF-IPCountry, device type (mobile/desktop), referrer.
+ *        Requires: Cloudflare Dashboard → Pages → Settings → Functions → Analytics Engine
+ *        binding: variable=CES_ANALYTICS, dataset=ces_visitor_events.
+ *
+ *   [V22-BEACON] Client-side sendBeacon before XOR decoder in bootstrap:
+ *        Inline synchronous IIFE fires navigator.sendBeacon('/api/track', JSON) before
+ *        document.open() in the XOR decoder. sendBeacon queues the HTTP POST at the
+ *        network layer — request is not cancelled by document.write(). Falls back to
+ *        fetch(..., {keepalive:true}) if sendBeacon absent.
+ *        New Pages Function: functions/api/track.js — POST handler, writes to AE,
+ *        optionally relays to GA4 Measurement Protocol (env: CES_GA4_ID, CES_GA4_SECRET).
+ *
+ *   [V22-CSP] CSP_COMMON connect-src: added https://cloudflareinsights.com,
+ *        https://www.google-analytics.com, https://region1.google-analytics.com
+ *        for beacon XHR and GA4 Measurement Protocol fetch calls.
+ *        img-src: added https://www.google-analytics.com (GA4 pixel fallback).
+ *        STATIC_PASSTHROUGH: added api\/track as defensive guard (CF Functions
+ *        routing already intercepts /api/track before [[path]].js, but explicit
+ *        passthrough matches the existing defensive pattern for /api/payment).
+ *
  * 2026-06-10 v21 — MHTML mobile download fix: adoptedStyleSheets + DOM overlay (MHTML-FIX):
  *
  *   ROOT CAUSE: Chrome Android's "Download page" (toolbar ⋮ → Download) saves the
@@ -667,8 +715,8 @@ const CSP_COMMON = [
   "media-src 'none'",
   "style-src 'self' 'unsafe-inline'",
   "font-src 'self'",
-  "img-src 'self' data:",
-  "connect-src 'self'",
+  "img-src 'self' data: https://www.google-analytics.com",
+  "connect-src 'self' https://cloudflareinsights.com https://www.google-analytics.com https://region1.google-analytics.com",
   "frame-ancestors 'none'",
   "base-uri 'self'",
   "form-action 'self' https://civilengsuite.is-a.dev",
@@ -1126,7 +1174,7 @@ export async function onRequest(context) {
   //      These paths MUST NOT be in ROUTES — they are plain static files with no
   //      .enc decryption required. _headers rules for /footing-pro/engineers/*
   //      apply directly (Cloudflare Pages _headers applies to static responses).
-  const STATIC_PASSTHROUGH = /^\/(?:robots\.txt|manifest\.json|favicon\.ico|og-image\.png|images\/.*|footing-pro\/images\/.*|footing-pro\/engineers\/?.*|footing-pro\/offices\/?.*|footing-pro\/students\/?.*|beam-pro\/images\/.*|column-pro\/images\/.*|deflection-pro\/images\/.*|earthquake-pro\/images\/.*|mur-pro\/images\/.*|add-reft-pro\/images\/.*|section-property-pro\/images\/.*|google[0-9a-f]+\.html|sitemap\.xsl|fonts\/.*|\.well-known\/.*|payment(?:\/.*)?|api\/payment\/.*)$/i;
+  const STATIC_PASSTHROUGH = /^\/(?:robots\.txt|manifest\.json|favicon\.ico|og-image\.png|images\/.*|footing-pro\/images\/.*|footing-pro\/engineers\/?.*|footing-pro\/offices\/?.*|footing-pro\/students\/?.*|beam-pro\/images\/.*|column-pro\/images\/.*|deflection-pro\/images\/.*|earthquake-pro\/images\/.*|mur-pro\/images\/.*|add-reft-pro\/images\/.*|section-property-pro\/images\/.*|google[0-9a-f]+\.html|sitemap\.xsl|fonts\/.*|\.well-known\/.*|payment(?:\/.*)?|api\/payment\/.*|api\/track)$/i;
   if (STATIC_PASSTHROUGH.test(path)) return context.next();
 
   // ── [S1] Sitemap — explicit handler with clean minimal headers ───────────
@@ -1257,6 +1305,32 @@ export async function onRequest(context) {
   // ── Per-request nonce ──────────────────────────────────────────────────────
   const cspNonce = generateNonce();
 
+  // ── [V22-AE] Server-side hit tracking via Cloudflare Analytics Engine ──────
+  // Fires for every request (bot + human). writeDataPoint() is synchronous —
+  // no await, no Promise, no latency added to the response path.
+  // Requires: Dashboard → Pages project → Settings → Functions → Analytics Engine
+  //           Variable name: CES_ANALYTICS, Dataset: ces_visitor_events
+  // Distinguish bot vs human in queries: blobs[1] = 'bot' | 'human'
+  if (env.CES_ANALYTICS) {
+    try {
+      const _ae_ua      = (request.headers.get('User-Agent') || '').slice(0, 200);
+      const _ae_country = request.headers.get('CF-IPCountry') || 'XX';
+      const _ae_ref     = (request.headers.get('Referer') || '').slice(0, 200);
+      const _ae_mobile  = /mobile|android|iphone|ipad|phone/i.test(_ae_ua);
+      env.CES_ANALYTICS.writeDataPoint({
+        blobs: [
+          url.pathname,
+          BOT_RE.test(_ae_ua) ? 'bot' : 'human',
+          _ae_country,
+          _ae_mobile ? 'mobile' : 'desktop',
+          _ae_ref,
+        ],
+        doubles: [Date.now()],
+        indexes: [url.pathname],
+      });
+    } catch (_ae_err) { /* silent — analytics must never break serving */ }
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
   // BOT PATH — Ultra-clean, lightweight HTML served to crawlers
   // [SECURITY] Nothing in this block affects the human path. The human path
@@ -1355,7 +1429,7 @@ export async function onRequest(context) {
       // [A4] Vary: Accept added on homepage so markdown-negotiated cache is separate.
       'Vary':                    route.prefix === '/' ? 'User-Agent, Accept' : 'User-Agent',
       'X-Robots-Tag':            'index, follow',
-      'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ=' 'unsafe-hashes' 'sha256-nAiI7XK5Mt/SgNQUZPqTuikvwxIVHV3se6mHGQue+88=' 'sha256-Jag+ZHPii6iUmMQWlnwms/mnjM8gRPTOJA2KIyTQQRk=' 'sha256-uLUdJIdD3+8SpL4nHNFN9YmyHRRmrseSQKwzj3ECn2I=' 'sha256-akyHNuxwVvvLQ11iHoDrpca0qH3TU3LfGbtdQ8kNdwI=' 'sha256-UOhLo4NRrWG89b3vpgtU0dc/C8aWLS+MQ2Lf9vW/4Fk=' 'sha256-jHF5hTIlMDyGZRAsNK0HO/WFYrwPvI2I1q0o1xKKB6I=' 'sha256-wflfhEeJWTAjAK0hnm9/OICxAQ8fVnj3168JrJ/m91k=' 'sha256-oTzV9+pQ7IAxC4NoAc7dH4+0Is4KloZ9u7cMJC7UDrE=' 'sha256-bTpi/7w0Cd8ihAWpwcZJIdz49sMq0d73fWWDzp5Ju2Q='`,
+      'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ=' 'unsafe-hashes' 'sha256-nAiI7XK5Mt/SgNQUZPqTuikvwxIVHV3se6mHGQue+88=' 'sha256-Jag+ZHPii6iUmMQWlnwms/mnjM8gRPTOJA2KIyTQQRk=' 'sha256-uLUdJIdD3+8SpL4nHNFN9YmyHRRmrseSQKwzj3ECn2I=' 'sha256-akyHNuxwVvvLQ11iHoDrpca0qH3TU3LfGbtdQ8kNdwI=' 'sha256-UOhLo4NRrWG89b3vpgtU0dc/C8aWLS+MQ2Lf9vW/4Fk=' 'sha256-jHF5hTIlMDyGZRAsNK0HO/WFYrwPvI2I1q0o1xKKB6I=' 'sha256-wflfhEeJWTAjAK0hnm9/OICxAQ8fVnj3168JrJ/m91k=' 'sha256-oTzV9+pQ7IAxC4NoAc7dH4+0Is4KloZ9u7cMJC7UDrE=' 'sha256-bTpi/7w0Cd8ihAWpwcZJIdz49sMq0d73fWWDzp5Ju2Q=' 'strict-dynamic' https://www.googletagmanager.com https://www.clarity.ms`,
       // [A1] Link header on ALL bot responses — agents crawling any tool page
       // discover the full agent catalog without needing to hit the homepage first.
       'Link':                    HOMEPAGE_LINK_HEADER,
@@ -1608,6 +1682,22 @@ export async function onRequest(context) {
     `<meta name="twitter:image" content="${escHtml(ogImageAbsolute)}">`,
   ].join('') : '';
 
+  // ── [V22-BEACON] Client-side analytics beacon — fires synchronously before ──
+  // document.open() in the XOR decoder. navigator.sendBeacon is fire-and-forget:
+  // the POST request is queued at the network layer and completes even after the
+  // document is replaced by document.write(). No async, no await, no race condition.
+  // Falls back to fetch() with keepalive:true on browsers that lack sendBeacon.
+  // This is the ONLY client-side analytics that fires reliably from the bootstrap.
+  // For in-page behavioral analytics (click, scroll, section), use GA4/Clarity
+  // snippets added to HTML source files before encryption (see CES Analytics Snippet).
+  const bootstrapBeacon = `<script nonce="${cspNonce}">`
+    + `(function(){try{`
+    + `var _sid='';try{_sid=sessionStorage.getItem('_ces_sid')||'';if(!_sid){_sid=(Math.random().toString(36)+Date.now().toString(36)).slice(2,18);sessionStorage.setItem('_ces_sid',_sid);}}catch(_se){}var _td={p:window.location.pathname,r:(document.referrer||'').slice(0,200),l:navigator.language||'',w:window.innerWidth,e:'pageview',s:_sid};`
+    + `if(typeof navigator.sendBeacon==='function'){navigator.sendBeacon('/api/track',JSON.stringify(_td));}`
+    + `else{fetch('/api/track',{method:'POST',body:JSON.stringify(_td),keepalive:true,headers:{'Content-Type':'application/json'}}).catch(function(){});}`
+    + `}catch(_be){}})();`
+    + `\u003c/script>`;
+
   // Bootstrap shell — tiny XOR wrapper; view-source shows only this, not real HTML
   // [A6] WebMCP is injected as the FIRST script in the bootstrap shell so it fires
   // for every JS-executing client regardless of User-Agent (including scanners whose
@@ -1692,6 +1782,7 @@ export async function onRequest(context) {
     + `</head><body>`
     + bootstrapCopyrightBody
     + webMCPBootstrap
+    + bootstrapBeacon
     + `<script nonce="${cspNonce}">`
     + `(function(){try{`
     // [M1c] Defense-in-depth: origin check INSIDE XOR decoder.
@@ -1732,7 +1823,7 @@ export async function onRequest(context) {
   return new Response(bootstrap, { status: 200, headers: {
     'Content-Type':            'text/html; charset=utf-8',
     'Cache-Control':           'no-store',
-    'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ=' 'unsafe-hashes' 'sha256-nAiI7XK5Mt/SgNQUZPqTuikvwxIVHV3se6mHGQue+88=' 'sha256-Jag+ZHPii6iUmMQWlnwms/mnjM8gRPTOJA2KIyTQQRk=' 'sha256-uLUdJIdD3+8SpL4nHNFN9YmyHRRmrseSQKwzj3ECn2I=' 'sha256-akyHNuxwVvvLQ11iHoDrpca0qH3TU3LfGbtdQ8kNdwI=' 'sha256-UOhLo4NRrWG89b3vpgtU0dc/C8aWLS+MQ2Lf9vW/4Fk=' 'sha256-jHF5hTIlMDyGZRAsNK0HO/WFYrwPvI2I1q0o1xKKB6I=' 'sha256-wflfhEeJWTAjAK0hnm9/OICxAQ8fVnj3168JrJ/m91k=' 'sha256-oTzV9+pQ7IAxC4NoAc7dH4+0Is4KloZ9u7cMJC7UDrE=' 'sha256-bTpi/7w0Cd8ihAWpwcZJIdz49sMq0d73fWWDzp5Ju2Q='`,
+    'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ=' 'unsafe-hashes' 'sha256-nAiI7XK5Mt/SgNQUZPqTuikvwxIVHV3se6mHGQue+88=' 'sha256-Jag+ZHPii6iUmMQWlnwms/mnjM8gRPTOJA2KIyTQQRk=' 'sha256-uLUdJIdD3+8SpL4nHNFN9YmyHRRmrseSQKwzj3ECn2I=' 'sha256-akyHNuxwVvvLQ11iHoDrpca0qH3TU3LfGbtdQ8kNdwI=' 'sha256-UOhLo4NRrWG89b3vpgtU0dc/C8aWLS+MQ2Lf9vW/4Fk=' 'sha256-jHF5hTIlMDyGZRAsNK0HO/WFYrwPvI2I1q0o1xKKB6I=' 'sha256-wflfhEeJWTAjAK0hnm9/OICxAQ8fVnj3168JrJ/m91k=' 'sha256-oTzV9+pQ7IAxC4NoAc7dH4+0Is4KloZ9u7cMJC7UDrE=' 'sha256-bTpi/7w0Cd8ihAWpwcZJIdz49sMq0d73fWWDzp5Ju2Q=' 'strict-dynamic' https://www.googletagmanager.com https://www.clarity.ms`,
     // [A1] RFC 8288 Link header — visible in HTTP headers before JS executes.
     // [A4] Vary: Accept on homepage so intermediaries separate markdown/HTML caches.
     ...(route.prefix === '/' ? {
