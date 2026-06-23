@@ -53,6 +53,19 @@
  *        the /payment/* _headers block which governs the checkout flow.
  *
  *
+ * 2026-06-23 v25 — Email MX validation: live email verification (V25-EMAIL):
+ *
+ *   [V25-EMAIL] Added two-stage email validation to cpContactForm (both pages):
+ *     Stage 1: RFC 5321 regex format check — synchronous, zero latency.
+ *     Stage 2: MX record lookup via Cloudflare DNS-over-HTTPS
+ *              (https://cloudflare-dns.com/dns-query?name=<domain>&type=MX).
+ *              Verifies the domain has mail servers before form submission.
+ *              Fails open on network error (never blocks legitimate users).
+ *              Added https://cloudflare-dns.com to CSP_COMMON connect-src.
+ *     Inline field messages (cf-field-msg) and border states (--error/--valid/
+ *     --checking) added for real-time blur feedback. Submit button disabled
+ *     during async MX check. Both HTML files + path.js updated in sync.
+ *
  * 2026-06-23 v24 — connect-src completion: contact form + Clarity collection (V24-CSP):
  *
  *   [V24-CSP] CRITICAL FIX: connect-src 'self' (plus the v22 analytics additions)
@@ -749,7 +762,7 @@ const CSP_COMMON = [
   //      Net effect before this fix: Clarity loaded and ran, but every
   //      telemetry/collect call it made was silently CSP-blocked — recording
   //      nothing. Same root cause as (1), different consumer.
-  "connect-src 'self' https://cloudflareinsights.com https://www.google-analytics.com https://region1.google-analytics.com https://api.web3forms.com https://*.clarity.ms https://c.bing.com",
+  "connect-src 'self' https://cloudflareinsights.com https://www.google-analytics.com https://region1.google-analytics.com https://api.web3forms.com https://*.clarity.ms https://c.bing.com https://cloudflare-dns.com",
   "frame-ancestors 'none'",
   "base-uri 'self'",
   "form-action 'self' https://civilengsuite.is-a.dev",
