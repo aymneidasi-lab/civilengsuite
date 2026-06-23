@@ -53,6 +53,26 @@
  *        the /payment/* _headers block which governs the checkout flow.
  *
  *
+ * 2026-06-23 v24 — connect-src completion: contact form + Clarity collection (V24-CSP):
+ *
+ *   [V24-CSP] CRITICAL FIX: connect-src 'self' (plus the v22 analytics additions)
+ *        was still missing two hosts that JS on these pages actively calls:
+ *          - https://api.web3forms.com — contact form fetch() target. Blocked
+ *            at the CSP layer regardless of access_key validity; user saw a
+ *            generic "could not send" message with no indication CSP was the
+ *            cause. Reproduced and confirmed fixed via headless Chromium test
+ *            against the literal CSP_COMMON string (before: explicit
+ *            "Refused to connect ... violates ... connect-src 'self'" console
+ *            error and a rejected fetch promise; after: request dispatched).
+ *          - https://*.clarity.ms / https://c.bing.com — v23-CSP added
+ *            'strict-dynamic' + clarity.ms to script-src so the Clarity tag
+ *            itself loads, but never added Clarity's collection endpoints to
+ *            connect-src. Per Microsoft's own CSP guidance, Clarity load-
+ *            balances telemetry across single-letter subdomains of clarity.ms
+ *            and c.bing.com. Without these, Clarity ran but every collect
+ *            call was silently CSP-blocked — zero data reaching the dashboard.
+ *        Both fixes are additive to connect-src only; no other directive touched.
+ *
  * 2026-06-22 v23 — Analytics layer: CSP fix + session tracking (V23-CSP, V23-SID):
  *
  *   [V23-CSP] CRITICAL FIX: script-src was missing 'strict-dynamic' and analytics
@@ -716,7 +736,20 @@ const CSP_COMMON = [
   "style-src 'self' 'unsafe-inline'",
   "font-src 'self'",
   "img-src 'self' data: https://www.google-analytics.com",
-  "connect-src 'self' https://cloudflareinsights.com https://www.google-analytics.com https://region1.google-analytics.com",
+  // [V24-CSP] FIX (2026-06-23): connect-src was missing two required hosts:
+  //   1. https://api.web3forms.com — contact form (cpContactForm, both '/' and
+  //      '/footing-pro') POSTs here via fetch(). Without this host, Chromium
+  //      blocks the request before it leaves the browser ("Refused to connect
+  //      ... violates ... connect-src 'self'"), surfaced to the user only as a
+  //      generic "could not send" error. Confirmed via headless Chromium repro.
+  //   2. https://*.clarity.ms and https://c.bing.com — v23-CSP fixed script-src
+  //      so the Clarity tag (clarity.ms/tag/...) loads, but never added the
+  //      collection endpoints Clarity's own docs require for connect-src
+  //      (Clarity load-balances across lettered subdomains a–z.clarity.ms).
+  //      Net effect before this fix: Clarity loaded and ran, but every
+  //      telemetry/collect call it made was silently CSP-blocked — recording
+  //      nothing. Same root cause as (1), different consumer.
+  "connect-src 'self' https://cloudflareinsights.com https://www.google-analytics.com https://region1.google-analytics.com https://api.web3forms.com https://*.clarity.ms https://c.bing.com",
   "frame-ancestors 'none'",
   "base-uri 'self'",
   "form-action 'self' https://civilengsuite.is-a.dev",
