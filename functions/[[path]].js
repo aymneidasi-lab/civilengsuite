@@ -55,7 +55,19 @@
  *
  * 2026-06-23 v25 — Email MX validation: live email verification (V25-EMAIL):
  *
- *   [V25-EMAIL] Added two-stage email validation to cpContactForm (both pages):
+ *   [V25-EMAIL] Added three-gate email validation to cpContactForm (both pages):
+ *     Gate 1: RFC 5321 regex format check — synchronous.
+ *     Gate 2: Confirm email field — user must type email twice; mismatch blocks send.
+ *              This is the primary defence against fake gmail/yahoo/hotmail entries
+ *              because those providers are catch-all and no API can verify their
+ *              individual mailboxes from client-side code.
+ *     Gate 3: Abstract API (abstractapi.com/api/email-validation) when key is set.
+ *              Catches: disposable emails, UNDELIVERABLE domains, no-MX domains.
+ *              Falls back to Cloudflare DoH MX check when key is absent.
+ *              Added https://emailvalidation.abstractapi.com to connect-src.
+ *     KNOWN LIMITATION: gmail.com/yahoo.com/hotmail.com mailbox existence
+ *     CANNOT be verified by any client-side mechanism (catch-all SMTP).
+ *     Gate 2 (confirm field) is the mitigation for that specific case.
  *     Stage 1: RFC 5321 regex format check — synchronous, zero latency.
  *     Stage 2: MX record lookup via Cloudflare DNS-over-HTTPS
  *              (https://cloudflare-dns.com/dns-query?name=<domain>&type=MX).
@@ -762,7 +774,7 @@ const CSP_COMMON = [
   //      Net effect before this fix: Clarity loaded and ran, but every
   //      telemetry/collect call it made was silently CSP-blocked — recording
   //      nothing. Same root cause as (1), different consumer.
-  "connect-src 'self' https://cloudflareinsights.com https://www.google-analytics.com https://region1.google-analytics.com https://api.web3forms.com https://*.clarity.ms https://c.bing.com https://cloudflare-dns.com",
+  "connect-src 'self' https://cloudflareinsights.com https://www.google-analytics.com https://region1.google-analytics.com https://api.web3forms.com https://*.clarity.ms https://c.bing.com https://cloudflare-dns.com https://emailvalidation.abstractapi.com",
   "frame-ancestors 'none'",
   "base-uri 'self'",
   "form-action 'self' https://civilengsuite.is-a.dev",
