@@ -53,6 +53,19 @@
  *        the /payment/* _headers block which governs the checkout flow.
  *
  *
+ * 2026-06-24 v26 — Resend OTP: replaced EmailJS with Resend via CF Pages Function (V26-RESEND):
+ *
+ *   [V26-RESEND] OTP delivery switched from EmailJS (client-side, key exposed in HTML) to
+ *     Resend.com via a Cloudflare Pages Function at /api/send-otp (functions/api/send-otp.js).
+ *     Security gain: RESEND_API_KEY lives in CF Pages environment variables — never in HTML.
+ *     Free tier: 3,000 emails/month (vs EmailJS 200/month).
+ *     Rate limiting: 5 OTP requests per IP per 10-minute window (in-memory, per isolate).
+ *     Server-side email format validation duplicates client-side check.
+ *     CORS: restricted to ALLOWED_ORIGINS list in the function.
+ *     connect-src: /api/send-otp is same-origin — no new CSP entry required.
+ *     EmailJS CDN script removed from <head>. cdn.jsdelivr.net kept for chart.js.
+ *     api.emailjs.com removed from connect-src.
+ *
  * 2026-06-23 v25 — Email MX validation: live email verification (V25-EMAIL):
  *
  *   [V25-EMAIL] Added three-gate email validation to cpContactForm (both pages):
@@ -1487,7 +1500,7 @@ export async function onRequest(context) {
       // [A4] Vary: Accept added on homepage so markdown-negotiated cache is separate.
       'Vary':                    route.prefix === '/' ? 'User-Agent, Accept' : 'User-Agent',
       'X-Robots-Tag':            'index, follow',
-      'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ=' 'unsafe-hashes' 'sha256-nAiI7XK5Mt/SgNQUZPqTuikvwxIVHV3se6mHGQue+88=' 'sha256-Jag+ZHPii6iUmMQWlnwms/mnjM8gRPTOJA2KIyTQQRk=' 'sha256-uLUdJIdD3+8SpL4nHNFN9YmyHRRmrseSQKwzj3ECn2I=' 'sha256-akyHNuxwVvvLQ11iHoDrpca0qH3TU3LfGbtdQ8kNdwI=' 'sha256-UOhLo4NRrWG89b3vpgtU0dc/C8aWLS+MQ2Lf9vW/4Fk=' 'sha256-jHF5hTIlMDyGZRAsNK0HO/WFYrwPvI2I1q0o1xKKB6I=' 'sha256-wflfhEeJWTAjAK0hnm9/OICxAQ8fVnj3168JrJ/m91k=' 'sha256-oTzV9+pQ7IAxC4NoAc7dH4+0Is4KloZ9u7cMJC7UDrE=' 'sha256-bTpi/7w0Cd8ihAWpwcZJIdz49sMq0d73fWWDzp5Ju2Q=' 'strict-dynamic' https://www.googletagmanager.com https://www.clarity.ms`,
+      'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ=' 'unsafe-hashes' 'sha256-nAiI7XK5Mt/SgNQUZPqTuikvwxIVHV3se6mHGQue+88=' 'sha256-Jag+ZHPii6iUmMQWlnwms/mnjM8gRPTOJA2KIyTQQRk=' 'sha256-uLUdJIdD3+8SpL4nHNFN9YmyHRRmrseSQKwzj3ECn2I=' 'sha256-akyHNuxwVvvLQ11iHoDrpca0qH3TU3LfGbtdQ8kNdwI=' 'sha256-UOhLo4NRrWG89b3vpgtU0dc/C8aWLS+MQ2Lf9vW/4Fk=' 'sha256-jHF5hTIlMDyGZRAsNK0HO/WFYrwPvI2I1q0o1xKKB6I=' 'sha256-wflfhEeJWTAjAK0hnm9/OICxAQ8fVnj3168JrJ/m91k=' 'sha256-oTzV9+pQ7IAxC4NoAc7dH4+0Is4KloZ9u7cMJC7UDrE=' 'sha256-bTpi/7w0Cd8ihAWpwcZJIdz49sMq0d73fWWDzp5Ju2Q=' 'strict-dynamic' https://www.googletagmanager.com https://www.clarity.ms https://cdn.jsdelivr.net`,
       // [A1] Link header on ALL bot responses — agents crawling any tool page
       // discover the full agent catalog without needing to hit the homepage first.
       'Link':                    HOMEPAGE_LINK_HEADER,
@@ -1881,7 +1894,7 @@ export async function onRequest(context) {
   return new Response(bootstrap, { status: 200, headers: {
     'Content-Type':            'text/html; charset=utf-8',
     'Cache-Control':           'no-store',
-    'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ=' 'unsafe-hashes' 'sha256-nAiI7XK5Mt/SgNQUZPqTuikvwxIVHV3se6mHGQue+88=' 'sha256-Jag+ZHPii6iUmMQWlnwms/mnjM8gRPTOJA2KIyTQQRk=' 'sha256-uLUdJIdD3+8SpL4nHNFN9YmyHRRmrseSQKwzj3ECn2I=' 'sha256-akyHNuxwVvvLQ11iHoDrpca0qH3TU3LfGbtdQ8kNdwI=' 'sha256-UOhLo4NRrWG89b3vpgtU0dc/C8aWLS+MQ2Lf9vW/4Fk=' 'sha256-jHF5hTIlMDyGZRAsNK0HO/WFYrwPvI2I1q0o1xKKB6I=' 'sha256-wflfhEeJWTAjAK0hnm9/OICxAQ8fVnj3168JrJ/m91k=' 'sha256-oTzV9+pQ7IAxC4NoAc7dH4+0Is4KloZ9u7cMJC7UDrE=' 'sha256-bTpi/7w0Cd8ihAWpwcZJIdz49sMq0d73fWWDzp5Ju2Q=' 'strict-dynamic' https://www.googletagmanager.com https://www.clarity.ms`,
+    'Content-Security-Policy': `${CSP_COMMON}; script-src 'nonce-${cspNonce}' 'sha256-707X5+NAXR96e1UzENjwpPf416b6sJGW3mMwS4KSCqw=' 'sha256-9Z5YUtj2GDOBykVWUu8jxOyhx6HrrXGwO4FEHHSUtqQ=' 'unsafe-hashes' 'sha256-nAiI7XK5Mt/SgNQUZPqTuikvwxIVHV3se6mHGQue+88=' 'sha256-Jag+ZHPii6iUmMQWlnwms/mnjM8gRPTOJA2KIyTQQRk=' 'sha256-uLUdJIdD3+8SpL4nHNFN9YmyHRRmrseSQKwzj3ECn2I=' 'sha256-akyHNuxwVvvLQ11iHoDrpca0qH3TU3LfGbtdQ8kNdwI=' 'sha256-UOhLo4NRrWG89b3vpgtU0dc/C8aWLS+MQ2Lf9vW/4Fk=' 'sha256-jHF5hTIlMDyGZRAsNK0HO/WFYrwPvI2I1q0o1xKKB6I=' 'sha256-wflfhEeJWTAjAK0hnm9/OICxAQ8fVnj3168JrJ/m91k=' 'sha256-oTzV9+pQ7IAxC4NoAc7dH4+0Is4KloZ9u7cMJC7UDrE=' 'sha256-bTpi/7w0Cd8ihAWpwcZJIdz49sMq0d73fWWDzp5Ju2Q=' 'strict-dynamic' https://www.googletagmanager.com https://www.clarity.ms https://cdn.jsdelivr.net`,
     // [A1] RFC 8288 Link header — visible in HTTP headers before JS executes.
     // [A4] Vary: Accept on homepage so intermediaries separate markdown/HTML caches.
     ...(route.prefix === '/' ? {
