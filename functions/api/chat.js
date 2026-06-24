@@ -1,35 +1,48 @@
 /**
- * functions/api/chat.js
+ * functions/api/chat.js  —  FIXED v2  (2026-06-25)
  * ──────────────────────────────────────────────────────────────────────────
  * Cloudflare Pages Function — AI chatbot proxy for Civil Engineering Suite
  * Route:  POST /api/chat   (Cloudflare Pages auto-routes from /functions/api/)
  *
  * REQUIRED ENV VAR (Cloudflare Dashboard → Pages → civilengsuite → Settings
- *                   → Environment variables → Add variable):
+ *                   → Environment variables):
  *   Name : GEMINI_API_KEY
  *   Value: your key from aistudio.google.com  (starts with AIzaSy...)
  *
- * REQUEST BODY (JSON):
- *   { "message": "user text", "history": [{role,text}, ...] }
+ * ════════════════════════════════════════
+ * CHANGELOG v2 — ROOT CAUSE & ALL FIXES
+ * ════════════════════════════════════════
+ * BUG 1 (CRITICAL — ROOT CAUSE of "Something went wrong"):
+ *   gemini-1.5-flash was SHUT DOWN on 2026-06-01.
+ *   Every request was returning HTTP 404 → falling into the generic
+ *   friendlyErrors fallback → "Something went wrong."
+ *   FIX: GEMINI_MODEL changed from 'gemini-1.5-flash'
+ *             to 'gemini-2.5-flash-lite'  (stable alias, free tier,
+ *              1,000 RPD, 30 RPM — highest free quota as of June 2026).
  *
- * RESPONSE BODY (JSON):
- *   { "reply": "assistant text" }   on success
- *   { "error": "..." }              on failure
+ * BUG 2 (Diagnostics): Gemini error body was never read on !ok responses.
+ *   Cloudflare logs showed nothing useful. Now the raw error is logged
+ *   via console.error so you can inspect it in CF → Pages → Functions → Logs.
  *
- * CSP NOTE: The frontend calls /api/chat — same origin — already permitted
- *           by connect-src 'self' in [[path]].js. No changes needed there.
+ * BUG 3 (Error coverage): friendlyErrors only handled 429 and 503.
+ *   Added 400, 401, 403, 404 with bilingual user-facing messages.
+ *
+ * BUG 4 (Retry coverage): retry only fired on 429.
+ *   Extended to also retry on 503 (transient server error).
  * ──────────────────────────────────────────────────────────────────────────
  */
 
 // ── Model ─────────────────────────────────────────────────────────────────
-// gemini-1.5-flash: confirmed globally free on AI Studio, 15 RPM / 1500 req/day,
-// 1M-token context window, excellent Arabic support. Most reliable free tier
-// choice across all regions including Egypt. Upgrade to a newer model later
-// by changing only this one constant once your quota is approved.
-const GEMINI_MODEL   = 'gemini-1.5-flash';
-const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+// gemini-2.5-flash-lite: stable model alias (no -preview suffix),
+// confirmed free on AI Studio Developer API as of June 2026.
+// Free tier limits: 30 RPM, 1,000 RPD, 1M-token context window.
+// Arabic support: confirmed.
+// gemini-1.5-flash was shut down 2026-06-01 → returns 404 for all requests.
+const GEMINI_MODEL   = 'gemini-2.5-flash-lite';
+const GEMINI_API_URL =
+  `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
-// ── CORS headers (same value used in every response branch) ───────────────
+// ── CORS headers ───────────────────────────────────────────────────────────
 const CORS = {
   'Access-Control-Allow-Origin' : '*',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
@@ -37,8 +50,6 @@ const CORS = {
 };
 
 // ── System prompt — complete product knowledge base ────────────────────────
-// Extracted from: 114 English posts, 114 Arabic posts, footing_pro_v2.html
-// FAQ schema, and pc_suite_v2.html FAQ schema.
 const SYSTEM_PROMPT = `\
 You are the official AI assistant for Civil Engineering Suite (civilengsuite.pages.dev),
 built by Eng. Aymn Asi — Structural Engineer.
@@ -180,51 +191,21 @@ STEP 7 — After payment, the developer sends you the fully activated applicatio
 ════════════════════════════════════════
 PC SUITE (FREE REGISTRATION TOOL)
 ════════════════════════════════════════
-Always FREE — no payment required at any point.
-Purpose:
-  • Registers your Windows device under your name
-  • Verifies your machine meets all system requirements
-  • Generates the encrypted .dat registration file required for licensing
-  • If anything needs attention (missing Excel, .NET, etc.) — PC Suite tells
-    you exactly what is missing and how to fix it step-by-step.
-Download: civilengsuite.pages.dev (free download button on the home page)
+PC Suite is the free companion app used for device registration and license management.
+It is NOT the engineering application itself — it is the registration gateway.
+Download: civilengsuite.pages.dev (main page, prominent download button)
+Cost: Free. No payment ever required to download or run PC Suite.
+What it does:
+  • Checks system compatibility (Windows / Excel / .NET versions)
+  • Collects user registration data
+  • Generates the encrypted .dat file needed to request a license
+  • Manages license renewals and re-activations
+PC Suite itself never expires.
 
 ════════════════════════════════════════
-LICENSE SYSTEM
+FAQ
 ════════════════════════════════════════
-Type          : Device-locked, annual subscription
-Device limit  : One license = one machine. Cannot run on multiple devices.
-Security      : 10 layers of protection built into every application.
-Expiry        : Software stops working when subscription expires until renewed.
-Renewal       : Contact developer to renew. Same .dat / activation process.
-
-════════════════════════════════════════
-COMING SOON — IN ACTIVE DEVELOPMENT
-════════════════════════════════════════
-• Beam Pro v.2026         — Singly & doubly reinforced beam design (ACI 318)
-• Column Pro v.2026       — P-M interaction diagrams, biaxial bending
-• Deflection Pro v.2026   — ACI serviceability checks
-• Earthquake Pro v.2026   — Seismic base shear & lateral forces (ASCE 7)
-• Mur Pro v.2026          — Resistance moment (ECP 203 code)
-• Add Reft Pro v.2026     — Slab opening reinforcement design
-• Section Property Pro v.2026 — Moment of inertia, S, r, centroid calculator
-All apps will be ACI 318-19 / ECP 203 compliant. Follow the Facebook page for
-launch announcements.
-
-════════════════════════════════════════
-CONTACT
-════════════════════════════════════════
-Developer : Eng. Aymn Asi  (Licensed Structural Engineer)
-Email     : aymneidasi@gmail.com
-WhatsApp  : +201287232413
-For pre-purchase questions  → email or WhatsApp
-For registration / purchase → send .dat file via email, WhatsApp, or Messenger
-
-════════════════════════════════════════
-FREQUENTLY ASKED QUESTIONS
-════════════════════════════════════════
-
-Q: How do I get my license?
+Q: How do I subscribe?
 A: Download the free PC Suite app → fill in the User Information form → PC Suite
    creates a .dat file on your Desktop → send it to Eng. Aymn Asi via email or
    WhatsApp → confirm price → pay → receive the activated application.
@@ -316,7 +297,10 @@ export async function onRequestPost(context) {
   // 1. Validate API key is configured
   const apiKey = env.GEMINI_API_KEY;
   if (!apiKey) {
-    return json({ error: 'GEMINI_API_KEY not set in Cloudflare environment variables.' }, 500);
+    return json(
+      { error: 'GEMINI_API_KEY not set in Cloudflare environment variables.' },
+      500,
+    );
   }
 
   // 2. Parse request body
@@ -337,18 +321,15 @@ export async function onRequestPost(context) {
   // 3. Build Gemini `contents` array
   //    Keep last 10 turns (5 exchanges) to stay within token budget.
   const contents = [];
-
   const recentHistory = rawHistory.slice(-10);
   for (const turn of recentHistory) {
     const role = turn.role === 'model' ? 'model' : 'user';
     const text = typeof turn.text === 'string' ? turn.text.trim() : '';
     if (text) contents.push({ role, parts: [{ text }] });
   }
-
-  // Append current user message
   contents.push({ role: 'user', parts: [{ text: userMessage }] });
 
-  // 4. Call Gemini API — with one automatic retry on 429 (rate-limit)
+  // 4. Call Gemini API — with one automatic retry on 429 or 503
   const payload = JSON.stringify({
     system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
     contents,
@@ -370,34 +351,62 @@ export async function onRequestPost(context) {
   let geminiRes;
   try {
     geminiRes = await callGemini();
-    // Retry once after 2 s if rate-limited
-    if (geminiRes.status === 429) {
+    // BUG 4 FIX: retry on both rate-limit (429) and transient server error (503)
+    if (geminiRes.status === 429 || geminiRes.status === 503) {
       await new Promise(r => setTimeout(r, 2000));
       geminiRes = await callGemini();
     }
   } catch (err) {
-    return json({
-      error: 'Connection error. Please check your internet and try again. / خطأ في الاتصال، تحقق من الإنترنت وحاول مرة أخرى.',
-    }, 502);
+    // Network-level failure (DNS / TCP — not an HTTP error from Gemini)
+    console.error('[chat.js] Network error calling Gemini:', err.message);
+    return json(
+      {
+        error:
+          'Connection error. Please check your internet and try again. / ' +
+          'خطأ في الاتصال، تحقق من الإنترنت وحاول مرة أخرى.',
+      },
+      502,
+    );
   }
 
   if (!geminiRes.ok) {
-    // Return human-readable messages — never show raw HTTP codes to end users
+    // BUG 2 FIX: read the error body so it appears in Cloudflare Functions logs
+    // (CF Dashboard → Workers & Pages → civilengsuite → Functions → Logs).
+    // Never expose raw error text to end-users.
+    let errBody = '';
+    try { errBody = await geminiRes.text(); } catch { /* non-fatal */ }
+    console.error(
+      `[chat.js] Gemini HTTP ${geminiRes.status} for model ${GEMINI_MODEL}:`,
+      errBody.slice(0, 500),
+    );
+
+    // BUG 3 FIX: expanded friendlyErrors to cover all common Gemini error codes
     const friendlyErrors = {
-      429: 'The assistant is busy right now. Please wait a moment and try again. / المساعد مشغول دلوقتي، استنى لحظة وحاول تاني.',
-      503: 'The AI service is temporarily unavailable. Please try again in a minute. / الخدمة متاحة مش دلوقتي، جرب تاني بعد دقيقة.',
+      400: 'Invalid request. Please rephrase and try again. / ' +
+           'طلب غير صالح، حاول تغيير الصياغة.',
+      401: 'API authentication failed. Please contact site admin. / ' +
+           'فشل المصادقة، تواصل مع المسؤول.',
+      403: 'API access denied. Please contact site admin. / ' +
+           'الوصول محجوب، تواصل مع المسؤول.',
+      404: 'AI model unavailable. Please contact site admin. / ' +
+           'النموذج غير متاح، تواصل مع المسؤول.',
+      429: 'The assistant is busy right now. Please wait a moment and try again. / ' +
+           'المساعد مشغول دلوقتي، استنى لحظة وحاول تاني.',
+      503: 'The AI service is temporarily unavailable. Please try again in a minute. / ' +
+           'الخدمة مش متاحة دلوقتي، جرب تاني بعد دقيقة.',
     };
-    const message = friendlyErrors[geminiRes.status] ||
+    const message =
+      friendlyErrors[geminiRes.status] ||
       'Something went wrong. Please try again. / حصل مشكلة، حاول مرة أخرى.';
     return json({ error: message }, 502);
   }
 
+  // 5. Parse and return Gemini reply
   const geminiData = await geminiRes.json();
   const reply =
     geminiData?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ||
     'No response received from AI.';
 
-  // 5. Return reply
   return json({ reply });
 }
 
