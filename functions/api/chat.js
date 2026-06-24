@@ -22,10 +22,11 @@
  */
 
 // ── Model ─────────────────────────────────────────────────────────────────
-// gemini-2.0-flash: free tier, stable (non-preview), excellent Arabic support,
-// 1M-token context window. Upgrade to gemini-2.5-flash-lite when generally
-// available by changing only this one constant.
-const GEMINI_MODEL   = 'gemini-2.0-flash';
+// gemini-1.5-flash: confirmed globally free on AI Studio, 15 RPM / 1500 req/day,
+// 1M-token context window, excellent Arabic support. Most reliable free tier
+// choice across all regions including Egypt. Upgrade to a newer model later
+// by changing only this one constant once your quota is approved.
+const GEMINI_MODEL   = 'gemini-1.5-flash';
 const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 // ── CORS headers (same value used in every response branch) ───────────────
@@ -347,29 +348,48 @@ export async function onRequestPost(context) {
   // Append current user message
   contents.push({ role: 'user', parts: [{ text: userMessage }] });
 
-  // 4. Call Gemini API
-  let geminiRes;
-  try {
-    geminiRes = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
+  // 4. Call Gemini API — with one automatic retry on 429 (rate-limit)
+  const payload = JSON.stringify({
+    system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    contents,
+    generationConfig: {
+      maxOutputTokens: 700,
+      temperature    : 0.35,
+      topP           : 0.9,
+    },
+  });
+
+  async function callGemini() {
+    return fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
       method : 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({
-        system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
-        contents,
-        generationConfig: {
-          maxOutputTokens: 700,   // enough for a thorough answer, not runaway
-          temperature    : 0.35,  // low = factual and consistent
-          topP           : 0.9,
-        },
-      }),
+      body   : payload,
     });
+  }
+
+  let geminiRes;
+  try {
+    geminiRes = await callGemini();
+    // Retry once after 2 s if rate-limited
+    if (geminiRes.status === 429) {
+      await new Promise(r => setTimeout(r, 2000));
+      geminiRes = await callGemini();
+    }
   } catch (err) {
-    return json({ error: 'Network error reaching Gemini API. Try again.' }, 502);
+    return json({
+      error: 'Connection error. Please check your internet and try again. / خطأ في الاتصال، تحقق من الإنترنت وحاول مرة أخرى.',
+    }, 502);
   }
 
   if (!geminiRes.ok) {
-    const detail = await geminiRes.text().catch(() => '');
-    return json({ error: `Gemini returned HTTP ${geminiRes.status}.`, detail }, 502);
+    // Return human-readable messages — never show raw HTTP codes to end users
+    const friendlyErrors = {
+      429: 'The assistant is busy right now. Please wait a moment and try again. / المساعد مشغول دلوقتي، استنى لحظة وحاول تاني.',
+      503: 'The AI service is temporarily unavailable. Please try again in a minute. / الخدمة متاحة مش دلوقتي، جرب تاني بعد دقيقة.',
+    };
+    const message = friendlyErrors[geminiRes.status] ||
+      'Something went wrong. Please try again. / حصل مشكلة، حاول مرة أخرى.';
+    return json({ error: message }, 502);
   }
 
   const geminiData = await geminiRes.json();
