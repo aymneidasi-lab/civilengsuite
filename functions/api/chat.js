@@ -1,5 +1,5 @@
 /**
- * functions/api/chat.js  —  v9  (2026-06-25)
+ * functions/api/chat.js  —  v10  (2026-06-25)
  * ──────────────────────────────────────────────────────────────────────────
  * Cloudflare Pages Function — AI chatbot proxy for Civil Engineering Suite
  * Route:  POST /api/chat   (Cloudflare Pages auto-routes from /functions/api/)
@@ -16,6 +16,58 @@
  *                   Cloudflare account already hosting the site)
  *   This binding is OPTIONAL. If you don't add it, the bot still runs on
  *   Gemini alone — you just lose the 3rd-layer free fallback below.
+ *
+ *   NEW OPTIONAL ENV VARS (v10):
+ *   Name : GROQ_API_KEY       (optional — Layer 4, get free at console.groq.com)
+ *   Name : OPENROUTER_API_KEY (optional — Layer 5, get free at openrouter.ai)
+ *   Name : GEMINI_API_KEY_2   (optional — Layer 6, second Google account key)
+ *   All three optional; each layer silently skips if its key is absent.
+ *
+ * ════════════════════════════════════════
+ * CHANGELOG v10 — 6-LAYER CHAIN: GROQ + OPENROUTER + GEMINI KEY 2 + WHATSAPP REDIRECT
+ * ════════════════════════════════════════
+ * CHANGE 1 (AVAILABILITY): Groq added as Layer 4.
+ *   callGroqWithRetry() — llama-3.1-8b-instant, OpenAI-compatible API.
+ *   Free plan limits: 14,400 req/day, 500K tokens/day, 30 RPM, 6K TPM.
+ *   llama-3.1-8b-instant chosen over llama-3.3-70b-versatile because the 70B
+ *   model's free plan is only 1,000 req/day vs 14,400 for 8B (verified June 2026
+ *   at console.groq.com/docs/rate-limits).
+ *   Uses WORKERS_AI_SYSTEM_PROMPT (~800 tokens) to stay below the 6K TPM cap.
+ *   Reuses the workersMsgs array already built for Layer 3 (same OpenAI format).
+ *   Requires GROQ_API_KEY (free, no credit card — console.groq.com).
+ *
+ * CHANGE 2 (AVAILABILITY): OpenRouter added as Layer 5.
+ *   callOpenRouterWithRetry() — meta-llama/llama-3.3-70b-instruct:free.
+ *   Free tier (no balance required): 50 req/day, 20 RPM.
+ *   Layer 5 fires only after Layers 1–4 have all failed, so 50 RPD is
+ *   meaningful additional capacity at zero cost.
+ *   HTTP-Referer and X-Title headers sent per OpenRouter's docs recommendation.
+ *   Reuses workersMsgs (same OpenAI-compatible format as Layers 3 & 4).
+ *   Requires OPENROUTER_API_KEY (free, no billing — openrouter.ai).
+ *
+ * CHANGE 3 (AVAILABILITY): Second Gemini key added as Layer 6.
+ *   Free quota is per Google account, not pooled — a second Google account at
+ *   aistudio.google.com provides a completely separate daily quota.
+ *   Layer 6 tries GEMINI_MODEL_PRIMARY then GEMINI_MODEL_FALLBACK with Key 2,
+ *   identical logic to Layers 1 & 2, using the existing callGeminiWithRetry().
+ *   Requires GEMINI_API_KEY_2 (from a second Google account).
+ *   ⚠️  Google Terms note: multiple accounts is generally permitted for personal
+ *   use; confirm compliance in a commercial context.
+ *
+ * CHANGE 4 (UX): buildFriendlyError updated — WhatsApp on every failure path.
+ *   When all layers fail, every error message now includes WhatsApp +201287232413
+ *   and aymneidasi@gmail.com — a quota failure is no longer a dead end.
+ *
+ * COMBINED FREE DAILY CAPACITY (all 6 layers active):
+ *   Layer 1  — Gemini 3.5-flash      (Key 1) : ~1,500 req/day
+ *   Layer 2  — Gemini 3.1-flash-lite (Key 1) : ~1,500 req/day
+ *   Layer 3  — Workers AI            (no key):   ~100 req/day (10K neurons/day)
+ *   Layer 4  — Groq llama-3.1-8b    (Key 4) : 14,400 req/day
+ *   Layer 5  — OpenRouter :free      (Key 5) :     50 req/day
+ *   Layer 6  — Gemini Key 2          (Key 2) : ~3,000 req/day (both models)
+ *   TOTAL: ~20,550 req/day across all layers, $0.00.
+ *   At 100–500 req/day (normal chatbot traffic), daily exhaustion is
+ *   effectively impossible with all six layers active.
  *
  * ════════════════════════════════════════
  * CHANGELOG v9 — DEAD LAYER 3, CORS HOLE, NO INPUT CAPS, MODEL DEPRECATION
@@ -192,6 +244,25 @@ const GEMINI_API_URL = model =>
 // is why Layer 3 uses the separate, short WORKERS_AI_SYSTEM_PROMPT below
 // instead of the full SYSTEM_PROMPT (see v9 changelog, Bug 2).
 const WORKERS_AI_MODEL = '@cf/meta/llama-3.1-8b-instruct-fast';
+
+// LAYER 4 — Groq (free: 14,400 req/day, 500K tokens/day, 30 RPM, 6K TPM).
+// Model: llama-3.1-8b-instant — most generous free-tier model on Groq's free
+// plan. llama-3.3-70b-versatile is only 1,000 req/day on the free plan;
+// llama-3.1-8b-instant gives 14.4× more daily headroom (verified June 2026,
+// console.groq.com/docs/rate-limits). Uses WORKERS_AI_SYSTEM_PROMPT (~800
+// tokens) to stay below the 6K TPM per-minute token cap for this model.
+// OpenAI-compatible API — same message format as Layer 3 (workersMsgs).
+// Requires GROQ_API_KEY env var (free signup, no credit card — console.groq.com).
+const GROQ_MODEL   = 'llama-3.1-8b-instant';
+const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
+
+// LAYER 5 — OpenRouter free model (20 RPM, 50 req/day on zero-balance account).
+// Model: meta-llama/llama-3.3-70b-instruct:free — confirmed available on the
+// OpenRouter :free tier (verified June 2026, openrouter.ai/models?max_price=0).
+// HTTP-Referer + X-Title sent per OpenRouter docs; same OpenAI-compatible format.
+// Requires OPENROUTER_API_KEY env var (free signup, no billing — openrouter.ai).
+const OPENROUTER_MODEL   = 'meta-llama/llama-3.3-70b-instruct:free';
+const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
 // ── CORS — origin-restricted to the production domain and local dev ───────────
 const ALLOWED_ORIGINS = new Set(['https://civilengsuite.pages.dev']);
@@ -1250,25 +1321,163 @@ async function callWorkersAIWithRetry(aiBinding, messages) {
   return { ok: true, reply };
 }
 
-// ── Friendly error builder ──────────────────────────────────────────────
+// ── Provider: Groq (Layer 4 — llama-3.1-8b-instant, 14,400 req/day free) ──
+// OpenAI-compatible API. Accepts the workersMsgs array already built for
+// Layer 3 — no message conversion needed in the caller.
+// Returns { ok: true, reply } on success, or
+//         { ok: false, httpStatus, errStatus, errBody } on failure.
+// Single retry on 429/500/503. Layer 4 fires only after Layers 1–3 have all
+// failed, so we limit added latency to one short retry delay.
+async function callGroqWithRetry(apiKey, messages) {
+  const payload = JSON.stringify({
+    model      : GROQ_MODEL,
+    messages,
+    max_tokens : 700,
+    temperature: 0.35,
+  });
+
+  async function call() {
+    return fetch(GROQ_API_URL, {
+      method : 'POST',
+      headers: {
+        'Content-Type' : 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: payload,
+    });
+  }
+
+  const RETRY_DELAY_MS  = 1200;
+  const RETRYABLE_CODES = new Set([429, 500, 503]);
+
+  let res;
+  try {
+    res = await call();
+  } catch (err) {
+    console.error('[chat.js] Network error calling Groq:', err.message);
+    return { ok: false, httpStatus: 0, errStatus: 'NETWORK_ERROR', errBody: err.message };
+  }
+
+  if (!res.ok && RETRYABLE_CODES.has(res.status)) {
+    console.warn(`[chat.js] Groq ${res.status} on attempt 1. Retrying in ${RETRY_DELAY_MS}ms…`);
+    await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+    try {
+      res = await call();
+    } catch (err) {
+      console.error('[chat.js] Network error calling Groq (retry):', err.message);
+      return { ok: false, httpStatus: 0, errStatus: 'NETWORK_ERROR', errBody: err.message };
+    }
+  }
+
+  if (!res.ok) {
+    let errBody   = '';
+    let errStatus = '';
+    try {
+      errBody = await res.text();
+      const parsed = JSON.parse(errBody);
+      errStatus = parsed?.error?.code || parsed?.error?.type || '';
+    } catch { /* non-JSON body */ }
+    console.error(`[chat.js] Groq HTTP ${res.status} (after retry):`, errBody.slice(0, 300));
+    return { ok: false, httpStatus: res.status, errStatus, errBody };
+  }
+
+  const data  = await res.json();
+  const reply = (data?.choices?.[0]?.message?.content || '').trim();
+  if (!reply) {
+    return { ok: false, httpStatus: res.status, errStatus: 'EMPTY_REPLY', errBody: '' };
+  }
+  return { ok: true, reply };
+}
+
+// ── Provider: OpenRouter (Layer 5 — :free model, 50 req/day) ─────────────
+// OpenAI-compatible API. HTTP-Referer and X-Title are optional but
+// recommended by OpenRouter's docs — they identify the calling app in
+// OpenRouter's usage dashboard and can improve rate-limit priority.
+// Returns { ok: true, reply } on success, or
+//         { ok: false, httpStatus, errStatus, errBody } on failure.
+async function callOpenRouterWithRetry(apiKey, messages) {
+  const payload = JSON.stringify({
+    model      : OPENROUTER_MODEL,
+    messages,
+    max_tokens : 700,
+    temperature: 0.35,
+  });
+
+  async function call() {
+    return fetch(OPENROUTER_API_URL, {
+      method : 'POST',
+      headers: {
+        'Content-Type' : 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+        'HTTP-Referer' : 'https://civilengsuite.pages.dev',
+        'X-Title'      : 'Civil Engineering Suite',
+      },
+      body: payload,
+    });
+  }
+
+  const RETRY_DELAY_MS  = 1200;
+  const RETRYABLE_CODES = new Set([429, 500, 503]);
+
+  let res;
+  try {
+    res = await call();
+  } catch (err) {
+    console.error('[chat.js] Network error calling OpenRouter:', err.message);
+    return { ok: false, httpStatus: 0, errStatus: 'NETWORK_ERROR', errBody: err.message };
+  }
+
+  if (!res.ok && RETRYABLE_CODES.has(res.status)) {
+    console.warn(`[chat.js] OpenRouter ${res.status} on attempt 1. Retrying in ${RETRY_DELAY_MS}ms…`);
+    await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+    try {
+      res = await call();
+    } catch (err) {
+      console.error('[chat.js] Network error calling OpenRouter (retry):', err.message);
+      return { ok: false, httpStatus: 0, errStatus: 'NETWORK_ERROR', errBody: err.message };
+    }
+  }
+
+  if (!res.ok) {
+    let errBody   = '';
+    let errStatus = '';
+    try {
+      errBody = await res.text();
+      const parsed = JSON.parse(errBody);
+      errStatus = parsed?.error?.code || parsed?.error?.type || '';
+    } catch { /* non-JSON body */ }
+    console.error(`[chat.js] OpenRouter HTTP ${res.status} (after retry):`, errBody.slice(0, 300));
+    return { ok: false, httpStatus: res.status, errStatus, errBody };
+  }
+
+  const data  = await res.json();
+  const reply = (data?.choices?.[0]?.message?.content || '').trim();
+  if (!reply) {
+    return { ok: false, httpStatus: res.status, errStatus: 'EMPTY_REPLY', errBody: '' };
+  }
+  return { ok: true, reply };
+}
+
+// ── Friendly error builder — v10 update ────────────────────────────────────
 // `geminiResult` is the callGeminiWithRetry() result from the LAST Gemini
 // layer attempted (flash-lite if it ran, otherwise flash) — or a synthetic
 // NOT_CONFIGURED stand-in when GEMINI_API_KEY is missing entirely.
-// `workersAttempted` tells the message whether Layer 3 was even tried, so
-// we never claim "a backup failed" when no Workers AI binding exists.
+// `workersAttempted` tells the message whether Layer 3 was even tried.
+// v10 change: all quota-exhausted and generic failure paths now include
+// WhatsApp (+201287232413) and email as a direct contact fallback — a quota
+// failure is no longer a dead end for the user.
 function buildFriendlyError(geminiResult, workersAttempted) {
   if (geminiResult.errStatus === 'RESOURCE_EXHAUSTED') {
     return workersAttempted
-      ? 'Both AI providers are unavailable right now — the primary quota is ' +
-        'exhausted and the backup also failed. Please try again shortly, or ' +
-        'contact the site admin. / ' +
-        'كل مزودي الذكاء الاصطناعي غير متاحين دلوقتي. حاول تاني بعد لحظات أو ' +
-        'تواصل مع مسؤول الموقع.'
-      : 'Daily AI quota reached — the assistant will be available again after ' +
-        'midnight Pacific time. If this keeps happening, contact the site ' +
-        'admin to add the free Workers AI binding for a backup layer. / ' +
-        'الحصة اليومية للذكاء الاصطناعي اتخلصت — المساعد هيرجع يشتغل بعد منتصف ' +
-        'الليل بتوقيت المحيط الهادي. لو المشكلة بتتكرر، تواصل مع مسؤول الموقع.';
+      ? 'The AI assistant is temporarily unavailable — all free-tier providers are ' +
+        'at capacity or exhausted. Please try again after midnight UTC. ' +
+        'For urgent questions: WhatsApp +201287232413 · aymneidasi@gmail.com. / ' +
+        'المساعد مش متاح دلوقتي — كل المزودين المجانيين وصلوا للحد أو اشتغلوا. ' +
+        'حاول تاني بعد منتصف الليل UTC. للأسئلة العاجلة: واتساب +201287232413 · aymneidasi@gmail.com.'
+      : 'Daily AI quota reached — the assistant resets after midnight UTC. ' +
+        'For urgent questions: WhatsApp +201287232413 · aymneidasi@gmail.com. / ' +
+        'الحصة اليومية اتخلصت — المساعد بيرجع بعد منتصف الليل UTC. ' +
+        'للأسئلة العاجلة: واتساب +201287232413 · aymneidasi@gmail.com.';
   }
   if (geminiResult.errStatus === 'RATE_LIMIT_EXCEEDED') {
     return 'Too many requests right now. Please wait 30–60 seconds and try again. / ' +
@@ -1291,7 +1500,9 @@ function buildFriendlyError(geminiResult, workersAttempted) {
   };
   return (
     friendlyErrors[geminiResult.httpStatus] ||
-    'Something went wrong. Please try again. / حصل مشكلة، حاول مرة أخرى.'
+    'Something went wrong. Please try again, or contact us directly: ' +
+    'WhatsApp +201287232413 · aymneidasi@gmail.com. / ' +
+    'حصل مشكلة، حاول مرة أخرى، أو تواصل معنا مباشرة: واتساب +201287232413 · aymneidasi@gmail.com.'
   );
 }
 
@@ -1410,9 +1621,9 @@ export async function onRequestPost(context) {
   );
 
   // 6. LAYER 3 — Cloudflare Workers AI (free, zero API key, env.AI binding).
-  //    BUG 4 FIX: actually invoke this layer.
   //    Workers AI uses OpenAI-style {role,content} messages, not Gemini's
   //    {role,parts:[{text}]} format — rebuild the message list here.
+  //    workersMsgs is shared with Layers 4 and 5 (same OpenAI format).
   const workersMsgs = [
     { role: 'system', content: WORKERS_AI_SYSTEM_PROMPT },
     ...turns.map(t => ({
@@ -1429,9 +1640,77 @@ export async function onRequestPost(context) {
     console.error('[chat.js] Layer 3 (Workers AI) also failed:', layer3.errStatus);
   }
 
-  // 7. All three layers exhausted.
-  //    BUG 6 FIX (v8): pass layer2 (last Gemini result) and workersAttempted (not
-  //    !!deepseekKey which was the wrong signal).
+  // 7. LAYER 4 — Groq (llama-3.1-8b-instant, 14,400 req/day, 500K tokens/day,
+  //    free). OpenAI-compatible — reuses workersMsgs directly (same format).
+  //    GROQ_API_KEY is optional; if absent, this layer silently skips.
+  //    Free tier: 30 RPM, 6K TPM — WORKERS_AI_SYSTEM_PROMPT (~800 tokens)
+  //    keeps each request comfortably below the per-minute token cap.
+  const groqKey = env.GROQ_API_KEY || '';
+  const layer4  = groqKey
+    ? await callGroqWithRetry(groqKey, workersMsgs)
+    : { ok: false, httpStatus: 0, errStatus: 'NOT_CONFIGURED', errBody: '' };
+  if (layer4.ok) {
+    return json({ reply: layer4.reply }, 200, { 'X-CES-AI-Source': 'groq-fallback' }, request);
+  }
+  if (groqKey) {
+    console.warn('[chat.js] Layer 4 (Groq) failed:', layer4.errStatus, layer4.httpStatus);
+  }
+
+  // 8. LAYER 5 — OpenRouter free model (meta-llama/llama-3.3-70b-instruct:free,
+  //    50 req/day on zero-balance account, 20 RPM). Reuses workersMsgs.
+  //    OPENROUTER_API_KEY is optional; if absent, this layer silently skips.
+  const openRouterKey = env.OPENROUTER_API_KEY || '';
+  const layer5        = openRouterKey
+    ? await callOpenRouterWithRetry(openRouterKey, workersMsgs)
+    : { ok: false, httpStatus: 0, errStatus: 'NOT_CONFIGURED', errBody: '' };
+  if (layer5.ok) {
+    return json({ reply: layer5.reply }, 200, { 'X-CES-AI-Source': 'openrouter-fallback' }, request);
+  }
+  if (openRouterKey) {
+    console.warn('[chat.js] Layer 5 (OpenRouter) failed:', layer5.errStatus, layer5.httpStatus);
+  }
+
+  // 9. LAYER 6 — Gemini with a second API key (GEMINI_API_KEY_2, different
+  //    Google account → separate per-account free quota from Layers 1 & 2).
+  //    Tries GEMINI_MODEL_PRIMARY then GEMINI_MODEL_FALLBACK with Key 2,
+  //    identical logic to Layers 1 & 2, reusing callGeminiWithRetry().
+  //    GEMINI_API_KEY_2 is optional; if absent, this layer silently skips.
+  const geminiKey2 = env.GEMINI_API_KEY_2 || '';
+  if (geminiKey2) {
+    const layer6a = await callGeminiWithRetry(geminiKey2, GEMINI_MODEL_PRIMARY, geminiContents);
+    if (layer6a.ok) {
+      return json(
+        { reply: layer6a.reply },
+        200,
+        { 'X-CES-AI-Source': 'gemini-key2-primary' },
+        request,
+      );
+    }
+    console.warn(
+      `[chat.js] Layer 6a (${GEMINI_MODEL_PRIMARY}, key2) failed:`,
+      layer6a.errStatus, layer6a.httpStatus,
+    );
+    const layer6b = await callGeminiWithRetry(geminiKey2, GEMINI_MODEL_FALLBACK, geminiContents);
+    if (layer6b.ok) {
+      return json(
+        { reply: layer6b.reply },
+        200,
+        { 'X-CES-AI-Source': 'gemini-key2-fallback' },
+        request,
+      );
+    }
+    console.warn(
+      `[chat.js] Layer 6b (${GEMINI_MODEL_FALLBACK}, key2) failed:`,
+      layer6b.errStatus, layer6b.httpStatus,
+    );
+  }
+
+  // 10. All layers exhausted.
+  //     buildFriendlyError receives layer2 (last Gemini result) and
+  //     workersAttempted (whether Layer 3 was tried) — consistent with v8 fix.
+  //     The v10 buildFriendlyError now appends WhatsApp/email to all
+  //     quota-exhausted and generic failure messages so the user is never
+  //     left with a dead end.
   return json({ error: buildFriendlyError(layer2, workersAttempted) }, 502, undefined, request);
 }
 
