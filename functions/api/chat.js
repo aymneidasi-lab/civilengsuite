@@ -1,5 +1,5 @@
 /**
- * functions/api/chat.js  —  v7  (2026-06-25)
+ * functions/api/chat.js  —  v9  (2026-06-25)
  * ──────────────────────────────────────────────────────────────────────────
  * Cloudflare Pages Function — AI chatbot proxy for Civil Engineering Suite
  * Route:  POST /api/chat   (Cloudflare Pages auto-routes from /functions/api/)
@@ -16,6 +16,47 @@
  *                   Cloudflare account already hosting the site)
  *   This binding is OPTIONAL. If you don't add it, the bot still runs on
  *   Gemini alone — you just lose the 3rd-layer free fallback below.
+ *
+ * ════════════════════════════════════════
+ * CHANGELOG v9 — DEAD LAYER 3, CORS HOLE, NO INPUT CAPS, MODEL DEPRECATION
+ * ════════════════════════════════════════
+ * BUG 1 (CRITICAL): WORKERS_AI_MODEL referenced
+ *   '@cf/meta/llama-3.1-8b-instruct-fp8-fast' — this combined suffix does not
+ *   exist in Cloudflare's Workers AI catalog (verified June 2026). Every
+ *   Layer 3 call has been failing with an unknown-model error since v7. Fixed
+ *   to the confirmed-existing '@cf/meta/llama-3.1-8b-instruct-fast' variant.
+ *
+ * BUG 2 (CRITICAL): Even with Bug 1 fixed, Layer 3 sent the full SYSTEM_PROMPT
+ *   (~13,524 tokens) into a model with a 4,096-token total context window —
+ *   3.3× overflow on the system prompt alone, before any history or reply.
+ *   Added a new WORKERS_AI_SYSTEM_PROMPT constant (<800 tokens) used only for
+ *   the Layer 3 call. SYSTEM_PROMPT itself is untouched and still used for
+ *   Layers 1 and 2.
+ *
+ * BUG 3 (SECURITY/COST): CORS was 'Access-Control-Allow-Origin': '*' — any
+ *   site on the internet could issue cross-origin requests against this
+ *   endpoint and burn the project's free-tier quota. Replaced the static
+ *   CORS object with getCorsHeaders(request), which only echoes the origin
+ *   back when it is the production domain or localhost/127.0.0.1 (dev only);
+ *   every other origin gets the production origin in the header, which the
+ *   browser will reject as a CORS mismatch. The json() helper and
+ *   onRequestOptions now thread `request` through to this function.
+ *
+ * BUG 4 (SECURITY/COST): No cap on incoming message length — a single
+ *   100,000-character message added ~26,000 tokens on top of the system
+ *   prompt, capable of exhausting the daily token quota in a handful of
+ *   requests. Added a 2,000-character hard cap with a bilingual 400 response.
+ *
+ * BUG 5 (SECURITY/COST): History turns had no length cap either — ten turns
+ *   of 50,000 characters each could inject ~130,000 tokens of payload around
+ *   the system prompt. Each turn's text is now sliced to 2,000 characters,
+ *   matching the live-message cap.
+ *
+ * BUG 6 (MAINTENANCE): gemini-2.5-flash and gemini-2.5-flash-lite are both
+ *   scheduled for shutdown 2026-10-16 (developers.google.com/gemini-api/docs
+ *   /deprecations, verified June 2026). Migrated now, ahead of the deadline,
+ *   to their confirmed-free-tier replacements: gemini-3.5-flash and
+ *   gemini-3.1-flash-lite (ai.google.dev/gemini-api/docs/pricing).
  *
  * ════════════════════════════════════════
  * CHANGELOG v7 — ROOT-CAUSE FIX: dead model + paid fallback removed
@@ -127,29 +168,47 @@
  * ──────────────────────────────────────────────────────────────────────────
  */
 
-// ── Models — all three layers below are free-tier (see v7 changelog) ──────
-// LAYER 1 — primary. gemini-2.5-flash is the current stable GA model.
-// (gemini-2.0-flash, used in v4-v6, was shut down by Google on 2026-06-01 —
-// that is the actual cause of the "quota exhausted" errors. Do not revert.)
-const GEMINI_MODEL_PRIMARY  = 'gemini-2.5-flash';
+// ── Models — all three layers below are free-tier (see v9 changelog) ──────
+// LAYER 1 — primary.
+// Migration history: gemini-2.0-flash → shut down 2026-06-01.
+//                    gemini-2.5-flash → shut down 2026-10-16.
+//                    gemini-3.5-flash → current GA, free tier, active from 2026-05-19.
+// Do not revert to any earlier model string.
+const GEMINI_MODEL_PRIMARY  = 'gemini-3.5-flash';
 // LAYER 2 — secondary. Separate per-model free daily quota from Layer 1,
 // same GEMINI_API_KEY, no extra signup.
-const GEMINI_MODEL_FALLBACK = 'gemini-2.5-flash-lite';
+// Migration history: gemini-2.5-flash-lite → shut down 2026-10-16.
+//                    gemini-3.1-flash-lite  → replacement, free tier.
+const GEMINI_MODEL_FALLBACK = 'gemini-3.1-flash-lite';
 const GEMINI_API_URL = model =>
   `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
 // LAYER 3 — tertiary. Cloudflare Workers AI, called through the `env.AI`
 // binding (no API key — see header comment for the one-time dashboard
-// setup). Small, cheap instruct model: plenty for a sales/support chatbot
-// and well inside the 10,000 free neurons/day allocation.
-const WORKERS_AI_MODEL = '@cf/meta/llama-3.1-8b-instruct-fp8-fast';
+// setup). '-fast' variant, confirmed to exist in Cloudflare's Workers AI
+// catalog (the previous '-fp8-fast' combined suffix does not exist and
+// caused every Layer 3 call to fail with an unknown-model error — see v9
+// changelog, Bug 1). This variant's context window is 4,096 tokens, which
+// is why Layer 3 uses the separate, short WORKERS_AI_SYSTEM_PROMPT below
+// instead of the full SYSTEM_PROMPT (see v9 changelog, Bug 2).
+const WORKERS_AI_MODEL = '@cf/meta/llama-3.1-8b-instruct-fast';
 
-// ── CORS headers ───────────────────────────────────────────────────────────
-const CORS = {
-  'Access-Control-Allow-Origin' : '*',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
-};
+// ── CORS — origin-restricted to the production domain and local dev ───────────
+const ALLOWED_ORIGINS = new Set(['https://civilengsuite.pages.dev']);
+
+function getCorsHeaders(request) {
+  const origin = request?.headers?.get('Origin') || '';
+  const isLocal =
+    origin.startsWith('http://localhost:') ||
+    origin.startsWith('http://127.0.0.1:');
+  const allowed = ALLOWED_ORIGINS.has(origin) || isLocal ? origin : ALLOWED_ORIGINS.values().next().value;
+  return {
+    'Access-Control-Allow-Origin' : allowed,
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Vary'                        : 'Origin',
+  };
+}
 
 // ── System prompt — complete product knowledge base (v4) ──────────────────
 const SYSTEM_PROMPT = `\
@@ -994,11 +1053,63 @@ BEHAVIOUR RULES
 • When conversation is genuinely about buying/pricing, end with a clear varied next step —
   don't bolt the same canned CTA onto messages that aren't about buying.`;
 
+// ── Workers AI system prompt — compressed for 4096-token context window ──────
+// Full SYSTEM_PROMPT is ~13,524 tokens and would overflow the llama-3.1-8b
+// context window. This version preserves identity, behaviour rules, core product
+// facts, and contact info in under 800 tokens — enough for Layer 3 fallback use.
+const WORKERS_AI_SYSTEM_PROMPT = `\
+You are the official AI assistant for Civil Engineering Suite (civilengsuite.pages.dev),
+built by Eng. Aymn Asi — a licensed structural engineer.
+
+LANGUAGE RULE (critical): Arabic message → reply only in Egyptian Arabic dialect
+(عامية مصرية), never Modern Standard Arabic. English message → reply only in English.
+Never mix languages in one reply.
+
+PRODUCT — Civil Engineering Suite (CES):
+• Footing Pro: three standalone apps — Rectangular Footing, Trapezoidal Footing, Strap Footing.
+• 19 core modules total. More apps (Beam Pro, Column Pro) in development.
+• Add-ons: Print System, Online Help Center, AutoCAD Drawing output (pricing TBA).
+• Fully offline after activation. License locked to one device.
+• Grounded in ECP 203; universal mechanics apply to ACI 318-19, Eurocode, etc.
+• PCsuite 2026: free registration and compatibility checker — always free.
+
+PRICING (launch price, confirmed):
+• 249 EGP per year, all 19 modules included, no hidden fees.
+• Multi-year option: 1–10 years in one transaction, locks in 249 EGP/yr for the full term.
+• Regular (post-launch) price: 499 EGP/yr.
+• New device requires a new paid license copy.
+
+ACTIVATION PROCESS:
+1. Download PCsuite 2026 from civilengsuite.pages.dev.
+2. Fill the User Information form — it creates an encrypted .dat file on the Desktop.
+3. Send the .dat file to Eng. Aymn Asi: aymneidasi@gmail.com or WhatsApp +201287232413.
+4. Developer confirms price, user pays, user receives fully activated app.
+
+KEY FACTS:
+• Saves 17 minutes vs 3.5–4 hours of manual calculation per footing design.
+• Offline-first — no internet after activation except a brief reconnect every 15 days.
+• Every result traces to a specific ACI 318-19 clause reference — fully auditable.
+• No free trial. 249 EGP is roughly the cost of a technical textbook.
+• No Mac or Linux support — Windows 7 SP1 through 11 only.
+
+BEHAVIOUR:
+• Answer like a knowledgeable engineer texting a colleague — direct, warm, not scripted.
+• Match message length: short question → short answer. Technical depth → go longer.
+• Never invent pricing, dates, or features not listed above.
+• Never recommend competitor software.
+• If you lack information: direct the user to Eng. Aymn Asi at aymneidasi@gmail.com
+  or WhatsApp +201287232413 — do not guess.
+• Bring up purchase steps only when the user shows genuine buying intent.`;
+
 // ── Helpers ────────────────────────────────────────────────────────────────
-function json(data, status = 200, extraHeaders) {
+function json(data, status = 200, extraHeaders, request) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { 'Content-Type': 'application/json', ...CORS, ...(extraHeaders || {}) },
+    headers: {
+      'Content-Type': 'application/json',
+      ...getCorsHeaders(request),
+      ...(extraHeaders || {}),
+    },
   });
 }
 
@@ -1231,6 +1342,8 @@ export async function onRequestPost(context) {
           'environment variables (aistudio.google.com → API keys).',
       },
       500,
+      undefined,
+      request,
     );
   }
 
@@ -1239,14 +1352,23 @@ export async function onRequestPost(context) {
   try {
     body = await request.json();
   } catch {
-    return json({ error: 'Request body must be valid JSON.' }, 400);
+    return json({ error: 'Request body must be valid JSON.' }, 400, undefined, request);
   }
 
   const userMessage = typeof body.message === 'string' ? body.message.trim() : '';
   const rawHistory  = Array.isArray(body.history) ? body.history : [];
 
   if (!userMessage) {
-    return json({ error: 'Message must not be empty.' }, 400);
+    return json({ error: 'Message must not be empty.' }, 400, undefined, request);
+  }
+  if (userMessage.length > 2000) {
+    return json(
+      { error: 'Message too long. Please keep your question under 2,000 characters. / ' +
+               'الرسالة طويلة جداً. اختصر سؤالك لأقل من ٢٠٠٠ حرف.' },
+      400,
+      undefined,
+      request,
+    );
   }
 
   // 3. Normalize history — keep last 10 turns (5 exchanges) for token budget.
@@ -1257,7 +1379,7 @@ export async function onRequestPost(context) {
   const turns = [];
   for (const turn of recentHistory) {
     const role = turn.role === 'model' ? 'model' : 'user';
-    const text = typeof turn.text === 'string' ? turn.text.trim() : '';
+    const text = typeof turn.text === 'string' ? turn.text.trim().slice(0, 2000) : '';
     if (text) turns.push({ role, text });
   }
   turns.push({ role: 'user', text: userMessage });
@@ -1268,19 +1390,19 @@ export async function onRequestPost(context) {
   //    BUG 1 FIX: pass GEMINI_MODEL_PRIMARY as the second argument (model).
   const layer1 = await callGeminiWithRetry(geminiKey, GEMINI_MODEL_PRIMARY, geminiContents);
   if (layer1.ok) {
-    return json({ reply: layer1.reply });
+    return json({ reply: layer1.reply }, 200, undefined, request);
   }
   console.warn(
     `[chat.js] Layer 1 (${GEMINI_MODEL_PRIMARY}) failed:`,
     layer1.errStatus, layer1.httpStatus,
   );
 
-  // 5. LAYER 2 — Gemini fallback (gemini-2.5-flash-lite).
-  //    BUG 3 FIX: actually invoke this layer. Separate per-model free daily
+  // 5. LAYER 2 — Gemini fallback (gemini-3.1-flash-lite).
+  //    BUG 3 FIX (v8): actually invoke this layer. Separate per-model free daily
   //    quota — exhausting Layer 1 does not touch Layer 2's allowance.
   const layer2 = await callGeminiWithRetry(geminiKey, GEMINI_MODEL_FALLBACK, geminiContents);
   if (layer2.ok) {
-    return json({ reply: layer2.reply }, 200, { 'X-CES-AI-Source': 'gemini-fallback-lite' });
+    return json({ reply: layer2.reply }, 200, { 'X-CES-AI-Source': 'gemini-fallback-lite' }, request);
   }
   console.warn(
     `[chat.js] Layer 2 (${GEMINI_MODEL_FALLBACK}) failed:`,
@@ -1292,7 +1414,7 @@ export async function onRequestPost(context) {
   //    Workers AI uses OpenAI-style {role,content} messages, not Gemini's
   //    {role,parts:[{text}]} format — rebuild the message list here.
   const workersMsgs = [
-    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'system', content: WORKERS_AI_SYSTEM_PROMPT },
     ...turns.map(t => ({
       role   : t.role === 'model' ? 'assistant' : 'user',
       content: t.text,
@@ -1301,19 +1423,19 @@ export async function onRequestPost(context) {
   const workersAttempted = !!env.AI;
   const layer3 = await callWorkersAIWithRetry(env.AI, workersMsgs);
   if (layer3.ok) {
-    return json({ reply: layer3.reply }, 200, { 'X-CES-AI-Source': 'workers-ai-fallback' });
+    return json({ reply: layer3.reply }, 200, { 'X-CES-AI-Source': 'workers-ai-fallback' }, request);
   }
   if (workersAttempted) {
     console.error('[chat.js] Layer 3 (Workers AI) also failed:', layer3.errStatus);
   }
 
   // 7. All three layers exhausted.
-  //    BUG 6 FIX: pass layer2 (last Gemini result) and workersAttempted (not
+  //    BUG 6 FIX (v8): pass layer2 (last Gemini result) and workersAttempted (not
   //    !!deepseekKey which was the wrong signal).
-  return json({ error: buildFriendlyError(layer2, workersAttempted) }, 502);
+  return json({ error: buildFriendlyError(layer2, workersAttempted) }, 502, undefined, request);
 }
 
 // ── OPTIONS preflight (required for CORS) ─────────────────────────────────
-export async function onRequestOptions() {
-  return new Response(null, { status: 204, headers: CORS });
+export async function onRequestOptions({ request }) {
+  return new Response(null, { status: 204, headers: getCorsHeaders(request) });
 }
