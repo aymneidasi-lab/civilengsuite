@@ -1,13 +1,55 @@
 /**
- * functions/api/chat.js  —  v5  (2026-06-25)
+ * functions/api/chat.js  —  v6  (2026-06-25)
  * ──────────────────────────────────────────────────────────────────────────
  * Cloudflare Pages Function — AI chatbot proxy for Civil Engineering Suite
  * Route:  POST /api/chat   (Cloudflare Pages auto-routes from /functions/api/)
  *
- * REQUIRED ENV VAR (Cloudflare Dashboard → Pages → civilengsuite → Settings
- *                   → Environment variables):
- *   Name : GEMINI_API_KEY
+ * ENV VARS (Cloudflare Dashboard → Pages → civilengsuite → Settings
+ *           → Environment variables):
+ *   Name : GEMINI_API_KEY      (primary — optional if DEEPSEEK_API_KEY is set)
  *   Value: your key from aistudio.google.com  (starts with AIzaSy...)
+ *
+ *   Name : DEEPSEEK_API_KEY    (fallback — optional, see v6 changelog below)
+ *   Value: your key from platform.deepseek.com (starts with sk-...)
+ *
+ *   At least one of the two must be set or the function returns HTTP 500.
+ *
+ * ════════════════════════════════════════
+ * CHANGELOG v6 — DEEPSEEK FAILOVER (fixes RESOURCE_EXHAUSTED dead-ends)
+ * ════════════════════════════════════════
+ * PROBLEM THIS FIXES:
+ *   v5 correctly *diagnosed* RESOURCE_EXHAUSTED (Gemini free tier: 1500
+ *   requests/day, resets at midnight UTC) but had no recovery path — once
+ *   the daily cap was hit, every user got an error message until midnight,
+ *   no matter how the message was worded.
+ *
+ * FIX — automatic failover to DeepSeek:
+ *   · DeepSeek's API has no published daily/RPD request cap (pay-per-token,
+ *     not pay-per-request) — see api-docs.deepseek.com. It will not hit the
+ *     same wall Gemini's free tier does.
+ *   · Gemini stays PRIMARY because it's free under 1500 req/day. DeepSeek is
+ *     only called when Gemini fails, so normal traffic costs $0.
+ *   · model: deepseek-v4-flash — used explicitly rather than the legacy
+ *     "deepseek-chat" alias, which DeepSeek is deprecating 2026-07-24.
+ *   · On Gemini RESOURCE_EXHAUSTED specifically, retries are skipped
+ *     entirely (a quota that resets at midnight will not clear in 2–11s)
+ *     and DeepSeek is called immediately — this also makes the worst-case
+ *     failure faster for the user, not slower.
+ *   · On Gemini RATE_LIMIT_EXCEEDED (RPM burst) or 500/503, the existing
+ *     free local retries (2s→5s→11s) still run first — those self-heal and
+ *     cost nothing, so there's no reason to spend DeepSeek tokens on them.
+ *   · DEEPSEEK_API_KEY is optional. If unset, behavior is identical to v5
+ *     (diagnostic-only, no recovery) — nothing breaks for anyone who hasn't
+ *     created a DeepSeek key yet.
+ *   · GEMINI_API_KEY is now also optional: if only DEEPSEEK_API_KEY is set,
+ *     DeepSeek runs as the sole primary provider with no Gemini calls at all.
+ *
+ * COST NOTE: DeepSeek V4-Flash ≈ $0.14/M input + $0.28/M output tokens
+ *   (verify current rate at api-docs.deepseek.com/quick_start/pricing —
+ *   DeepSeek revises pricing periodically). At this system prompt's size
+ *   (~12K tokens) plus a 700-token cap, a worst-case fallback reply costs
+ *   well under $0.01. Only traffic that overflows Gemini's free 1500/day
+ *   touches this cost at all.
  *
  * ════════════════════════════════════════
  * CHANGELOG v5 — SYSTEM PROMPT EXPANSION + QUOTA DIAGNOSTICS
@@ -63,6 +105,12 @@
 const GEMINI_MODEL   = 'gemini-2.0-flash';
 const GEMINI_API_URL =
   `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+
+// v6 NEW: DeepSeek — OpenAI-compatible fallback provider, no daily request cap.
+// Using the explicit "deepseek-v4-flash" name, not the legacy "deepseek-chat"
+// alias (alias retires 2026-07-24 — see DeepSeek API changelog).
+const DEEPSEEK_MODEL   = 'deepseek-v4-flash';
+const DEEPSEEK_API_URL = 'https://api.deepseek.com/chat/completions';
 
 // ── CORS headers ───────────────────────────────────────────────────────────
 const CORS = {
@@ -915,22 +963,231 @@ BEHAVIOUR RULES
   don't bolt the same canned CTA onto messages that aren't about buying.`;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
-function json(data, status = 200) {
+function json(data, status = 200, extraHeaders) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { 'Content-Type': 'application/json', ...CORS },
+    headers: { 'Content-Type': 'application/json', ...CORS, ...(extraHeaders || {}) },
   });
+}
+
+// ── Provider: Gemini (primary) ──────────────────────────────────────────
+// Returns { ok: true, reply } on success, or
+//         { ok: false, httpStatus, errStatus, errBody } on any failure.
+// Every fetch Response body in this function is read at most once — there
+// is no path that calls .text()/.json() twice on the same Response.
+async function callGeminiWithRetry(apiKey, contents) {
+  const payload = JSON.stringify({
+    system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    contents,
+    generationConfig: {
+      maxOutputTokens: 700,
+      temperature    : 0.35,
+      topP           : 0.9,
+    },
+  });
+
+  async function call() {
+    return fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
+      method : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body   : payload,
+    });
+  }
+
+  // v4: 3 retries, exponential backoff 2s → 5s → 11s.
+  const RETRY_DELAYS_MS = [2000, 5000, 11000];
+  const RETRYABLE_CODES = new Set([429, 500, 503]);
+
+  let res;
+  try {
+    res = await call();
+  } catch (err) {
+    console.error('[chat.js] Network error calling Gemini:', err.message);
+    return { ok: false, httpStatus: 0, errStatus: 'NETWORK_ERROR', errBody: err.message };
+  }
+
+  for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
+    if (res.ok) break;
+    if (!RETRYABLE_CODES.has(res.status)) break;
+
+    // v6: classify 429s *before* deciding to retry. RESOURCE_EXHAUSTED is a
+    // daily/monthly cap reset at midnight UTC — retrying within the same
+    // minute can never succeed, so stop burning the retry budget and let
+    // the caller fail over to DeepSeek immediately instead.
+    if (res.status === 429) {
+      const text = await res.text();
+      let errStatus = '';
+      try { errStatus = JSON.parse(text)?.error?.status || ''; } catch { /* non-JSON body */ }
+      if (errStatus === 'RESOURCE_EXHAUSTED') {
+        console.warn('[chat.js] Gemini RESOURCE_EXHAUSTED — quota exhausted, skipping retries.');
+        return { ok: false, httpStatus: res.status, errStatus, errBody: text };
+      }
+      // RATE_LIMIT_EXCEEDED (RPM burst) or unrecognised 429 body — these can
+      // clear within seconds, so fall through to the normal retry below.
+    }
+
+    const delay = RETRY_DELAYS_MS[attempt];
+    console.warn(
+      `[chat.js] Gemini ${res.status} on attempt ${attempt + 1}/${RETRY_DELAYS_MS.length}.` +
+      ` Retrying in ${delay}ms…`
+    );
+    await new Promise(r => setTimeout(r, delay));
+    try {
+      res = await call();
+    } catch (err) {
+      console.error('[chat.js] Network error calling Gemini (retry):', err.message);
+      return { ok: false, httpStatus: 0, errStatus: 'NETWORK_ERROR', errBody: err.message };
+    }
+  }
+
+  if (!res.ok) {
+    let errBody = '';
+    let errStatus = '';
+    try {
+      errBody = await res.text();
+      errStatus = JSON.parse(errBody)?.error?.status || '';
+    } catch { /* non-fatal — body may be non-JSON (HTML error page, etc.) */ }
+    console.error(
+      `[chat.js] Gemini HTTP ${res.status} for model ${GEMINI_MODEL} (after retries):`,
+      errBody.slice(0, 500),
+    );
+    return { ok: false, httpStatus: res.status, errStatus, errBody };
+  }
+
+  const data = await res.json();
+  const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+  if (!reply) {
+    return { ok: false, httpStatus: res.status, errStatus: 'EMPTY_REPLY', errBody: '' };
+  }
+  return { ok: true, reply };
+}
+
+// ── Provider: DeepSeek (fallback) ───────────────────────────────────────
+// OpenAI-compatible chat-completions format. DeepSeek publishes no hard
+// daily request cap (pay-per-token), so this absorbs whatever overflows
+// Gemini's free 1500 req/day. Same return shape as callGeminiWithRetry.
+async function callDeepSeekWithRetry(apiKey, messages) {
+  const payload = JSON.stringify({
+    model      : DEEPSEEK_MODEL,
+    messages,
+    max_tokens : 700,
+    temperature: 0.35,
+    top_p      : 0.9,
+    stream     : false,
+  });
+
+  async function call() {
+    return fetch(DEEPSEEK_API_URL, {
+      method : 'POST',
+      headers: {
+        'Content-Type' : 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: payload,
+    });
+  }
+
+  // DeepSeek has no published RPD cap — a single short retry is enough to
+  // absorb the occasional peak-hour 503 their docs mention, nothing more.
+  const RETRY_DELAYS_MS = [1500];
+  const RETRYABLE_CODES = new Set([429, 500, 503]);
+
+  let res;
+  try {
+    res = await call();
+  } catch (err) {
+    console.error('[chat.js] Network error calling DeepSeek:', err.message);
+    return { ok: false, httpStatus: 0, errStatus: 'NETWORK_ERROR', errBody: err.message };
+  }
+
+  for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
+    if (res.ok || !RETRYABLE_CODES.has(res.status)) break;
+    const delay = RETRY_DELAYS_MS[attempt];
+    console.warn(
+      `[chat.js] DeepSeek ${res.status} on attempt ${attempt + 1}/${RETRY_DELAYS_MS.length}.` +
+      ` Retrying in ${delay}ms…`
+    );
+    await new Promise(r => setTimeout(r, delay));
+    try {
+      res = await call();
+    } catch (err) {
+      console.error('[chat.js] Network error calling DeepSeek (retry):', err.message);
+      return { ok: false, httpStatus: 0, errStatus: 'NETWORK_ERROR', errBody: err.message };
+    }
+  }
+
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => '');
+    console.error(`[chat.js] DeepSeek HTTP ${res.status} (after retries):`, errBody.slice(0, 500));
+    return { ok: false, httpStatus: res.status, errStatus: '', errBody };
+  }
+
+  const data = await res.json();
+  const reply = data?.choices?.[0]?.message?.content?.trim() || '';
+  if (!reply) {
+    return { ok: false, httpStatus: res.status, errStatus: 'EMPTY_REPLY', errBody: '' };
+  }
+  return { ok: true, reply };
+}
+
+// ── Friendly error builder ──────────────────────────────────────────────
+// `primary` is the callGeminiWithRetry() result (or a synthetic
+// NOT_CONFIGURED stand-in when Gemini was never called at all).
+// `fallbackAttempted` tells the message whether DeepSeek was even tried,
+// so we never claim "trying a backup" when no DEEPSEEK_API_KEY exists.
+function buildFriendlyError(primary, fallbackAttempted) {
+  if (primary.errStatus === 'RESOURCE_EXHAUSTED') {
+    return fallbackAttempted
+      ? 'Both AI providers are unavailable right now — the primary quota is ' +
+        'exhausted and the backup also failed. Please try again shortly, or ' +
+        'contact the site admin. / ' +
+        'كل مزودي الذكاء الاصطناعي غير متاحين دلوقتي. حاول تاني بعد لحظات أو ' +
+        'تواصل مع مسؤول الموقع.'
+      : 'Daily AI quota reached — the assistant will be available again after ' +
+        'midnight UTC. If this keeps happening, contact the site admin to ' +
+        'upgrade the API key or enable a backup provider. / ' +
+        'الحصة اليومية للذكاء الاصطناعي اتخلصت — المساعد هيرجع يشتغل بعد منتصف ' +
+        'الليل (UTC). لو المشكلة بتتكرر، تواصل مع مسؤول الموقع.';
+  }
+  if (primary.errStatus === 'RATE_LIMIT_EXCEEDED') {
+    return 'Too many requests right now. Please wait 30–60 seconds and try again. / ' +
+           'في طلبات كتير دلوقتي. استنى 30–60 ثانية وحاول تاني.';
+  }
+
+  const friendlyErrors = {
+    400: 'Invalid request. Please rephrase and try again. / ' +
+         'طلب غير صالح، حاول تغيير الصياغة.',
+    401: 'API authentication failed. Please contact site admin. / ' +
+         'فشل المصادقة، تواصل مع المسؤول.',
+    403: 'API access denied. Please contact site admin. / ' +
+         'الوصول محجوب، تواصل مع المسؤول.',
+    404: 'AI model unavailable. Please contact site admin. / ' +
+         'النموذج غير متاح، تواصل مع المسؤول.',
+    500: 'The AI service encountered an error. Please try again. / ' +
+         'حصل خطأ في الخدمة، حاول مرة أخرى.',
+    503: 'The AI service is temporarily unavailable. Please try again in a minute. / ' +
+         'الخدمة مش متاحة دلوقتي، جرب تاني بعد دقيقة.',
+  };
+  return (
+    friendlyErrors[primary.httpStatus] ||
+    'Something went wrong. Please try again. / حصل مشكلة، حاول مرة أخرى.'
+  );
 }
 
 // ── POST handler ───────────────────────────────────────────────────────────
 export async function onRequestPost(context) {
   const { request, env } = context;
 
-  // 1. Validate API key is configured
-  const apiKey = env.GEMINI_API_KEY;
-  if (!apiKey) {
+  // 1. Validate at least one provider is configured.
+  const geminiKey   = env.GEMINI_API_KEY   || '';
+  const deepseekKey = env.DEEPSEEK_API_KEY || '';
+  if (!geminiKey && !deepseekKey) {
     return json(
-      { error: 'GEMINI_API_KEY not set in Cloudflare environment variables.' },
+      {
+        error:
+          'No AI provider configured. Set GEMINI_API_KEY and/or ' +
+          'DEEPSEEK_API_KEY in Cloudflare Pages environment variables.',
+      },
       500,
     );
   }
@@ -950,134 +1207,49 @@ export async function onRequestPost(context) {
     return json({ error: 'Message must not be empty.' }, 400);
   }
 
-  // 3. Build Gemini `contents` array
-  //    Keep last 10 turns (5 exchanges) to stay within token budget.
-  const contents = [];
+  // 3. Normalize history ONCE — both providers' payloads derive from this
+  //    single `turns` list, so Gemini and DeepSeek can never see different
+  //    conversation context. Keep last 10 turns (5 exchanges) for token budget.
   const recentHistory = rawHistory.slice(-10);
+  const turns = [];
   for (const turn of recentHistory) {
     const role = turn.role === 'model' ? 'model' : 'user';
     const text = typeof turn.text === 'string' ? turn.text.trim() : '';
-    if (text) contents.push({ role, parts: [{ text }] });
+    if (text) turns.push({ role, text });
   }
-  contents.push({ role: 'user', parts: [{ text: userMessage }] });
+  turns.push({ role: 'user', text: userMessage });
 
-  // 4. Call Gemini API — with exponential-backoff retry on 429, 500, 503
-  //    v4 FIX: was 1 retry at flat 2 s — now 3 retries at 2 s, 5 s, 11 s
-  const payload = JSON.stringify({
-    system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
-    contents,
-    generationConfig: {
-      maxOutputTokens: 700,
-      temperature    : 0.35,
-      topP           : 0.9,
-    },
-  });
+  const geminiContents = turns.map(t => ({ role: t.role, parts: [{ text: t.text }] }));
+  const openaiMessages = [
+    { role: 'system', content: SYSTEM_PROMPT },
+    ...turns.map(t => ({ role: t.role === 'model' ? 'assistant' : 'user', content: t.text })),
+  ];
 
-  async function callGemini() {
-    return fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
-      method : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body   : payload,
-    });
-  }
-
-  const RETRY_DELAYS_MS = [2000, 5000, 11000]; // exponential-ish: 2 s, 5 s, 11 s
-  const RETRYABLE_CODES = new Set([429, 500, 503]);
-
-  let geminiRes;
-  try {
-    geminiRes = await callGemini();
-
-    for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
-      if (!RETRYABLE_CODES.has(geminiRes.status)) break;
-      const delay = RETRY_DELAYS_MS[attempt];
-      console.warn(
-        `[chat.js] Gemini ${geminiRes.status} on attempt ${attempt + 1}/${RETRY_DELAYS_MS.length}.` +
-        ` Retrying in ${delay}ms…`
-      );
-      await new Promise(r => setTimeout(r, delay));
-      geminiRes = await callGemini();
+  // 4. Primary: Gemini (skipped entirely if no GEMINI_API_KEY — DeepSeek-only mode)
+  let primary = { ok: false, httpStatus: 0, errStatus: 'NOT_CONFIGURED', errBody: '' };
+  if (geminiKey) {
+    primary = await callGeminiWithRetry(geminiKey, geminiContents);
+    if (primary.ok) {
+      return json({ reply: primary.reply });
     }
-  } catch (err) {
-    // Network-level failure (DNS / TCP — not an HTTP error from Gemini)
-    console.error('[chat.js] Network error calling Gemini:', err.message);
-    return json(
-      {
-        error:
-          'Connection error. Please check your internet and try again. / ' +
-          'خطأ في الاتصال، تحقق من الإنترنت وحاول مرة أخرى.',
-      },
-      502,
-    );
   }
 
-  if (!geminiRes.ok) {
-    let errBody = '';
-    let geminiErrStatus = '';   // 'RESOURCE_EXHAUSTED' | 'RATE_LIMIT_EXCEEDED' | ''
-    try {
-      errBody = await geminiRes.text();
-      const errJson = JSON.parse(errBody);
-      geminiErrStatus = errJson?.error?.status || '';
-    } catch { /* non-fatal — errBody may be non-JSON (HTML error page, etc.) */ }
-
+  // 5. Fallback: DeepSeek — only reached if Gemini failed or wasn't configured.
+  if (deepseekKey) {
+    console.warn('[chat.js] Falling back to DeepSeek.');
+    const fallback = await callDeepSeekWithRetry(deepseekKey, openaiMessages);
+    if (fallback.ok) {
+      return json({ reply: fallback.reply }, 200, { 'X-CES-AI-Source': 'deepseek-fallback' });
+    }
     console.error(
-      `[chat.js] Gemini HTTP ${geminiRes.status} for model ${GEMINI_MODEL} (after retries):`,
-      errBody.slice(0, 500),
+      '[chat.js] DeepSeek fallback also failed:',
+      fallback.httpStatus,
+      (fallback.errBody || '').slice(0, 300),
     );
-
-    // ── 429 sub-classification (v5 new) ──────────────────────────────────
-    // RESOURCE_EXHAUSTED  → daily or monthly free-tier quota fully consumed.
-    //   Nothing the user can do except wait until midnight UTC.
-    //   Admin fix: enable billing in Google AI Studio (lifts RPD cap).
-    // RATE_LIMIT_EXCEEDED → RPM burst (15 req/min free limit).
-    //   Temporary — waiting 30–60 s clears it. No config change needed.
-    // Unknown             → generic transient message.
-    let friendly429;
-    if (geminiErrStatus === 'RESOURCE_EXHAUSTED') {
-      friendly429 =
-        'Daily AI quota reached — the assistant will be available again after midnight UTC. ' +
-        'If this keeps happening, contact the site admin to upgrade the API key. / ' +
-        'الحصة اليومية للذكاء الاصطناعي اتخلصت — المساعد هيرجع يشتغل بعد منتصف الليل (UTC). ' +
-        'لو المشكلة بتتكرر، تواصل مع مسؤول الموقع.';
-    } else if (geminiErrStatus === 'RATE_LIMIT_EXCEEDED') {
-      friendly429 =
-        'Too many requests right now. Please wait 30–60 seconds and try again. / ' +
-        'في طلبات كتير دلوقتي. استنى 30–60 ثانية وحاول تاني.';
-    } else {
-      // Fallback: 429 whose body could not be parsed or has an unrecognised status
-      friendly429 =
-        'The assistant is busy right now. Please wait a moment and try again. / ' +
-        'المساعد مشغول دلوقتي، استنى لحظة وحاول تاني.';
-    }
-
-    const friendlyErrors = {
-      400: 'Invalid request. Please rephrase and try again. / ' +
-           'طلب غير صالح، حاول تغيير الصياغة.',
-      401: 'API authentication failed. Please contact site admin. / ' +
-           'فشل المصادقة، تواصل مع المسؤول.',
-      403: 'API access denied. Please contact site admin. / ' +
-           'الوصول محجوب، تواصل مع المسؤول.',
-      404: 'AI model unavailable. Please contact site admin. / ' +
-           'النموذج غير متاح، تواصل مع المسؤول.',
-      429: friendly429,
-      500: 'The AI service encountered an error. Please try again. / ' +
-           'حصل خطأ في الخدمة، حاول مرة أخرى.',
-      503: 'The AI service is temporarily unavailable. Please try again in a minute. / ' +
-           'الخدمة مش متاحة دلوقتي، جرب تاني بعد دقيقة.',
-    };
-    const message =
-      friendlyErrors[geminiRes.status] ||
-      'Something went wrong. Please try again. / حصل مشكلة، حاول مرة أخرى.';
-    return json({ error: message }, 502);
   }
 
-  // 5. Parse and return Gemini reply
-  const geminiData = await geminiRes.json();
-  const reply =
-    geminiData?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ||
-    'No response received from AI.';
-
-  return json({ reply });
+  // 6. Both providers exhausted (or only one configured and it failed).
+  return json({ error: buildFriendlyError(primary, !!deepseekKey) }, 502);
 }
 
 // ── OPTIONS preflight (required for CORS) ─────────────────────────────────
