@@ -1185,18 +1185,50 @@ function buildFriendlyError(geminiResult, workersAttempted) {
 }
 
 // ── POST handler ───────────────────────────────────────────────────────────
+// v8 FIX — ROOT-CAUSE ANALYSIS OF ALL BUGS IN v7's onRequestPost:
+//
+// BUG 1 (CRASH): callGeminiWithRetry was called with 2 args instead of 3.
+//   callGeminiWithRetry(geminiKey, geminiContents)   ← WRONG
+//   The function signature is (apiKey, model, contents).
+//   Effect: model = geminiContents (an array), contents = undefined.
+//   URL becomes: .../models/[object Object]:generateContent → 404 or 400.
+//
+// BUG 2 (CRASH / ROOT CAUSE OF "Connection error"): callDeepSeekWithRetry was
+//   called but is not defined anywhere in the file (it was described as removed
+//   in the v7 changelog but the call was never deleted from the handler).
+//   Because DEEPSEEK_API_KEY was present in the environment, the handler reached
+//   that branch after Bug 1's Gemini failure, threw ReferenceError, and Cloudflare
+//   returned a non-JSON 500. The widget's res.json() then threw, landing in the
+//   .catch() handler → "Connection error." This is the exact error reported.
+//
+// BUG 3: Layer 2 (gemini-2.5-flash-lite) never tried. GEMINI_MODEL_FALLBACK
+//   constant was defined but never referenced in the handler.
+//
+// BUG 4: Layer 3 (Cloudflare Workers AI) never tried. callWorkersAIWithRetry
+//   was defined but never called in the handler.
+//
+// BUG 5: Dead config guard read env.DEEPSEEK_API_KEY and included it in the
+//   "at least one provider" check — masking a missing GEMINI_API_KEY.
+//
+// BUG 6: buildFriendlyError called with (primary, !!deepseekKey) instead of
+//   (lastGeminiResult, workersAttempted) — wrong classification of the error.
+//
+// ALL SIX BUGS fixed below. Helper functions (callGeminiWithRetry,
+// callWorkersAIWithRetry, buildFriendlyError) were already correct and unchanged.
 export async function onRequestPost(context) {
   const { request, env } = context;
 
-  // 1. Validate at least one provider is configured.
-  const geminiKey   = env.GEMINI_API_KEY   || '';
-  const deepseekKey = env.DEEPSEEK_API_KEY || '';
-  if (!geminiKey && !deepseekKey) {
+  // 1. Validate Gemini API key — the only required key after v7/v8.
+  //    DEEPSEEK_API_KEY is intentionally not read; DeepSeek is paid-only and
+  //    was removed from this file. Delete it from Cloudflare env to avoid
+  //    confusion (the variable has no effect on this function).
+  const geminiKey = env.GEMINI_API_KEY || '';
+  if (!geminiKey) {
     return json(
       {
         error:
-          'No AI provider configured. Set GEMINI_API_KEY and/or ' +
-          'DEEPSEEK_API_KEY in Cloudflare Pages environment variables.',
+          'No AI provider configured. Set GEMINI_API_KEY in Cloudflare Pages ' +
+          'environment variables (aistudio.google.com → API keys).',
       },
       500,
     );
@@ -1217,9 +1249,10 @@ export async function onRequestPost(context) {
     return json({ error: 'Message must not be empty.' }, 400);
   }
 
-  // 3. Normalize history ONCE — both providers' payloads derive from this
-  //    single `turns` list, so Gemini and DeepSeek can never see different
-  //    conversation context. Keep last 10 turns (5 exchanges) for token budget.
+  // 3. Normalize history — keep last 10 turns (5 exchanges) for token budget.
+  //    Single normalisation pass; geminiContents is the only payload built here.
+  //    (openaiMessages was dead code in v7 — it only existed for the now-removed
+  //     DeepSeek path. Removed here.)
   const recentHistory = rawHistory.slice(-10);
   const turns = [];
   for (const turn of recentHistory) {
@@ -1230,36 +1263,54 @@ export async function onRequestPost(context) {
   turns.push({ role: 'user', text: userMessage });
 
   const geminiContents = turns.map(t => ({ role: t.role, parts: [{ text: t.text }] }));
-  const openaiMessages = [
+
+  // 4. LAYER 1 — Gemini primary (gemini-2.5-flash, stable GA, free tier).
+  //    BUG 1 FIX: pass GEMINI_MODEL_PRIMARY as the second argument (model).
+  const layer1 = await callGeminiWithRetry(geminiKey, GEMINI_MODEL_PRIMARY, geminiContents);
+  if (layer1.ok) {
+    return json({ reply: layer1.reply });
+  }
+  console.warn(
+    `[chat.js] Layer 1 (${GEMINI_MODEL_PRIMARY}) failed:`,
+    layer1.errStatus, layer1.httpStatus,
+  );
+
+  // 5. LAYER 2 — Gemini fallback (gemini-2.5-flash-lite).
+  //    BUG 3 FIX: actually invoke this layer. Separate per-model free daily
+  //    quota — exhausting Layer 1 does not touch Layer 2's allowance.
+  const layer2 = await callGeminiWithRetry(geminiKey, GEMINI_MODEL_FALLBACK, geminiContents);
+  if (layer2.ok) {
+    return json({ reply: layer2.reply }, 200, { 'X-CES-AI-Source': 'gemini-fallback-lite' });
+  }
+  console.warn(
+    `[chat.js] Layer 2 (${GEMINI_MODEL_FALLBACK}) failed:`,
+    layer2.errStatus, layer2.httpStatus,
+  );
+
+  // 6. LAYER 3 — Cloudflare Workers AI (free, zero API key, env.AI binding).
+  //    BUG 4 FIX: actually invoke this layer.
+  //    Workers AI uses OpenAI-style {role,content} messages, not Gemini's
+  //    {role,parts:[{text}]} format — rebuild the message list here.
+  const workersMsgs = [
     { role: 'system', content: SYSTEM_PROMPT },
-    ...turns.map(t => ({ role: t.role === 'model' ? 'assistant' : 'user', content: t.text })),
+    ...turns.map(t => ({
+      role   : t.role === 'model' ? 'assistant' : 'user',
+      content: t.text,
+    })),
   ];
-
-  // 4. Primary: Gemini (skipped entirely if no GEMINI_API_KEY — DeepSeek-only mode)
-  let primary = { ok: false, httpStatus: 0, errStatus: 'NOT_CONFIGURED', errBody: '' };
-  if (geminiKey) {
-    primary = await callGeminiWithRetry(geminiKey, geminiContents);
-    if (primary.ok) {
-      return json({ reply: primary.reply });
-    }
+  const workersAttempted = !!env.AI;
+  const layer3 = await callWorkersAIWithRetry(env.AI, workersMsgs);
+  if (layer3.ok) {
+    return json({ reply: layer3.reply }, 200, { 'X-CES-AI-Source': 'workers-ai-fallback' });
+  }
+  if (workersAttempted) {
+    console.error('[chat.js] Layer 3 (Workers AI) also failed:', layer3.errStatus);
   }
 
-  // 5. Fallback: DeepSeek — only reached if Gemini failed or wasn't configured.
-  if (deepseekKey) {
-    console.warn('[chat.js] Falling back to DeepSeek.');
-    const fallback = await callDeepSeekWithRetry(deepseekKey, openaiMessages);
-    if (fallback.ok) {
-      return json({ reply: fallback.reply }, 200, { 'X-CES-AI-Source': 'deepseek-fallback' });
-    }
-    console.error(
-      '[chat.js] DeepSeek fallback also failed:',
-      fallback.httpStatus,
-      (fallback.errBody || '').slice(0, 300),
-    );
-  }
-
-  // 6. Both providers exhausted (or only one configured and it failed).
-  return json({ error: buildFriendlyError(primary, !!deepseekKey) }, 502);
+  // 7. All three layers exhausted.
+  //    BUG 6 FIX: pass layer2 (last Gemini result) and workersAttempted (not
+  //    !!deepseekKey which was the wrong signal).
+  return json({ error: buildFriendlyError(layer2, workersAttempted) }, 502);
 }
 
 // ── OPTIONS preflight (required for CORS) ─────────────────────────────────
