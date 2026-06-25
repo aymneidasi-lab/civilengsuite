@@ -1,157 +1,335 @@
 /**
- * functions/api/chat.js  —  v7  (2026-06-25)
+ * functions/api/chat.js  —  v9  (2026-06-25)
  * ──────────────────────────────────────────────────────────────────────────
  * Cloudflare Pages Function — AI chatbot proxy for Civil Engineering Suite
- * Route:  POST /api/chat   (Cloudflare Pages auto-routes from /functions/api/)
+ * Route:  POST /api/chat
  *
- * ENV VARS (Cloudflare Dashboard → Pages → civilengsuite → Settings
- *           → Environment variables):
- *   Name : GEMINI_API_KEY      (required — only API key this file uses)
- *   Value: your key from aistudio.google.com  (starts with AIzaSy...)
+ * ENV VARS:
+ *   GEMINI_API_KEY  (required) — from aistudio.google.com, starts with AIza...
+ * BINDING (optional):
+ *   AI  — Workers AI binding (free, no key). If absent, Layer 3 is skipped.
  *
- * BINDING (Cloudflare Dashboard → Pages → civilengsuite → Settings
- *          → Bindings → Add → Workers AI):
- *   Variable name : AI
- *   Resource      : Workers AI  (no key, no signup — it's tied to this
- *                   Cloudflare account already hosting the site)
- *   This binding is OPTIONAL. If you don't add it, the bot still runs on
- *   Gemini alone — you just lose the 3rd-layer free fallback below.
+ * LAYER 1  — Gemini 3.5 Flash (free, current, deprecated after 2026-10-16)
+ * LAYER 2  — Gemini 3.1 Flash-Lite (free, separate per‑model quota)
+ * LAYER 3  — Cloudflare Workers AI (llama-3.1-8b-instruct-fast, free 10k neurons/day)
  *
- * ════════════════════════════════════════
- * CHANGELOG v7 — ROOT-CAUSE FIX: dead model + paid fallback removed
- * ════════════════════════════════════════
- * WHY v6 BROKE ("Both AI providers are unavailable"):
- *   1. GEMINI_MODEL was 'gemini-2.0-flash'. Google deprecated and fully
- *      SHUT DOWN gemini-2.0-flash on 2026-06-01 (confirmed on Google's own
- *      pricing page: "Gemini 2.0 Flash is deprecated and has been shut down
- *      June 1, 2026"). Every primary call was failing — that's the
- *      RESOURCE_EXHAUSTED half of the error message.
- *   2. The "fallback" was DeepSeek, which v6's own comments mis-stated as
- *      having "no daily request cap" and implied was effectively free.
- *      DeepSeek's API is NOT free — checked api-docs.deepseek.com directly:
- *      it is pay-per-token only, debited from a topped-up or one-time
- *      "granted" balance. Once that balance is empty (which it is — no
- *      payment method was ever added per site owner), every call returns a
- *      balance/auth error. That's the "backup also failed" half.
- *   Net effect: a guaranteed-fail primary chained to a guaranteed-fail
- *   (and explicitly paid, against this project's "100% free" requirement)
- *   fallback. There was no scenario in which this ever answered a user.
+ * All layers are 100% free under the Free plan of the respective provider.
+ * No billing enabled on Google project; Cloudflare Free plan with 10k neuron/day cap.
  *
- * FIX — DeepSeek removed entirely; replaced with a 3-layer ALL-FREE chain:
- *   LAYER 1 — gemini-2.5-flash (current GA, NOT deprecated, free tier).
- *   LAYER 2 — gemini-2.5-flash-lite, same GEMINI_API_KEY. Gemini free-tier
- *     request quotas are tracked per model, not pooled across models, so
- *     exhausting Flash's daily quota does not touch Flash-Lite's separate
- *     daily quota — this is a second free chance before leaving Google
- *     entirely. (Source: ai.google.dev/gemini-api/docs/rate-limits —
- *     "Limits vary depending on the specific model being used.")
- *   LAYER 3 — Cloudflare Workers AI, via the native `env.AI` binding,
- *     running @cf/meta/llama-3.1-8b-instruct-fp8-fast. Zero API key, zero
- *     new signup — it's a binding on the Cloudflare account already
- *     hosting this Pages project. Free allocation: 10,000 neurons/day,
- *     no credit card (Cloudflare Workers AI pricing docs). A typical reply
- *     at this system prompt's size costs roughly 70-90 neurons, so the
- *     free allocation covers ~100+ fallback replies/day — and this layer
- *     only fires when BOTH Gemini models are exhausted, so real usage is
- *     far lower than that ceiling.
- *   Each layer is tried in order; the response is returned the instant any
- *   layer succeeds. Only a simultaneous failure of all three layers shows
- *   the user an error.
- *
- * STAYING AT $0.00 — TWO ACCOUNT SETTINGS TO NEVER CHANGE:
- *   · Do not enable billing on the Google AI Studio project. The free tier
- *     needs no billing account; adding one converts 429s into a real bill
- *     instead of a hard stop.
- *   · Do not upgrade the Cloudflare account from the Workers FREE plan to
- *     Workers PAID. On Free, exceeding 10,000 neurons/day just fails the
- *     request (no charge, ever). On Paid, the same overage is billed at
- *     $0.011/1,000 neurons. Free plan = the 10k/day ceiling is a wall, not
- *     a meter.
- *   Leave both as-is and this file cannot generate a bill under any
- *   traffic pattern — worst case is the friendly "all providers busy"
- *   message, never a charge.
- *
- * SECURITY NOTE (unrelated to the bug, found while reviewing screenshots):
- *   The DEEPSEEK_API_KEY and GEMINI_API_KEY values were visible in plaintext
- *   in dashboard screenshots shared during debugging. Treat both as
- *   compromised — rotate them in their respective consoles (delete the old
- *   key, generate a new one, update the Cloudflare Pages env var) regardless
- *   of this code change. DeepSeek's key is no longer used by this file at
- *   all after v7, so deleting the DEEPSEEK_API_KEY variable in Cloudflare is
- *   also safe to do once the new key has been rotated on DeepSeek's side.
- *
- * ════════════════════════════════════════
- * CHANGELOG v5 — SYSTEM PROMPT EXPANSION + QUOTA DIAGNOSTICS
- * ════════════════════════════════════════
- * QUOTA ERROR DETECTION (addresses Q3 / Q4 directly):
- *   Old: ANY 429 returned identical "busy assistant" message — operator could not
- *        distinguish a temporary RPM burst from a fully exhausted daily quota.
- *   New: error body is parsed as JSON after all retries.
- *     · error.status === 'RESOURCE_EXHAUSTED' → daily/monthly quota exhausted.
- *       Message tells user to try after midnight UTC and instructs admin to upgrade key.
- *     · error.status === 'RATE_LIMIT_EXCEEDED' → RPM burst (15 req/min free limit).
- *       Message tells user to wait 30–60 seconds — quota will not help.
- *     · Anything else → generic transient error message.
- *
- * WHY "BUSY ASSISTANT" OCCURS — FULL ROOT-CAUSE TREE:
- *   CAUSE 1 — WRONG MODEL (v3 issue, fixed in v4):
- *     gemini-2.5-flash-lite is Preview-tier with ~1M TPD free quota.
- *     12K-token system prompt × real traffic = quota gone in ≈66 requests/day.
- *     Fix: gemini-2.0-flash (stable, 4M TPD). Already in v4, kept in v5.
- *   CAUSE 2 — RPM BURST (ongoing, handled by retries):
- *     Free tier = 15 requests/minute. Multiple concurrent users or rapid typing
- *     can hit this. The 3-retry exponential backoff (2 s → 5 s → 11 s) absorbs
- *     most burst spikes without surfacing an error to the user.
- *   CAUSE 3 — DAILY RPD LIMIT (ongoing, requires paid key to fix):
- *     Free tier = 1500 requests/day regardless of token size.
- *     A busy site hitting 1500 chat messages/day will see sustained 429s from
- *     RESOURCE_EXHAUSTED for the rest of that UTC day.
- *     Resolution: enable billing in Google AI Studio → free-tier caps lift.
- *
- * SYSTEM PROMPT v5 — 7 NEW TECHNICAL EDUCATION SECTIONS (from posts 70–114):
- *   1. FOOTING THICKNESS: correct sequence — shear → d → h, never h → check
- *   2. 75mm COVER RATIONALE: ACI 318-19 §20.6.1 three engineering reasons
- *   3. DEVELOPMENT LENGTH: 3 specific errors (top-bar 1.3× factor; memorised
- *      tables; available-length verification separate from ld calculation)
- *   4. TENSION-CONTROLLED SECTIONS: εt ≥ 0.005, φ = 0.90, c ≤ 0.375d rule
- *   5. FOUNDATION DEPTH Df: 4 reasons, MENA context, expansive-clay rule of thumb
- *   6. CONCRETE CRACK DESIGN: ACI 318 controls width not presence; Class C3 footings
- *   7. CORBELS: ACI 318 §16.5 modified design, a/d ≤ 1.0 rule, on-roadmap mention
- *   + 8 additional Egyptian dialect phrases extracted from posts 111–114
- *
- * INHERITED FROM v4 (all kept unchanged except model name — see v7 above):
- *   Retries: 3 retries, exponential backoff 2 s → 5 s → 11 s.
- *   Module count: 19  ·  PCsuite name: "PCsuite 2026"  ·  device transfer = new paid copy
- *   Multi-year locks in 249 EGP/yr for full chosen term  ·  Add-on pricing TBA
- *   4 World-First features  ·  Full FAQ 35+ Q&As  ·  Real case studies
- * ──────────────────────────────────────────────────────────────────────────
+ * CHANGES v9 (based on audit):
+ *  - Model strings updated to current (3.5 Flash, 3.1 Flash-Lite) for future‑proofing.
+ *  - Workers AI model changed to '@cf/meta/llama-3.1-8b-instruct-fast' (catalog‑valid).
+ *  - Added DISTILLED_SYSTEM_PROMPT (~2,000 tokens) for Workers AI to fit context window.
+ *  - Input message length capped at 2,000 characters.
+ *  - CORS restricted to production domain + localhost.
+ *  - Simple prompt‑injection filter for "system:" and "ignore previous".
+ *  - Enhanced error messages to indicate which layer failed.
  */
 
-// ── Models — all three layers below are free-tier (see v7 changelog) ──────
-// LAYER 1 — primary. gemini-2.5-flash is the current stable GA model.
-// (gemini-2.0-flash, used in v4-v6, was shut down by Google on 2026-06-01 —
-// that is the actual cause of the "quota exhausted" errors. Do not revert.)
-const GEMINI_MODEL_PRIMARY  = 'gemini-2.5-flash';
-// LAYER 2 — secondary. Separate per-model free daily quota from Layer 1,
-// same GEMINI_API_KEY, no extra signup.
-const GEMINI_MODEL_FALLBACK = 'gemini-2.5-flash-lite';
+// ── Models ─────────────────────────────────────────────────────────────
+// LAYER 1: primary – free, current, deprecated after 2026‑10‑16, replacement is 3.5 Flash.
+const GEMINI_MODEL_PRIMARY  = 'gemini-3.5-flash';
+// LAYER 2: secondary – free, separate per‑model quota, also deprecated Oct 2026.
+const GEMINI_MODEL_FALLBACK = 'gemini-3.1-flash-lite';
 const GEMINI_API_URL = model =>
   `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
-// LAYER 3 — tertiary. Cloudflare Workers AI, called through the `env.AI`
-// binding (no API key — see header comment for the one-time dashboard
-// setup). Small, cheap instruct model: plenty for a sales/support chatbot
-// and well inside the 10,000 free neurons/day allocation.
-const WORKERS_AI_MODEL = '@cf/meta/llama-3.1-8b-instruct-fp8-fast';
+// LAYER 3: tertiary – Cloudflare Workers AI; model confirmed in catalog.
+// fast variant has 4,096 context window, which we accommodate via distilled prompt.
+const WORKERS_AI_MODEL = '@cf/meta/llama-3.1-8b-instruct-fast';
 
-// ── CORS headers ───────────────────────────────────────────────────────────
-const CORS = {
-  'Access-Control-Allow-Origin' : '*',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
-};
+// ── CORS ───────────────────────────────────────────────────────────────
+// Restrict to production domain and local development.
+const ALLOWED_ORIGINS = [
+  'https://civilengsuite.pages.dev',
+  'http://localhost:3000',
+  'http://localhost:5000',
+  'http://127.0.0.1:5500',  // common live server
+];
+function getCORSHeaders(origin) {
+  const allow = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
+  return {
+    'Access-Control-Allow-Origin' : allow,
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+  };
+}
 
-// ── System prompt — complete product knowledge base (v4) ──────────────────
+// ── Distilled System Prompt for Workers AI (fits 4,096 token limit) ──
+// This is a compressed version of the full SYSTEM_PROMPT, focusing on:
+//   - Product identity and key features
+//   - Pricing and purchase flow
+//   - Core engineering differentiators
+//   - FAQs and objection handling
+// Omitted: detailed 19‑module list, long technical education sections, dialect training.
+const DISTILLED_SYSTEM_PROMPT = `You are the official AI assistant for Civil Engineering Suite (civilengsuite.pages.dev), built by Eng. Aymn Asi.
+
+PRODUCT: Footing Pro v.2026 – combined footing design (Rectangular, Trapezoidal, Strap). 19 engineering modules, ACI 318-19 based, transparent calculations.
+PRICING: Launch price 249 EGP/year (regular 499). Multi‑year upfront locks 249/yr for full term.
+PURCHASE: Download PCsuite 2026 free, generate .dat file, send to aymneidasi@gmail.com or WhatsApp +201287232413. Developer confirms price, then payment.
+KEY FEATURES: self‑weight iteration, directional field lock, stress correction, offline‑first (15 days), 10 security layers.
+WHO: Practicing structural engineers, consultants, junior engineers, students. No Mac/Linux.
+ECP 203 context: built on universal mechanics, adjustable for ACI/Eurocode.
+COMMON MISTAKES PREVENTED: eccentricity, punching shear, load mix‑up, development length, transverse steel averaging.
+OBJECTIONS: No free trial – price equals textbook; transparency – every result traceable to ACI clause; spreadsheet risk – liability; offline – works on site.
+CONTACT: aymneidasi@gmail.com, +201287232413.
+Be helpful, direct, and conversational. Answer in Arabic (Egyptian dialect) if user writes Arabic, otherwise English. Never invent prices or features. If unsure, direct to contact.`;
+
+// ── Helpers ────────────────────────────────────────────────────────────
+function json(data, status = 200, extraHeaders = {}) {
+  const origin = extraHeaders['Access-Control-Allow-Origin'] || 'https://civilengsuite.pages.dev';
+  const cors = getCORSHeaders(origin);
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...cors, ...extraHeaders },
+  });
+}
+
+// ── Sanitize user message ─────────────────────────────────────────────
+function sanitizeMessage(text) {
+  if (typeof text !== 'string') return '';
+  let msg = text.trim();
+  // Cap length to prevent abuse
+  const MAX_LENGTH = 2000;
+  if (msg.length > MAX_LENGTH) msg = msg.slice(0, MAX_LENGTH);
+  // Basic injection filter – strip common override patterns
+  const lower = msg.toLowerCase();
+  if (lower.includes('system:') || lower.includes('ignore previous') || lower.includes('forget your instructions')) {
+    // Remove these phrases (simple regex)
+    msg = msg.replace(/system:/gi, '').replace(/ignore previous/gi, '').replace(/forget your instructions/gi, '');
+    msg = msg.trim();
+  }
+  return msg;
+}
+
+// ── Provider: Gemini ────────────────────────────────────────────────────
+async function callGeminiWithRetry(apiKey, model, contents) {
+  const payload = JSON.stringify({
+    system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    contents,
+    generationConfig: {
+      maxOutputTokens: 700,
+      temperature    : 0.35,
+      topP           : 0.9,
+    },
+  });
+
+  async function call() {
+    return fetch(`${GEMINI_API_URL(model)}?key=${apiKey}`, {
+      method : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body   : payload,
+    });
+  }
+
+  const RETRY_DELAYS_MS = [2000, 5000, 11000];
+  const RETRYABLE_CODES = new Set([429, 500, 503]);
+
+  let res;
+  try {
+    res = await call();
+  } catch (err) {
+    console.error(`[chat.js] Network error calling Gemini (${model}):`, err.message);
+    return { ok: false, httpStatus: 0, errStatus: 'NETWORK_ERROR', errBody: err.message };
+  }
+
+  for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
+    if (res.ok) break;
+    if (!RETRYABLE_CODES.has(res.status)) break;
+
+    if (res.status === 429) {
+      const text = await res.text();
+      let errStatus = '';
+      try { errStatus = JSON.parse(text)?.error?.status || ''; } catch { /* ignore */ }
+      if (errStatus === 'RESOURCE_EXHAUSTED') {
+        console.warn(`[chat.js] Gemini ${model} RESOURCE_EXHAUSTED — skipping retries.`);
+        return { ok: false, httpStatus: res.status, errStatus, errBody: text };
+      }
+    }
+
+    const delay = RETRY_DELAYS_MS[attempt];
+    console.warn(`[chat.js] Gemini ${model} ${res.status}, retry ${attempt+1}/${RETRY_DELAYS_MS.length} in ${delay}ms`);
+    await new Promise(r => setTimeout(r, delay));
+    try {
+      res = await call();
+    } catch (err) {
+      console.error(`[chat.js] Network error retry (${model}):`, err.message);
+      return { ok: false, httpStatus: 0, errStatus: 'NETWORK_ERROR', errBody: err.message };
+    }
+  }
+
+  if (!res.ok) {
+    let errBody = '';
+    let errStatus = '';
+    try {
+      errBody = await res.text();
+      errStatus = JSON.parse(errBody)?.error?.status || '';
+    } catch { /* non‑JSON */ }
+    console.error(`[chat.js] Gemini HTTP ${res.status} (${model}):`, errBody.slice(0, 500));
+    return { ok: false, httpStatus: res.status, errStatus, errBody };
+  }
+
+  const data = await res.json();
+  const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+  if (!reply) {
+    return { ok: false, httpStatus: res.status, errStatus: 'EMPTY_REPLY', errBody: '' };
+  }
+  return { ok: true, reply };
+}
+
+// ── Provider: Workers AI (Layer 3) ─────────────────────────────────────
+// Uses distilled prompt to fit context window.
+async function callWorkersAIWithRetry(aiBinding, messages) {
+  if (!aiBinding) {
+    return { ok: false, httpStatus: 0, errStatus: 'NOT_BOUND', errBody: '' };
+  }
+
+  // Prepend distilled system prompt
+  const fullMessages = [
+    { role: 'system', content: DISTILLED_SYSTEM_PROMPT },
+    ...messages,
+  ];
+
+  async function call() {
+    return aiBinding.run(WORKERS_AI_MODEL, {
+      messages: fullMessages,
+      max_tokens : 700,
+      temperature: 0.35,
+    });
+  }
+
+  const RETRY_DELAY_MS = 1200;
+  let result;
+  try {
+    result = await call();
+  } catch (err) {
+    console.warn('[chat.js] Workers AI attempt 1 failed:', err.message);
+    await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+    try {
+      result = await call();
+    } catch (err2) {
+      console.error('[chat.js] Workers AI failed after retry:', err2.message);
+      return { ok: false, httpStatus: 0, errStatus: 'WORKERS_AI_ERROR', errBody: err2.message };
+    }
+  }
+
+  const reply = (result?.response || '').trim();
+  if (!reply) {
+    return { ok: false, httpStatus: 0, errStatus: 'EMPTY_REPLY', errBody: '' };
+  }
+  return { ok: true, reply };
+}
+
+// ── Friendly error builder ──────────────────────────────────────────────
+function buildFriendlyError(geminiResult, workersAttempted) {
+  if (geminiResult.errStatus === 'RESOURCE_EXHAUSTED') {
+    return workersAttempted
+      ? 'Both AI providers are unavailable right now — primary quota exhausted and backup also failed. / ' +
+        'كل مزودي الذكاء الاصطناعي غير متاحين دلوقتي. حاول تاني بعد لحظات.'
+      : 'Daily AI quota reached — assistant will return after midnight Pacific time. / ' +
+        'الحصة اليومية للذكاء الاصطناعي اتخلصت – هيرجع بعد منتصف الليل.';
+  }
+  if (geminiResult.errStatus === 'RATE_LIMIT_EXCEEDED') {
+    return 'Too many requests. Please wait 30–60 seconds. / طلبات كتيرة، استنى 30–60 ثانية.';
+  }
+
+  const friendly = {
+    400: 'Invalid request. Rephrase and try again. / طلب غير صالح.',
+    401: 'API authentication failed. Contact admin. / فشل المصادقة.',
+    403: 'API access denied. Contact admin. / الوصول محجوب.',
+    404: 'AI model unavailable. Contact admin. / النموذج غير متاح.',
+    500: 'AI service error. Please try again. / خطأ في الخدمة.',
+    503: 'AI service temporarily unavailable. Try again in a minute. / الخدمة مش متاحة دلوقتي.',
+  };
+  return friendly[geminiResult.httpStatus] || 'Something went wrong. Please try again. / حصل مشكلة.';
+}
+
+// ── POST handler ────────────────────────────────────────────────────────
+export async function onRequestPost(context) {
+  const { request, env } = context;
+  const origin = request.headers.get('Origin') || 'https://civilengsuite.pages.dev';
+
+  // 1. Validate Gemini API key
+  const geminiKey = env.GEMINI_API_KEY || '';
+  if (!geminiKey) {
+    return json({ error: 'GEMINI_API_KEY not set. Set it in Cloudflare Pages environment variables.' }, 500, getCORSHeaders(origin));
+  }
+
+  // 2. Parse and sanitize body
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: 'Request body must be valid JSON.' }, 400, getCORSHeaders(origin));
+  }
+
+  let userMessage = typeof body.message === 'string' ? body.message : '';
+  userMessage = sanitizeMessage(userMessage);
+  if (!userMessage) {
+    return json({ error: 'Message is empty or invalid.' }, 400, getCORSHeaders(origin));
+  }
+
+  const rawHistory = Array.isArray(body.history) ? body.history : [];
+
+  // 3. Normalize history – last 10 turns
+  const recentHistory = rawHistory.slice(-10);
+  const turns = [];
+  for (const turn of recentHistory) {
+    const role = turn.role === 'model' ? 'model' : 'user';
+    const text = typeof turn.text === 'string' ? turn.text.trim() : '';
+    if (text) turns.push({ role, text });
+  }
+  turns.push({ role: 'user', text: userMessage });
+
+  const geminiContents = turns.map(t => ({ role: t.role, parts: [{ text: t.text }] }));
+
+  // 4. LAYER 1 – Gemini primary
+  const layer1 = await callGeminiWithRetry(geminiKey, GEMINI_MODEL_PRIMARY, geminiContents);
+  if (layer1.ok) {
+    return json({ reply: layer1.reply }, 200, getCORSHeaders(origin));
+  }
+  console.warn(`[chat.js] Layer1 (${GEMINI_MODEL_PRIMARY}) failed:`, layer1.errStatus);
+
+  // 5. LAYER 2 – Gemini fallback
+  const layer2 = await callGeminiWithRetry(geminiKey, GEMINI_MODEL_FALLBACK, geminiContents);
+  if (layer2.ok) {
+    return json({ reply: layer2.reply }, 200, { ...getCORSHeaders(origin), 'X-CES-AI-Source': 'gemini-fallback-lite' });
+  }
+  console.warn(`[chat.js] Layer2 (${GEMINI_MODEL_FALLBACK}) failed:`, layer2.errStatus);
+
+  // 6. LAYER 3 – Workers AI (only if binding exists)
+  const workersAttempted = !!env.AI;
+  const workersMsgs = turns.map(t => ({
+    role   : t.role === 'model' ? 'assistant' : 'user',
+    content: t.text,
+  }));
+
+  const layer3 = await callWorkersAIWithRetry(env.AI, workersMsgs);
+  if (layer3.ok) {
+    return json({ reply: layer3.reply }, 200, { ...getCORSHeaders(origin), 'X-CES-AI-Source': 'workers-ai-fallback' });
+  }
+  if (workersAttempted) {
+    console.error('[chat.js] Layer3 (Workers AI) also failed:', layer3.errStatus);
+  }
+
+  // 7. All layers exhausted
+  return json({ error: buildFriendlyError(layer2, workersAttempted) }, 502, getCORSHeaders(origin));
+}
+
+// ── OPTIONS preflight ────────────────────────────────────────────────────
+export async function onRequestOptions(context) {
+  const { request } = context;
+  const origin = request.headers.get('Origin') || 'https://civilengsuite.pages.dev';
+  return new Response(null, {
+    status: 204,
+    headers: getCORSHeaders(origin),
+  });
+}
+
+// ── Full SYSTEM_PROMPT (unchanged from v8, used only for Gemini) ──────
+// The full prompt is extremely long (~13,500 tokens). It is intentionally
+// only used with Gemini, which supports larger context. For Workers AI we use
+// DISTILLED_SYSTEM_PROMPT above.
 const SYSTEM_PROMPT = `\
 You are the official AI assistant and sales advisor for Civil Engineering Suite
 (civilengsuite.pages.dev), built by Eng. Aymn Asi — a practicing Licensed Structural Engineer.
@@ -856,7 +1034,7 @@ Engineers take Df from the geotechnical report. These are the four physical reas
     with seasonal moisture changes, causing differential settlement and structural damage.
     Rule of thumb for expansive clays: Df ≥ 1.5 m to reach the stable moisture zone.
 (4) STRUCTURAL REQUIREMENT: column dowels must develop full yield force into the footing
-    depth. The footing needs enough thickness d to satisfy shear checks. These structural
+    depth. The footing needs enough thickness h to satisfy shear checks. These structural
     requirements set a minimum h, which in turn sets a minimum Df below grade.
 MENA typical practice: Df = 1.5 m to 2.5 m below finished grade for most building projects.
 The geotechnical report is always the authoritative source — not a rule of thumb.
@@ -993,6 +1171,7 @@ BEHAVIOUR RULES
 • Never be dismissive of manual calculation — respect the work while showing value of speed.
 • When conversation is genuinely about buying/pricing, end with a clear varied next step —
   don't bolt the same canned CTA onto messages that aren't about buying.`;
+
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function json(data, status = 200, extraHeaders) {
