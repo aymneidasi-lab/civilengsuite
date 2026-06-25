@@ -1,13 +1,64 @@
 /**
- * functions/api/chat.js  —  v10  (2026-06-25)
+ * functions/api/chat.js  —  v11  (2026-06-26)
  * ──────────────────────────────────────────────────────────────────────────
  * Cloudflare Pages Function — AI chatbot proxy for Civil Engineering Suite
  * Route:  POST /api/chat   (Cloudflare Pages auto-routes from /functions/api/)
  *
  * ENV VARS (Cloudflare Dashboard → Pages → civilengsuite → Settings
  *           → Environment variables):
- *   Name : GEMINI_API_KEY      (required — only API key this file uses)
- *   Value: your key from aistudio.google.com  (starts with AIzaSy...)
+ *
+ *   REQUIRED:
+ *     GEMINI_API_KEY          Secret   Google account 1 (aistudio.google.com,
+ *                                      starts with AIzaSy…)
+ *
+ *   OPTIONAL — Groq (console.groq.com → API Keys → Create API Key, free, no card):
+ *     GROQ_API_KEY            Secret   Groq account 1   (14,400 req/day free)
+ *     GROQ_API_KEY_1          Secret   Groq account 2
+ *     GROQ_API_KEY_2          Secret   Groq account 3
+ *     GROQ_API_KEY_3          Secret   Groq account 4
+ *     GROQ_API_KEY_4          Secret   Groq account 5
+ *     GROQ_API_KEY_5          Secret   Groq account 6
+ *     GROQ_API_KEY_6          Secret   Groq account 7
+ *     GROQ_API_KEY_7          Secret   Groq account 8
+ *     GROQ_API_KEY_8          Secret   Groq account 9
+ *     GROQ_API_KEY_9          Secret   Groq account 10
+ *     GROQ_API_KEY_10         Secret   Groq account 11
+ *     GROQ_API_KEY_11         Secret   Groq account 12
+ *     GROQ_API_KEY_12         Secret   Groq account 13
+ *     All 13 keys = 187,200 Groq req/day free.
+ *
+ *   OPTIONAL — OpenRouter (openrouter.ai → Settings → Keys, free, $0 balance):
+ *     OPENROUTER_API_KEY      Secret   OpenRouter account 1   (50 req/day free)
+ *     OPENROUTER_API_KEY_1    Secret   OpenRouter account 2
+ *     OPENROUTER_API_KEY_2    Secret   OpenRouter account 3
+ *     OPENROUTER_API_KEY_3    Secret   OpenRouter account 4
+ *     OPENROUTER_API_KEY_4    Secret   OpenRouter account 5
+ *     OPENROUTER_API_KEY_5    Secret   OpenRouter account 6
+ *     OPENROUTER_API_KEY_6    Secret   OpenRouter account 7
+ *     OPENROUTER_API_KEY_7    Secret   OpenRouter account 8
+ *     OPENROUTER_API_KEY_8    Secret   OpenRouter account 9
+ *     OPENROUTER_API_KEY_9    Secret   OpenRouter account 10
+ *     OPENROUTER_API_KEY_10   Secret   OpenRouter account 11
+ *     OPENROUTER_API_KEY_11   Secret   OpenRouter account 12
+ *     OPENROUTER_API_KEY_12   Secret   OpenRouter account 13
+ *     All 13 keys = 650 OpenRouter req/day free.
+ *
+ *   OPTIONAL — Gemini extra keys (each must be a DIFFERENT Google account):
+ *     GEMINI_API_KEY_2        Secret   Google account 2  (~3,000 req/day)
+ *     GEMINI_API_KEY_3        Secret   Google account 3
+ *     GEMINI_API_KEY_4        Secret   Google account 4
+ *     GEMINI_API_KEY_5        Secret   Google account 5
+ *     GEMINI_API_KEY_6        Secret   Google account 6
+ *     GEMINI_API_KEY_7        Secret   Google account 7
+ *     GEMINI_API_KEY_8        Secret   Google account 8
+ *     GEMINI_API_KEY_9        Secret   Google account 9
+ *     GEMINI_API_KEY_10       Secret   Google account 10
+ *     GEMINI_API_KEY_11       Secret   Google account 11
+ *     GEMINI_API_KEY_12       Secret   Google account 12
+ *     GEMINI_API_KEY_13       Secret   Google account 13
+ *     All 13 keys = ~39,000 Gemini req/day free.
+ *     ⚠️  Each key must come from a distinct Google account — the same account
+ *     does not produce a second quota pool (verified June 2026).
  *
  * BINDING (Cloudflare Dashboard → Pages → civilengsuite → Settings
  *          → Bindings → Add → Workers AI):
@@ -15,13 +66,63 @@
  *   Resource      : Workers AI  (no key, no signup — it's tied to this
  *                   Cloudflare account already hosting the site)
  *   This binding is OPTIONAL. If you don't add it, the bot still runs on
- *   Gemini alone — you just lose the 3rd-layer free fallback below.
+ *   Gemini alone — you just lose the Workers AI free fallback layer.
  *
- *   NEW OPTIONAL ENV VARS (v10):
- *   Name : GROQ_API_KEY       (optional — Layer 4, get free at console.groq.com)
- *   Name : OPENROUTER_API_KEY (optional — Layer 5, get free at openrouter.ai)
- *   Name : GEMINI_API_KEY_2   (optional — Layer 6, second Google account key)
- *   All three optional; each layer silently skips if its key is absent.
+ * ════════════════════════════════════════
+ * CHANGELOG v11 — KEY POOL EXPANSION: ×13 GROQ + ×13 OPENROUTER + ×13 GEMINI
+ * ════════════════════════════════════════
+ * PURPOSE: The project team has 13 members, each with a free account on Groq,
+ *   OpenRouter, and Google AI Studio. v10 used one key per provider. v11
+ *   collects all configured keys for each provider into an array at runtime
+ *   and tries them in sequence, multiplying available free-tier capacity ×13.
+ *
+ * CHANGE 1 (AVAILABILITY): Groq key pool expanded from 1 key to 13 keys.
+ *   New env vars: GROQ_API_KEY_1 through GROQ_API_KEY_12 (in addition to
+ *   the existing GROQ_API_KEY). All keys are collected into groqKeys[] and
+ *   iterated in order. Blank or missing keys are silently skipped via .filter().
+ *   Capacity: 14,400 req/day × 13 keys = 187,200 Groq req/day, $0.
+ *
+ * CHANGE 2 (AVAILABILITY): OpenRouter key pool expanded from 1 to 13 keys.
+ *   New env vars: OPENROUTER_API_KEY_1 through OPENROUTER_API_KEY_12.
+ *   Same iteration pattern as CHANGE 1.
+ *   Capacity: 50 req/day × 13 keys = 650 OpenRouter req/day, $0.
+ *
+ * CHANGE 3 (AVAILABILITY): Gemini key pool expanded from 2 to 13 keys.
+ *   New env vars: GEMINI_API_KEY_3 through GEMINI_API_KEY_13 (joining the
+ *   existing GEMINI_API_KEY and GEMINI_API_KEY_2). Each Google account at
+ *   aistudio.google.com has a fully independent free-tier quota.
+ *   Each key in the pool tries GEMINI_MODEL_PRIMARY then GEMINI_MODEL_FALLBACK,
+ *   exactly as v10's Layers 1, 2, and 6a/6b did — now generalised to N keys.
+ *   Capacity: ~3,000 req/day × 13 keys = ~39,000 Gemini req/day, $0.
+ *
+ * IMPLEMENTATION: onRequestPost now uses three key arrays (geminiKeys,
+ *   groqKeys, openRouterKeys), each built at runtime from env vars with
+ *   blank/missing keys filtered out. Execution order:
+ *     1. All Gemini keys (each tries PRIMARY then FALLBACK model)
+ *     2. Workers AI (unchanged — env.AI binding, no API key)
+ *     3. All Groq keys (llama-3.1-8b-instant, WORKERS_AI_SYSTEM_PROMPT)
+ *     4. All OpenRouter keys (:free model, WORKERS_AI_SYSTEM_PROMPT)
+ *   The first successful response is returned immediately.
+ *   All helper functions (callGeminiWithRetry, callGroqWithRetry,
+ *   callOpenRouterWithRetry, callWorkersAIWithRetry, buildFriendlyError)
+ *   are unchanged from v10.
+ *
+ * CLOUDFLARE DASHBOARD SETUP:
+ *   Pages → civilengsuite → Settings → Environment variables → + Add variable.
+ *   Type: Secret for every key. Add keys one by one from each team member's
+ *   respective console. After adding all desired keys, click "Retry deployment"
+ *   (or trigger any new deployment) — Pages picks up new env vars on the next
+ *   build. Keys can be added incrementally; any missing key is silently skipped.
+ *
+ * COMBINED FREE DAILY CAPACITY (all 13 keys active per provider):
+ *   Gemini  (13 keys × primary + fallback)  : ~39,000 req/day
+ *   Workers AI (env.AI binding, unchanged)  :    ~100 req/day
+ *   Groq    (13 keys × llama-3.1-8b-instant): 187,200 req/day
+ *   OpenRouter (13 keys × :free model)      :    ~650 req/day
+ *   ──────────────────────────────────────────────────────────
+ *   TOTAL: ~226,950 req/day, $0.00.
+ *   At 100–500 req/day (normal chatbot traffic), exhaustion across all
+ *   providers simultaneously is effectively impossible.
  *
  * ════════════════════════════════════════
  * CHANGELOG v10 — 6-LAYER CHAIN: GROQ + OPENROUTER + GEMINI KEY 2 + WHATSAPP REDIRECT
@@ -58,7 +159,7 @@
  *   When all layers fail, every error message now includes WhatsApp +201287232413
  *   and aymneidasi@gmail.com — a quota failure is no longer a dead end.
  *
- * COMBINED FREE DAILY CAPACITY (all 6 layers active):
+ * COMBINED FREE DAILY CAPACITY (v10 6-layer baseline — see v11 for full 13-key totals):
  *   Layer 1  — Gemini 3.5-flash      (Key 1) : ~1,500 req/day
  *   Layer 2  — Gemini 3.1-flash-lite (Key 1) : ~1,500 req/day
  *   Layer 3  — Workers AI            (no key):   ~100 req/day (10K neurons/day)
@@ -1597,33 +1698,71 @@ export async function onRequestPost(context) {
 
   const geminiContents = turns.map(t => ({ role: t.role, parts: [{ text: t.text }] }));
 
-  // 4. LAYER 1 — Gemini primary (gemini-2.5-flash, stable GA, free tier).
-  //    BUG 1 FIX: pass GEMINI_MODEL_PRIMARY as the second argument (model).
-  const layer1 = await callGeminiWithRetry(geminiKey, GEMINI_MODEL_PRIMARY, geminiContents);
-  if (layer1.ok) {
-    return json({ reply: layer1.reply }, 200, undefined, request);
-  }
-  console.warn(
-    `[chat.js] Layer 1 (${GEMINI_MODEL_PRIMARY}) failed:`,
-    layer1.errStatus, layer1.httpStatus,
-  );
+  // 4. Build Gemini key pool — all 13 keys across 13 Google accounts.
+  //    GEMINI_API_KEY is required (guarded above). Keys 2–13 are optional.
+  //    Blank / absent keys are excluded by the .filter() and silently skipped.
+  const geminiKeys = [
+    env.GEMINI_API_KEY    || '',
+    env.GEMINI_API_KEY_2  || '',
+    env.GEMINI_API_KEY_3  || '',
+    env.GEMINI_API_KEY_4  || '',
+    env.GEMINI_API_KEY_5  || '',
+    env.GEMINI_API_KEY_6  || '',
+    env.GEMINI_API_KEY_7  || '',
+    env.GEMINI_API_KEY_8  || '',
+    env.GEMINI_API_KEY_9  || '',
+    env.GEMINI_API_KEY_10 || '',
+    env.GEMINI_API_KEY_11 || '',
+    env.GEMINI_API_KEY_12 || '',
+    env.GEMINI_API_KEY_13 || '',
+  ].filter(k => k);
 
-  // 5. LAYER 2 — Gemini fallback (gemini-3.1-flash-lite).
-  //    BUG 3 FIX (v8): actually invoke this layer. Separate per-model free daily
-  //    quota — exhausting Layer 1 does not touch Layer 2's allowance.
-  const layer2 = await callGeminiWithRetry(geminiKey, GEMINI_MODEL_FALLBACK, geminiContents);
-  if (layer2.ok) {
-    return json({ reply: layer2.reply }, 200, { 'X-CES-AI-Source': 'gemini-fallback-lite' }, request);
-  }
-  console.warn(
-    `[chat.js] Layer 2 (${GEMINI_MODEL_FALLBACK}) failed:`,
-    layer2.errStatus, layer2.httpStatus,
-  );
+  // 5. GEMINI LAYERS — try each key with PRIMARY then FALLBACK model.
+  //    Replaces v10's Layers 1, 2, 6a, and 6b. Same callGeminiWithRetry()
+  //    function; now generalised to loop over N keys instead of hard-coding two.
+  //    lastGeminiResult carries the final Gemini failure into buildFriendlyError.
+  let lastGeminiResult = { ok: false, httpStatus: 0, errStatus: 'NOT_ATTEMPTED', errBody: '' };
 
-  // 6. LAYER 3 — Cloudflare Workers AI (free, zero API key, env.AI binding).
+  for (let i = 0; i < geminiKeys.length; i++) {
+    const gKey   = geminiKeys[i];
+    const keyTag = i === 0 ? '' : `key${i + 1}-`;
+
+    const resA = await callGeminiWithRetry(gKey, GEMINI_MODEL_PRIMARY, geminiContents);
+    if (resA.ok) {
+      return json(
+        { reply: resA.reply },
+        200,
+        { 'X-CES-AI-Source': `gemini-${keyTag}primary` },
+        request,
+      );
+    }
+    console.warn(
+      `[chat.js] Gemini ${keyTag || 'key1-'}${GEMINI_MODEL_PRIMARY} failed:`,
+      resA.errStatus, resA.httpStatus,
+    );
+    lastGeminiResult = resA;
+
+    const resB = await callGeminiWithRetry(gKey, GEMINI_MODEL_FALLBACK, geminiContents);
+    if (resB.ok) {
+      return json(
+        { reply: resB.reply },
+        200,
+        { 'X-CES-AI-Source': `gemini-${keyTag}fallback` },
+        request,
+      );
+    }
+    console.warn(
+      `[chat.js] Gemini ${keyTag || 'key1-'}${GEMINI_MODEL_FALLBACK} failed:`,
+      resB.errStatus, resB.httpStatus,
+    );
+    lastGeminiResult = resB;
+  }
+
+  // 6. WORKERS AI LAYER — unchanged from v10.
+  //    Build workersMsgs here using WORKERS_AI_SYSTEM_PROMPT (<800 tokens).
   //    Workers AI uses OpenAI-style {role,content} messages, not Gemini's
-  //    {role,parts:[{text}]} format — rebuild the message list here.
-  //    workersMsgs is shared with Layers 4 and 5 (same OpenAI format).
+  //    {role,parts:[{text}]} format. workersMsgs is shared by Groq and
+  //    OpenRouter layers below (same OpenAI-compatible format).
   const workersMsgs = [
     { role: 'system', content: WORKERS_AI_SYSTEM_PROMPT },
     ...turns.map(t => ({
@@ -1632,86 +1771,98 @@ export async function onRequestPost(context) {
     })),
   ];
   const workersAttempted = !!env.AI;
-  const layer3 = await callWorkersAIWithRetry(env.AI, workersMsgs);
-  if (layer3.ok) {
-    return json({ reply: layer3.reply }, 200, { 'X-CES-AI-Source': 'workers-ai-fallback' }, request);
+  const layerWorkers = await callWorkersAIWithRetry(env.AI, workersMsgs);
+  if (layerWorkers.ok) {
+    return json(
+      { reply: layerWorkers.reply },
+      200,
+      { 'X-CES-AI-Source': 'workers-ai-fallback' },
+      request,
+    );
   }
   if (workersAttempted) {
-    console.error('[chat.js] Layer 3 (Workers AI) also failed:', layer3.errStatus);
+    console.error('[chat.js] Workers AI failed:', layerWorkers.errStatus);
   }
 
-  // 7. LAYER 4 — Groq (llama-3.1-8b-instant, 14,400 req/day, 500K tokens/day,
-  //    free). OpenAI-compatible — reuses workersMsgs directly (same format).
-  //    GROQ_API_KEY is optional; if absent, this layer silently skips.
-  //    Free tier: 30 RPM, 6K TPM — WORKERS_AI_SYSTEM_PROMPT (~800 tokens)
-  //    keeps each request comfortably below the per-minute token cap.
-  const groqKey = env.GROQ_API_KEY || '';
-  const layer4  = groqKey
-    ? await callGroqWithRetry(groqKey, workersMsgs)
-    : { ok: false, httpStatus: 0, errStatus: 'NOT_CONFIGURED', errBody: '' };
-  if (layer4.ok) {
-    return json({ reply: layer4.reply }, 200, { 'X-CES-AI-Source': 'groq-fallback' }, request);
-  }
-  if (groqKey) {
-    console.warn('[chat.js] Layer 4 (Groq) failed:', layer4.errStatus, layer4.httpStatus);
-  }
+  // 7. GROQ LAYERS — try each of up to 13 keys in sequence.
+  //    All keys use llama-3.1-8b-instant via callGroqWithRetry().
+  //    Free tier: 14,400 req/day, 30 RPM, 6K TPM per key.
+  //    WORKERS_AI_SYSTEM_PROMPT (~800 tokens) keeps requests below 6K TPM cap.
+  //    Naming: GROQ_API_KEY (member 1) + GROQ_API_KEY_1…GROQ_API_KEY_12 (members 2–13).
+  const groqKeys = [
+    env.GROQ_API_KEY    || '',
+    env.GROQ_API_KEY_1  || '',
+    env.GROQ_API_KEY_2  || '',
+    env.GROQ_API_KEY_3  || '',
+    env.GROQ_API_KEY_4  || '',
+    env.GROQ_API_KEY_5  || '',
+    env.GROQ_API_KEY_6  || '',
+    env.GROQ_API_KEY_7  || '',
+    env.GROQ_API_KEY_8  || '',
+    env.GROQ_API_KEY_9  || '',
+    env.GROQ_API_KEY_10 || '',
+    env.GROQ_API_KEY_11 || '',
+    env.GROQ_API_KEY_12 || '',
+  ].filter(k => k);
 
-  // 8. LAYER 5 — OpenRouter free model (meta-llama/llama-3.3-70b-instruct:free,
-  //    50 req/day on zero-balance account, 20 RPM). Reuses workersMsgs.
-  //    OPENROUTER_API_KEY is optional; if absent, this layer silently skips.
-  const openRouterKey = env.OPENROUTER_API_KEY || '';
-  const layer5        = openRouterKey
-    ? await callOpenRouterWithRetry(openRouterKey, workersMsgs)
-    : { ok: false, httpStatus: 0, errStatus: 'NOT_CONFIGURED', errBody: '' };
-  if (layer5.ok) {
-    return json({ reply: layer5.reply }, 200, { 'X-CES-AI-Source': 'openrouter-fallback' }, request);
-  }
-  if (openRouterKey) {
-    console.warn('[chat.js] Layer 5 (OpenRouter) failed:', layer5.errStatus, layer5.httpStatus);
-  }
-
-  // 9. LAYER 6 — Gemini with a second API key (GEMINI_API_KEY_2, different
-  //    Google account → separate per-account free quota from Layers 1 & 2).
-  //    Tries GEMINI_MODEL_PRIMARY then GEMINI_MODEL_FALLBACK with Key 2,
-  //    identical logic to Layers 1 & 2, reusing callGeminiWithRetry().
-  //    GEMINI_API_KEY_2 is optional; if absent, this layer silently skips.
-  const geminiKey2 = env.GEMINI_API_KEY_2 || '';
-  if (geminiKey2) {
-    const layer6a = await callGeminiWithRetry(geminiKey2, GEMINI_MODEL_PRIMARY, geminiContents);
-    if (layer6a.ok) {
+  for (let i = 0; i < groqKeys.length; i++) {
+    const resG = await callGroqWithRetry(groqKeys[i], workersMsgs);
+    if (resG.ok) {
       return json(
-        { reply: layer6a.reply },
+        { reply: resG.reply },
         200,
-        { 'X-CES-AI-Source': 'gemini-key2-primary' },
+        { 'X-CES-AI-Source': i === 0 ? 'groq-fallback' : `groq-key${i + 1}-fallback` },
         request,
       );
     }
     console.warn(
-      `[chat.js] Layer 6a (${GEMINI_MODEL_PRIMARY}, key2) failed:`,
-      layer6a.errStatus, layer6a.httpStatus,
+      `[chat.js] Groq key${i === 0 ? '' : i + 1} failed:`,
+      resG.errStatus, resG.httpStatus,
     );
-    const layer6b = await callGeminiWithRetry(geminiKey2, GEMINI_MODEL_FALLBACK, geminiContents);
-    if (layer6b.ok) {
+  }
+
+  // 8. OPENROUTER LAYERS — try each of up to 13 keys in sequence.
+  //    All keys use meta-llama/llama-3.3-70b-instruct:free via callOpenRouterWithRetry().
+  //    Free tier: 50 req/day, 20 RPM per key. HTTP-Referer and X-Title sent
+  //    per OpenRouter docs (handled inside callOpenRouterWithRetry).
+  //    Naming: OPENROUTER_API_KEY (member 1) + OPENROUTER_API_KEY_1…_12 (members 2–13).
+  const openRouterKeys = [
+    env.OPENROUTER_API_KEY    || '',
+    env.OPENROUTER_API_KEY_1  || '',
+    env.OPENROUTER_API_KEY_2  || '',
+    env.OPENROUTER_API_KEY_3  || '',
+    env.OPENROUTER_API_KEY_4  || '',
+    env.OPENROUTER_API_KEY_5  || '',
+    env.OPENROUTER_API_KEY_6  || '',
+    env.OPENROUTER_API_KEY_7  || '',
+    env.OPENROUTER_API_KEY_8  || '',
+    env.OPENROUTER_API_KEY_9  || '',
+    env.OPENROUTER_API_KEY_10 || '',
+    env.OPENROUTER_API_KEY_11 || '',
+    env.OPENROUTER_API_KEY_12 || '',
+  ].filter(k => k);
+
+  for (let i = 0; i < openRouterKeys.length; i++) {
+    const resOR = await callOpenRouterWithRetry(openRouterKeys[i], workersMsgs);
+    if (resOR.ok) {
       return json(
-        { reply: layer6b.reply },
+        { reply: resOR.reply },
         200,
-        { 'X-CES-AI-Source': 'gemini-key2-fallback' },
+        { 'X-CES-AI-Source': i === 0 ? 'openrouter-fallback' : `openrouter-key${i + 1}-fallback` },
         request,
       );
     }
     console.warn(
-      `[chat.js] Layer 6b (${GEMINI_MODEL_FALLBACK}, key2) failed:`,
-      layer6b.errStatus, layer6b.httpStatus,
+      `[chat.js] OpenRouter key${i === 0 ? '' : i + 1} failed:`,
+      resOR.errStatus, resOR.httpStatus,
     );
   }
 
-  // 10. All layers exhausted.
-  //     buildFriendlyError receives layer2 (last Gemini result) and
-  //     workersAttempted (whether Layer 3 was tried) — consistent with v8 fix.
-  //     The v10 buildFriendlyError now appends WhatsApp/email to all
-  //     quota-exhausted and generic failure messages so the user is never
-  //     left with a dead end.
-  return json({ error: buildFriendlyError(layer2, workersAttempted) }, 502, undefined, request);
+  // 9. All layers exhausted.
+  //    lastGeminiResult = the final callGeminiWithRetry() outcome (last key,
+  //    FALLBACK model). workersAttempted = whether Workers AI was tried.
+  //    buildFriendlyError() is unchanged from v10.
+  return json({ error: buildFriendlyError(lastGeminiResult, workersAttempted) }, 502, undefined, request);
 }
 
 // ── OPTIONS preflight (required for CORS) ─────────────────────────────────
