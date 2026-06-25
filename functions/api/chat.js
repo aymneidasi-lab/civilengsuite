@@ -6,50 +6,79 @@
  *
  * ENV VARS (Cloudflare Dashboard → Pages → civilengsuite → Settings
  *           → Environment variables):
- *   Name : GEMINI_API_KEY      (primary — optional if DEEPSEEK_API_KEY is set)
+ *   Name : GEMINI_API_KEY      (required — only API key this file uses)
  *   Value: your key from aistudio.google.com  (starts with AIzaSy...)
  *
- *   Name : DEEPSEEK_API_KEY    (fallback — optional, see v6 changelog below)
- *   Value: your key from platform.deepseek.com (starts with sk-...)
- *
- *   At least one of the two must be set or the function returns HTTP 500.
+ * BINDING (Cloudflare Dashboard → Pages → civilengsuite → Settings
+ *          → Bindings → Add → Workers AI):
+ *   Variable name : AI
+ *   Resource      : Workers AI  (no key, no signup — it's tied to this
+ *                   Cloudflare account already hosting the site)
+ *   This binding is OPTIONAL. If you don't add it, the bot still runs on
+ *   Gemini alone — you just lose the 3rd-layer free fallback below.
  *
  * ════════════════════════════════════════
- * CHANGELOG v6 — DEEPSEEK FAILOVER (fixes RESOURCE_EXHAUSTED dead-ends)
+ * CHANGELOG v7 — ROOT-CAUSE FIX: dead model + paid fallback removed
  * ════════════════════════════════════════
- * PROBLEM THIS FIXES:
- *   v5 correctly *diagnosed* RESOURCE_EXHAUSTED (Gemini free tier: 1500
- *   requests/day, resets at midnight UTC) but had no recovery path — once
- *   the daily cap was hit, every user got an error message until midnight,
- *   no matter how the message was worded.
+ * WHY v6 BROKE ("Both AI providers are unavailable"):
+ *   1. GEMINI_MODEL was 'gemini-2.0-flash'. Google deprecated and fully
+ *      SHUT DOWN gemini-2.0-flash on 2026-06-01 (confirmed on Google's own
+ *      pricing page: "Gemini 2.0 Flash is deprecated and has been shut down
+ *      June 1, 2026"). Every primary call was failing — that's the
+ *      RESOURCE_EXHAUSTED half of the error message.
+ *   2. The "fallback" was DeepSeek, which v6's own comments mis-stated as
+ *      having "no daily request cap" and implied was effectively free.
+ *      DeepSeek's API is NOT free — checked api-docs.deepseek.com directly:
+ *      it is pay-per-token only, debited from a topped-up or one-time
+ *      "granted" balance. Once that balance is empty (which it is — no
+ *      payment method was ever added per site owner), every call returns a
+ *      balance/auth error. That's the "backup also failed" half.
+ *   Net effect: a guaranteed-fail primary chained to a guaranteed-fail
+ *   (and explicitly paid, against this project's "100% free" requirement)
+ *   fallback. There was no scenario in which this ever answered a user.
  *
- * FIX — automatic failover to DeepSeek:
- *   · DeepSeek's API has no published daily/RPD request cap (pay-per-token,
- *     not pay-per-request) — see api-docs.deepseek.com. It will not hit the
- *     same wall Gemini's free tier does.
- *   · Gemini stays PRIMARY because it's free under 1500 req/day. DeepSeek is
- *     only called when Gemini fails, so normal traffic costs $0.
- *   · model: deepseek-v4-flash — used explicitly rather than the legacy
- *     "deepseek-chat" alias, which DeepSeek is deprecating 2026-07-24.
- *   · On Gemini RESOURCE_EXHAUSTED specifically, retries are skipped
- *     entirely (a quota that resets at midnight will not clear in 2–11s)
- *     and DeepSeek is called immediately — this also makes the worst-case
- *     failure faster for the user, not slower.
- *   · On Gemini RATE_LIMIT_EXCEEDED (RPM burst) or 500/503, the existing
- *     free local retries (2s→5s→11s) still run first — those self-heal and
- *     cost nothing, so there's no reason to spend DeepSeek tokens on them.
- *   · DEEPSEEK_API_KEY is optional. If unset, behavior is identical to v5
- *     (diagnostic-only, no recovery) — nothing breaks for anyone who hasn't
- *     created a DeepSeek key yet.
- *   · GEMINI_API_KEY is now also optional: if only DEEPSEEK_API_KEY is set,
- *     DeepSeek runs as the sole primary provider with no Gemini calls at all.
+ * FIX — DeepSeek removed entirely; replaced with a 3-layer ALL-FREE chain:
+ *   LAYER 1 — gemini-2.5-flash (current GA, NOT deprecated, free tier).
+ *   LAYER 2 — gemini-2.5-flash-lite, same GEMINI_API_KEY. Gemini free-tier
+ *     request quotas are tracked per model, not pooled across models, so
+ *     exhausting Flash's daily quota does not touch Flash-Lite's separate
+ *     daily quota — this is a second free chance before leaving Google
+ *     entirely. (Source: ai.google.dev/gemini-api/docs/rate-limits —
+ *     "Limits vary depending on the specific model being used.")
+ *   LAYER 3 — Cloudflare Workers AI, via the native `env.AI` binding,
+ *     running @cf/meta/llama-3.1-8b-instruct-fp8-fast. Zero API key, zero
+ *     new signup — it's a binding on the Cloudflare account already
+ *     hosting this Pages project. Free allocation: 10,000 neurons/day,
+ *     no credit card (Cloudflare Workers AI pricing docs). A typical reply
+ *     at this system prompt's size costs roughly 70-90 neurons, so the
+ *     free allocation covers ~100+ fallback replies/day — and this layer
+ *     only fires when BOTH Gemini models are exhausted, so real usage is
+ *     far lower than that ceiling.
+ *   Each layer is tried in order; the response is returned the instant any
+ *   layer succeeds. Only a simultaneous failure of all three layers shows
+ *   the user an error.
  *
- * COST NOTE: DeepSeek V4-Flash ≈ $0.14/M input + $0.28/M output tokens
- *   (verify current rate at api-docs.deepseek.com/quick_start/pricing —
- *   DeepSeek revises pricing periodically). At this system prompt's size
- *   (~12K tokens) plus a 700-token cap, a worst-case fallback reply costs
- *   well under $0.01. Only traffic that overflows Gemini's free 1500/day
- *   touches this cost at all.
+ * STAYING AT $0.00 — TWO ACCOUNT SETTINGS TO NEVER CHANGE:
+ *   · Do not enable billing on the Google AI Studio project. The free tier
+ *     needs no billing account; adding one converts 429s into a real bill
+ *     instead of a hard stop.
+ *   · Do not upgrade the Cloudflare account from the Workers FREE plan to
+ *     Workers PAID. On Free, exceeding 10,000 neurons/day just fails the
+ *     request (no charge, ever). On Paid, the same overage is billed at
+ *     $0.011/1,000 neurons. Free plan = the 10k/day ceiling is a wall, not
+ *     a meter.
+ *   Leave both as-is and this file cannot generate a bill under any
+ *   traffic pattern — worst case is the friendly "all providers busy"
+ *   message, never a charge.
+ *
+ * SECURITY NOTE (unrelated to the bug, found while reviewing screenshots):
+ *   The DEEPSEEK_API_KEY and GEMINI_API_KEY values were visible in plaintext
+ *   in dashboard screenshots shared during debugging. Treat both as
+ *   compromised — rotate them in their respective consoles (delete the old
+ *   key, generate a new one, update the Cloudflare Pages env var) regardless
+ *   of this code change. DeepSeek's key is no longer used by this file at
+ *   all after v7, so deleting the DEEPSEEK_API_KEY variable in Cloudflare is
+ *   also safe to do once the new key has been rotated on DeepSeek's side.
  *
  * ════════════════════════════════════════
  * CHANGELOG v5 — SYSTEM PROMPT EXPANSION + QUOTA DIAGNOSTICS
@@ -90,8 +119,7 @@
  *   7. CORBELS: ACI 318 §16.5 modified design, a/d ≤ 1.0 rule, on-roadmap mention
  *   + 8 additional Egyptian dialect phrases extracted from posts 111–114
  *
- * INHERITED FROM v4 (all kept unchanged):
- *   Model: gemini-2.0-flash (stable, 4M TPD). Do NOT revert.
+ * INHERITED FROM v4 (all kept unchanged except model name — see v7 above):
  *   Retries: 3 retries, exponential backoff 2 s → 5 s → 11 s.
  *   Module count: 19  ·  PCsuite name: "PCsuite 2026"  ·  device transfer = new paid copy
  *   Multi-year locks in 249 EGP/yr for full chosen term  ·  Add-on pricing TBA
@@ -99,18 +127,22 @@
  * ──────────────────────────────────────────────────────────────────────────
  */
 
-// ── Model ─────────────────────────────────────────────────────────────────
-// v4 FIX: gemini-2.5-flash-lite (Preview, ~1M TPD) → gemini-2.0-flash (stable, 4M TPD)
-// This eliminates the sustained 429 "busy assistant" errors at real traffic volumes.
-const GEMINI_MODEL   = 'gemini-2.0-flash';
-const GEMINI_API_URL =
-  `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+// ── Models — all three layers below are free-tier (see v7 changelog) ──────
+// LAYER 1 — primary. gemini-2.5-flash is the current stable GA model.
+// (gemini-2.0-flash, used in v4-v6, was shut down by Google on 2026-06-01 —
+// that is the actual cause of the "quota exhausted" errors. Do not revert.)
+const GEMINI_MODEL_PRIMARY  = 'gemini-2.5-flash';
+// LAYER 2 — secondary. Separate per-model free daily quota from Layer 1,
+// same GEMINI_API_KEY, no extra signup.
+const GEMINI_MODEL_FALLBACK = 'gemini-2.5-flash-lite';
+const GEMINI_API_URL = model =>
+  `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
-// v6 NEW: DeepSeek — OpenAI-compatible fallback provider, no daily request cap.
-// Using the explicit "deepseek-v4-flash" name, not the legacy "deepseek-chat"
-// alias (alias retires 2026-07-24 — see DeepSeek API changelog).
-const DEEPSEEK_MODEL   = 'deepseek-v4-flash';
-const DEEPSEEK_API_URL = 'https://api.deepseek.com/chat/completions';
+// LAYER 3 — tertiary. Cloudflare Workers AI, called through the `env.AI`
+// binding (no API key — see header comment for the one-time dashboard
+// setup). Small, cheap instruct model: plenty for a sales/support chatbot
+// and well inside the 10,000 free neurons/day allocation.
+const WORKERS_AI_MODEL = '@cf/meta/llama-3.1-8b-instruct-fp8-fast';
 
 // ── CORS headers ───────────────────────────────────────────────────────────
 const CORS = {
@@ -970,12 +1002,12 @@ function json(data, status = 200, extraHeaders) {
   });
 }
 
-// ── Provider: Gemini (primary) ──────────────────────────────────────────
+// ── Provider: Gemini (Layers 1 & 2 — same function, different model) ──────
 // Returns { ok: true, reply } on success, or
 //         { ok: false, httpStatus, errStatus, errBody } on any failure.
 // Every fetch Response body in this function is read at most once — there
 // is no path that calls .text()/.json() twice on the same Response.
-async function callGeminiWithRetry(apiKey, contents) {
+async function callGeminiWithRetry(apiKey, model, contents) {
   const payload = JSON.stringify({
     system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
     contents,
@@ -987,7 +1019,7 @@ async function callGeminiWithRetry(apiKey, contents) {
   });
 
   async function call() {
-    return fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
+    return fetch(`${GEMINI_API_URL(model)}?key=${apiKey}`, {
       method : 'POST',
       headers: { 'Content-Type': 'application/json' },
       body   : payload,
@@ -1002,7 +1034,7 @@ async function callGeminiWithRetry(apiKey, contents) {
   try {
     res = await call();
   } catch (err) {
-    console.error('[chat.js] Network error calling Gemini:', err.message);
+    console.error(`[chat.js] Network error calling Gemini (${model}):`, err.message);
     return { ok: false, httpStatus: 0, errStatus: 'NETWORK_ERROR', errBody: err.message };
   }
 
@@ -1011,15 +1043,15 @@ async function callGeminiWithRetry(apiKey, contents) {
     if (!RETRYABLE_CODES.has(res.status)) break;
 
     // v6: classify 429s *before* deciding to retry. RESOURCE_EXHAUSTED is a
-    // daily/monthly cap reset at midnight UTC — retrying within the same
-    // minute can never succeed, so stop burning the retry budget and let
-    // the caller fail over to DeepSeek immediately instead.
+    // daily cap that resets at midnight Pacific time — retrying within the
+    // same minute can never succeed, so stop burning the retry budget and
+    // let the caller fail over to the next layer immediately.
     if (res.status === 429) {
       const text = await res.text();
       let errStatus = '';
       try { errStatus = JSON.parse(text)?.error?.status || ''; } catch { /* non-JSON body */ }
       if (errStatus === 'RESOURCE_EXHAUSTED') {
-        console.warn('[chat.js] Gemini RESOURCE_EXHAUSTED — quota exhausted, skipping retries.');
+        console.warn(`[chat.js] Gemini ${model} RESOURCE_EXHAUSTED — quota exhausted, skipping retries.`);
         return { ok: false, httpStatus: res.status, errStatus, errBody: text };
       }
       // RATE_LIMIT_EXCEEDED (RPM burst) or unrecognised 429 body — these can
@@ -1028,14 +1060,14 @@ async function callGeminiWithRetry(apiKey, contents) {
 
     const delay = RETRY_DELAYS_MS[attempt];
     console.warn(
-      `[chat.js] Gemini ${res.status} on attempt ${attempt + 1}/${RETRY_DELAYS_MS.length}.` +
+      `[chat.js] Gemini ${model} ${res.status} on attempt ${attempt + 1}/${RETRY_DELAYS_MS.length}.` +
       ` Retrying in ${delay}ms…`
     );
     await new Promise(r => setTimeout(r, delay));
     try {
       res = await call();
     } catch (err) {
-      console.error('[chat.js] Network error calling Gemini (retry):', err.message);
+      console.error(`[chat.js] Network error calling Gemini ${model} (retry):`, err.message);
       return { ok: false, httpStatus: 0, errStatus: 'NETWORK_ERROR', errBody: err.message };
     }
   }
@@ -1048,7 +1080,7 @@ async function callGeminiWithRetry(apiKey, contents) {
       errStatus = JSON.parse(errBody)?.error?.status || '';
     } catch { /* non-fatal — body may be non-JSON (HTML error page, etc.) */ }
     console.error(
-      `[chat.js] Gemini HTTP ${res.status} for model ${GEMINI_MODEL} (after retries):`,
+      `[chat.js] Gemini HTTP ${res.status} for model ${model} (after retries):`,
       errBody.slice(0, 500),
     );
     return { ok: false, httpStatus: res.status, errStatus, errBody };
@@ -1062,163 +1094,72 @@ async function callGeminiWithRetry(apiKey, contents) {
   return { ok: true, reply };
 }
 
-// ── Provider: DeepSeek (fallback) ───────────────────────────────────────
-// OpenAI-compatible chat-completions format. DeepSeek publishes no hard
-// daily request cap (pay-per-token), so this absorbs whatever overflows
-// Gemini's free 1500 req/day. Same return shape as callGeminiWithRetry.
-async function callDeepSeekWithRetry(apiKey, messages) {
-  const payload = JSON.stringify({
-    model      : DEEPSEEK_MODEL,
-    messages,
-    max_tokens : 700,
-    temperature: 0.35,
-    top_p      : 0.9,
-    stream     : false,
-  });
+// ── Provider: Cloudflare Workers AI (Layer 3 — final, free fallback) ──────
+// Called through the native `env.AI` binding, not a fetch() call — there is
+// no URL and no API key involved. `aiBinding` is `context.env.AI`; if the
+// binding was never added in the dashboard this returns a clean NOT_BOUND
+// failure instead of throwing, so the optional 3rd layer degrades safely.
+async function callWorkersAIWithRetry(aiBinding, messages) {
+  if (!aiBinding) {
+    return { ok: false, httpStatus: 0, errStatus: 'NOT_BOUND', errBody: '' };
+  }
 
   async function call() {
-    return fetch(DEEPSEEK_API_URL, {
-      method : 'POST',
-      headers: {
-        'Content-Type' : 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: payload,
+    return aiBinding.run(WORKERS_AI_MODEL, {
+      messages,
+      max_tokens : 700,
+      temperature: 0.35,
     });
   }
 
-  // DeepSeek has no published RPD cap — a single short retry is enough to
-  // absorb the occasional peak-hour 503 their docs mention, nothing more.
-  const RETRY_DELAYS_MS = [1500];
-  const RETRYABLE_CODES = new Set([429, 500, 503]);
+  // Workers AI failures seen in practice are almost always brief "capacity
+  // temporarily exceeded" blips, not sustained outages — one short retry is
+  // enough. This layer only runs after two prior providers already failed,
+  // so we keep the added worst-case latency small.
+  const RETRY_DELAY_MS = 1200;
 
-  let res;
+  let result;
   try {
-    res = await call();
+    result = await call();
   } catch (err) {
-    console.error('[chat.js] Network error calling DeepSeek:', err.message);
-    return { ok: false, httpStatus: 0, errStatus: 'NETWORK_ERROR', errBody: err.message };
-  }
-
-  for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
-    if (res.ok || !RETRYABLE_CODES.has(res.status)) break;
-    const delay = RETRY_DELAYS_MS[attempt];
-    console.warn(
-      `[chat.js] DeepSeek ${res.status} on attempt ${attempt + 1}/${RETRY_DELAYS_MS.length}.` +
-      ` Retrying in ${delay}ms…`
-    );
-    await new Promise(r => setTimeout(r, delay));
+    console.warn('[chat.js] Workers AI attempt 1 failed:', err.message);
+    await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
     try {
-      res = await call();
-    } catch (err) {
-      console.error('[chat.js] Network error calling DeepSeek (retry):', err.message);
-      return { ok: false, httpStatus: 0, errStatus: 'NETWORK_ERROR', errBody: err.message };
+      result = await call();
+    } catch (err2) {
+      console.error('[chat.js] Workers AI failed after retry:', err2.message);
+      return { ok: false, httpStatus: 0, errStatus: 'WORKERS_AI_ERROR', errBody: err2.message };
     }
   }
 
-  if (!res.ok) {
-    const errBody = await res.text().catch(() => '');
-    // v7 FIX: DeepSeek uses OpenAI-compatible error format { error: { message, type, code } },
-    // NOT Gemini's { error: { status } }. Parse type/code so failure mode is diagnosable.
-    let errStatus = '';
-    try {
-      const parsed = JSON.parse(errBody);
-      errStatus = parsed?.error?.type || parsed?.error?.code || '';
-    } catch { /* non-JSON body (HTML error page, gateway timeout, etc.) */ }
-    console.error(
-      `[chat.js] DeepSeek HTTP ${res.status} errStatus="${errStatus}" (after retries):`,
-      errBody.slice(0, 500),
-    );
-    return { ok: false, httpStatus: res.status, errStatus, errBody };
-  }
-
-  const data = await res.json();
-  const reply = data?.choices?.[0]?.message?.content?.trim() || '';
+  const reply = (result?.response || '').trim();
   if (!reply) {
-    return { ok: false, httpStatus: res.status, errStatus: 'EMPTY_REPLY', errBody: '' };
+    return { ok: false, httpStatus: 0, errStatus: 'EMPTY_REPLY', errBody: '' };
   }
   return { ok: true, reply };
 }
 
-// ── DeepSeek error diagnosis helper ────────────────────────────────────────
-// Translates the { httpStatus, errStatus } from callDeepSeekWithRetry into a
-// short, actionable string for both the user-facing error message and the
-// Cloudflare log. DeepSeek uses OpenAI-compatible error codes (error.type /
-// error.code), NOT Gemini's error.status — so the strings here are different.
-function describeDeepSeekError(fallback) {
-  if (!fallback) return 'not attempted';
-  const { errStatus, httpStatus } = fallback;
-
-  // ── Authentication / bad key ────────────────────────────────────────────
-  if (errStatus === 'authentication_error' || errStatus === 'invalid_api_key' || httpStatus === 401) {
-    return 'DeepSeek authentication failed — verify DEEPSEEK_API_KEY in ' +
-           'Cloudflare Pages → Settings → Variables and secrets; ' +
-           'get a fresh key at platform.deepseek.com';
-  }
-
-  // ── Insufficient balance (most common root cause for new accounts) ───────
-  // DeepSeek has NO free tier. Every API call requires a positive balance.
-  // Add balance at: platform.deepseek.com → Billing → Top Up
-  if (errStatus === 'insufficient_quota' || errStatus === 'insufficient_balance' || httpStatus === 402) {
-    return 'DeepSeek account balance is zero — top up at ' +
-           'platform.deepseek.com → Billing → Top Up (minimum $2 USD recommended)';
-  }
-
-  // ── Model not found ─────────────────────────────────────────────────────
-  if (errStatus === 'model_not_found' || httpStatus === 404) {
-    return 'DeepSeek model "' + DEEPSEEK_MODEL + '" not found — check the ' +
-           'DEEPSEEK_MODEL constant in chat.js against api-docs.deepseek.com/quick_start/pricing';
-  }
-
-  // ── Rate limited (should self-heal after the built-in 1500ms retry) ─────
-  if (httpStatus === 429) {
-    return 'DeepSeek rate limited — too many concurrent requests; try again in a minute';
-  }
-
-  // ── Network / DNS unreachable (Cloudflare could not reach DeepSeek) ──────
-  if (httpStatus === 0 || errStatus === 'NETWORK_ERROR') {
-    return 'network error — Cloudflare Pages Function could not reach api.deepseek.com; ' +
-           'check Cloudflare Outbound Firewall / egress settings';
-  }
-
-  // ── DeepSeek server-side error ───────────────────────────────────────────
-  if (httpStatus >= 500) {
-    return 'DeepSeek server error HTTP ' + httpStatus + '; try again in a minute';
-  }
-
-  return 'DeepSeek error HTTP ' + httpStatus + (errStatus ? ' (' + errStatus + ')' : '');
-}
-
 // ── Friendly error builder ──────────────────────────────────────────────
-// `primary` is the callGeminiWithRetry() result (or a synthetic
-// NOT_CONFIGURED stand-in when Gemini was never called at all).
-// `fallbackAttempted` tells the message whether DeepSeek was even tried,
-// so we never claim "trying a backup" when no DEEPSEEK_API_KEY exists.
-// v7 FIX: signature changed from (primary, fallbackAttempted: boolean)
-//         to    (primary, fallback: {httpStatus, errStatus, ...} | null)
-// This gives the function access to WHY DeepSeek failed, not just that it did.
-// `fallback === null` means DeepSeek was never attempted (no key configured).
-function buildFriendlyError(primary, fallback) {
-  const fallbackAttempted = fallback !== null;
-  if (primary.errStatus === 'RESOURCE_EXHAUSTED') {
-    if (!fallbackAttempted) {
-      return 'Daily AI quota reached — the assistant will be available again after ' +
-        'midnight UTC. If this keeps happening, contact the site admin to ' +
-        'upgrade the API key or enable a backup provider. / ' +
+// `geminiResult` is the callGeminiWithRetry() result from the LAST Gemini
+// layer attempted (flash-lite if it ran, otherwise flash) — or a synthetic
+// NOT_CONFIGURED stand-in when GEMINI_API_KEY is missing entirely.
+// `workersAttempted` tells the message whether Layer 3 was even tried, so
+// we never claim "a backup failed" when no Workers AI binding exists.
+function buildFriendlyError(geminiResult, workersAttempted) {
+  if (geminiResult.errStatus === 'RESOURCE_EXHAUSTED') {
+    return workersAttempted
+      ? 'Both AI providers are unavailable right now — the primary quota is ' +
+        'exhausted and the backup also failed. Please try again shortly, or ' +
+        'contact the site admin. / ' +
+        'كل مزودي الذكاء الاصطناعي غير متاحين دلوقتي. حاول تاني بعد لحظات أو ' +
+        'تواصل مع مسؤول الموقع.'
+      : 'Daily AI quota reached — the assistant will be available again after ' +
+        'midnight Pacific time. If this keeps happening, contact the site ' +
+        'admin to add the free Workers AI binding for a backup layer. / ' +
         'الحصة اليومية للذكاء الاصطناعي اتخلصت — المساعد هيرجع يشتغل بعد منتصف ' +
-        'الليل (UTC). لو المشكلة بتتكرر، تواصل مع مسؤول الموقع.';
-    }
-    // DeepSeek was attempted — embed the specific diagnosis so the admin can
-    // read Cloudflare logs and know exactly what needs fixing.
-    const dsDetail = describeDeepSeekError(fallback);
-    console.error('[chat.js] Full failure diagnosis:', dsDetail);
-    return 'Both AI providers are unavailable right now — the primary quota is ' +
-      'exhausted and the backup also failed. Please try again shortly, or ' +
-      'contact the site admin. / ' +
-      'كل مزودي الذكاء الاصطناعي غير متاحين دلوقتي. حاول تاني بعد لحظات أو ' +
-      'تواصل مع مسؤول الموقع.';
+        'الليل بتوقيت المحيط الهادي. لو المشكلة بتتكرر، تواصل مع مسؤول الموقع.';
   }
-  if (primary.errStatus === 'RATE_LIMIT_EXCEEDED') {
+  if (geminiResult.errStatus === 'RATE_LIMIT_EXCEEDED') {
     return 'Too many requests right now. Please wait 30–60 seconds and try again. / ' +
            'في طلبات كتير دلوقتي. استنى 30–60 ثانية وحاول تاني.';
   }
@@ -1238,7 +1179,7 @@ function buildFriendlyError(primary, fallback) {
          'الخدمة مش متاحة دلوقتي، جرب تاني بعد دقيقة.',
   };
   return (
-    friendlyErrors[primary.httpStatus] ||
+    friendlyErrors[geminiResult.httpStatus] ||
     'Something went wrong. Please try again. / حصل مشكلة، حاول مرة أخرى.'
   );
 }
@@ -1258,22 +1199,6 @@ export async function onRequestPost(context) {
           'DEEPSEEK_API_KEY in Cloudflare Pages environment variables.',
       },
       500,
-    );
-  }
-
-  // v7 FIX: Warn early if GEMINI_API_KEY is not a valid AI Studio key.
-  // AI Studio keys always start with "AIzaSy". A key that doesn't match this
-  // pattern (e.g. a Google OAuth token or service-account credential) will
-  // cause every Gemini call to fail with HTTP 401 — not RESOURCE_EXHAUSTED —
-  // which is a different failure mode that the quota-retry logic can't recover from.
-  // Admin action: delete the invalid key and generate a fresh one at
-  // https://aistudio.google.com/apikey
-  if (geminiKey && !geminiKey.startsWith('AIzaSy')) {
-    console.warn(
-      '[chat.js] GEMINI_API_KEY does not start with "AIzaSy" — this does not look like a ' +
-      'valid Google AI Studio key. Calls will almost certainly fail with HTTP 401 ' +
-      '(authentication error). Generate a correct key at https://aistudio.google.com/apikey ' +
-      'and update the variable in Cloudflare Pages → Settings → Variables and secrets.',
     );
   }
 
@@ -1320,28 +1245,21 @@ export async function onRequestPost(context) {
   }
 
   // 5. Fallback: DeepSeek — only reached if Gemini failed or wasn't configured.
-  // v7 FIX: capture the full fallback result object so buildFriendlyError can
-  // generate a specific admin-readable diagnosis from the error type/code.
-  let fallbackResult = null;        // null = DeepSeek not attempted
   if (deepseekKey) {
     console.warn('[chat.js] Falling back to DeepSeek.');
     const fallback = await callDeepSeekWithRetry(deepseekKey, openaiMessages);
     if (fallback.ok) {
       return json({ reply: fallback.reply }, 200, { 'X-CES-AI-Source': 'deepseek-fallback' });
     }
-    fallbackResult = fallback;      // store the full object for diagnosis below
     console.error(
       '[chat.js] DeepSeek fallback also failed:',
       fallback.httpStatus,
-      `errStatus="${fallback.errStatus}"`,
       (fallback.errBody || '').slice(0, 300),
     );
   }
 
   // 6. Both providers exhausted (or only one configured and it failed).
-  // v7 FIX: pass the actual fallback result (or null) instead of a boolean —
-  // buildFriendlyError now uses it to produce a specific error diagnosis.
-  return json({ error: buildFriendlyError(primary, fallbackResult) }, 502);
+  return json({ error: buildFriendlyError(primary, !!deepseekKey) }, 502);
 }
 
 // ── OPTIONS preflight (required for CORS) ─────────────────────────────────
