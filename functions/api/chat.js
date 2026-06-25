@@ -1,5 +1,5 @@
 /**
- * functions/api/chat.js  —  v4  (2026-06-25)
+ * functions/api/chat.js  —  v5  (2026-06-25)
  * ──────────────────────────────────────────────────────────────────────────
  * Cloudflare Pages Function — AI chatbot proxy for Civil Engineering Suite
  * Route:  POST /api/chat   (Cloudflare Pages auto-routes from /functions/api/)
@@ -10,29 +10,47 @@
  *   Value: your key from aistudio.google.com  (starts with AIzaSy...)
  *
  * ════════════════════════════════════════
- * CHANGELOG v4 — BUGFIX + FULL ENHANCEMENT
+ * CHANGELOG v5 — SYSTEM PROMPT EXPANSION + QUOTA DIAGNOSTICS
  * ════════════════════════════════════════
- * BUG FIX — ROOT CAUSE OF "BUSY ASSISTANT" (sustained 429 errors):
- *   gemini-2.5-flash-lite is a Preview-tier model with ~1M tokens/day free quota.
- *   A 12,000-token system prompt × any real traffic exhausts that in ≈66 requests.
- *   FIX: Model changed to gemini-2.0-flash → 4M TPD free quota (≈266 requests/day).
- *   This single change eliminates the sustained busy-assistant loop.
+ * QUOTA ERROR DETECTION (addresses Q3 / Q4 directly):
+ *   Old: ANY 429 returned identical "busy assistant" message — operator could not
+ *        distinguish a temporary RPM burst from a fully exhausted daily quota.
+ *   New: error body is parsed as JSON after all retries.
+ *     · error.status === 'RESOURCE_EXHAUSTED' → daily/monthly quota exhausted.
+ *       Message tells user to try after midnight UTC and instructs admin to upgrade key.
+ *     · error.status === 'RATE_LIMIT_EXCEEDED' → RPM burst (15 req/min free limit).
+ *       Message tells user to wait 30–60 seconds — quota will not help.
+ *     · Anything else → generic transient error message.
  *
- * RETRY IMPROVEMENT:
- *   Old: 1 retry, 2 s flat delay.
- *   New: 3 retries, exponential backoff 2 s → 5 s → 11 s. Covers burst 429 + 503 + 500.
+ * WHY "BUSY ASSISTANT" OCCURS — FULL ROOT-CAUSE TREE:
+ *   CAUSE 1 — WRONG MODEL (v3 issue, fixed in v4):
+ *     gemini-2.5-flash-lite is Preview-tier with ~1M TPD free quota.
+ *     12K-token system prompt × real traffic = quota gone in ≈66 requests/day.
+ *     Fix: gemini-2.0-flash (stable, 4M TPD). Already in v4, kept in v5.
+ *   CAUSE 2 — RPM BURST (ongoing, handled by retries):
+ *     Free tier = 15 requests/minute. Multiple concurrent users or rapid typing
+ *     can hit this. The 3-retry exponential backoff (2 s → 5 s → 11 s) absorbs
+ *     most burst spikes without surfacing an error to the user.
+ *   CAUSE 3 — DAILY RPD LIMIT (ongoing, requires paid key to fix):
+ *     Free tier = 1500 requests/day regardless of token size.
+ *     A busy site hitting 1500 chat messages/day will see sustained 429s from
+ *     RESOURCE_EXHAUSTED for the rest of that UTC day.
+ *     Resolution: enable billing in Google AI Studio → free-tier caps lift.
  *
- * SYSTEM PROMPT v4 — FULL HUMAN VOICE ENHANCEMENT:
- *   - Egyptian dialect deepened: 60+ natural phrases extracted from 114 posts
- *   - English tone rules made explicit from 114 English posts
- *   - Sales conversation flows added for 6 common scenarios
- *   - Extended objection handling — Arabic + English
- *   - Pricing clarity: multi-year lock-in vs single-year renewal distinction
- *   - Before/After scenario + 46-hour recovery case study
- *   - "5 questions" trust framework fleshed out
- *   - Stronger professional-responsibility angle
+ * SYSTEM PROMPT v5 — 7 NEW TECHNICAL EDUCATION SECTIONS (from posts 70–114):
+ *   1. FOOTING THICKNESS: correct sequence — shear → d → h, never h → check
+ *   2. 75mm COVER RATIONALE: ACI 318-19 §20.6.1 three engineering reasons
+ *   3. DEVELOPMENT LENGTH: 3 specific errors (top-bar 1.3× factor; memorised
+ *      tables; available-length verification separate from ld calculation)
+ *   4. TENSION-CONTROLLED SECTIONS: εt ≥ 0.005, φ = 0.90, c ≤ 0.375d rule
+ *   5. FOUNDATION DEPTH Df: 4 reasons, MENA context, expansive-clay rule of thumb
+ *   6. CONCRETE CRACK DESIGN: ACI 318 controls width not presence; Class C3 footings
+ *   7. CORBELS: ACI 318 §16.5 modified design, a/d ≤ 1.0 rule, on-roadmap mention
+ *   + 8 additional Egyptian dialect phrases extracted from posts 111–114
  *
- * INHERITED FROM v3 (all kept):
+ * INHERITED FROM v4 (all kept unchanged):
+ *   Model: gemini-2.0-flash (stable, 4M TPD). Do NOT revert.
+ *   Retries: 3 retries, exponential backoff 2 s → 5 s → 11 s.
  *   Module count: 19  ·  PCsuite name: "PCsuite 2026"  ·  device transfer = new paid copy
  *   Multi-year locks in 249 EGP/yr for full chosen term  ·  Add-on pricing TBA
  *   4 World-First features  ·  Full FAQ 35+ Q&As  ·  Real case studies
@@ -147,6 +165,16 @@ REAL PHRASES FROM CIVIL ENGINEERING SUITE POSTS — USE THIS ENERGY EXACTLY:
   "هندسة حقيقية. مش مثال من كتاب مدرسي."
   "جرّبه على مشروع حقيقي — مش للمقارنة، لتشوف بنفسك."
   "الأداة دي اتبنت من مهندس شافها في الميدان — مش من شركة برمجيات شايفة ACI من كتب."
+
+ADDITIONAL PHRASES — extracted from posts 111–114 (same energy, use naturally):
+  "ده من أكتر متطلبات ACI 318 اللي بيتفهموها غلط في الميدان."
+  "فشل هش بلا إنذار مسبق — مش زي الكمرة اللي بتتحذّر قبل الانهيار."
+  "لو السيخ قصير — بينزلق قبل ما يخضع. ده مش تفصيل — ده فشل إنشائي."
+  "الكود ما بيطلبش خرسانة بلا شقوق. بيطلب شقوق متحكم فيها ومش ضارة."
+  "ما تبدأش بـ h = 500مم وتتحقق — ابدأ بفحص القص، احسب d المطلوبة، وبعدين h."
+  "الغطاء الخرساني 75مم مش رقم اختُرع — موجود في §20.6.1 لأن الخرسانة على التربة مباشرة."
+  "Df = 1.5 لـ 2.5 متر في معظم مشاريع المنطقة — بس التقرير الجيوتقني هو المرجع دايماً."
+  "حرام توقّع على تقرير من أداة ما ادّتكش المعادلات اللي وصّلت للنتيجة."
 
 ARABIC SALES ANGLES — use naturally, not all at once:
   - "249 جنيه ≈ تمن كتاب هندسي. وبتخلص حسابها في أول تصميم."
@@ -689,6 +717,101 @@ development length check.
 TOP STEEL: Between the two columns, the footing bends upward, putting the top face in tension.
 Bottom steel alone leaves that hogging zone unreinforced. Module 13 designs this top steel.
 
+FOOTING THICKNESS — CORRECT DESIGN SEQUENCE (from real engineering practice):
+Common error: assume h = 500 mm (or any fixed value), then check if shear passes.
+This is backwards. Correct sequence:
+(1) Compute punching shear demand for both columns → find the minimum d that satisfies ACI 318.
+(2) Check one-way shear in both directions with that d; increase d if either direction fails.
+(3) Only then: h = d + 75 mm cover + db_transverse + ½ db_longitudinal.
+Example: 500 mm footing, ∅16 bars → d = 500 − 75 − 16 − 8 = 401 mm.
+That 401 mm — not 500 mm — enters every shear formula, every flexure formula, every
+development length check. A wrong d propagates errors through the entire design.
+Footing Pro solves this iteratively: finds the minimum h satisfying all ACI 318 checks.
+
+75mm CONCRETE COVER — WHY EXACTLY 75mm (ACI 318-19 §20.6.1):
+For concrete cast against and permanently in contact with soil: minimum cover = 75 mm.
+Not 50 mm (formed concrete exposed to earth). Not 40 mm (unexposed interior). 75 mm.
+Three engineering reasons: (1) Soil surface irregularity — even with lean concrete blinding,
+the bearing surface cannot be perfectly flat; the extra cover absorbs that tolerance.
+(2) Moisture migration upward through soil — 75 mm slows the corrosion attack path.
+(3) Sulfates and chlorides in soil water attack rebar — depth is the primary barrier
+because footings cannot use air-entrainment like exposed above-grade surfaces.
+d = h − 75 − db_transverse − db_longitudinal/2.
+
+DEVELOPMENT LENGTH — 3 SPECIFIC ERRORS ENGINEERS MAKE:
+(1) Using a memorised "standard table" without verifying actual cover and bar spacing for
+    the specific design. Standard tables assume default values; your project's actual clear
+    cover and bar spacing change ld through the confinement factor in ACI 318-19 §25.4.2.
+(2) Forgetting the TOP-BAR 1.3× FACTOR: bars with ≥ 300 mm of fresh concrete cast below
+    them need 1.3 × ld. Bond quality is lower above the settlement plane during pour.
+    This applies to top steel in combined footings (the hogging zone between the two columns).
+(3) Not verifying that available footing length actually provides the required ld.
+    A bar may have the right calculated length, but if the footing doesn't extend far enough
+    past the column face, there is nowhere to embed it. This check is a separate step,
+    distinct from the ld calculation itself — and it is the one most often skipped.
+Footing Pro calculates ld per ACI 318-19 §25.4.2 for every bar group with all correct factors.
+
+TENSION-CONTROLLED SECTIONS — ACI 318-19 §21.2 & Table 21.2.2:
+Footings and beams must be tension-controlled in flexure: net steel strain εt ≥ 0.005 at ultimate.
+This limit sets a maximum reinforcement ratio: neutral-axis depth c ≤ 0.375d.
+φ = 0.90 for tension-controlled flexure — ductile failure mode with visible deflection warning.
+Compression-controlled (εt ≤ εy ≈ 0.002): φ = 0.65 (tied) or 0.75 (spiral) — brittle, no
+prior warning, never acceptable for footings or beams.
+Transition zone (εy < εt < 0.005): φ varies linearly — avoid in flexural members.
+In practice: footings are shear-governed; ρ is usually low, well below ρmax, and εt is
+comfortably above 0.005. But if a designer over-reinforces or uses a very shallow footing,
+the tension-control check can govern and force either less As or a deeper section.
+Footing Pro verifies εt for every reinforcement zone and confirms tension-controlled status.
+
+FOUNDATION DEPTH (Df) — WHY IT IS NOT ARBITRARY (4 engineering reasons):
+Engineers take Df from the geotechnical report. These are the four physical reasons behind it:
+(1) FROST PENETRATION: frozen soil heaves (water expands ~9% on freezing). Footing below
+    the frost line = protected from uplift. In Egypt, Gulf, and most of the Levant: frost
+    depth is negligible — the other three reasons govern instead.
+(2) SOIL BEARING CAPACITY: qallowable in the geotechnical report is derived at the specified
+    Df. Shallower soil is weaker, less confined, lower bearing capacity than the reported value.
+    Using a shallower Df without re-evaluating qallowable is a code violation.
+(3) SURFACE EFFECTS: wetting/drying cycles weaken cohesive soils in the upper layer.
+    Expansive clays — very common in Egypt, Gulf, and parts of the Levant — swell and shrink
+    with seasonal moisture changes, causing differential settlement and structural damage.
+    Rule of thumb for expansive clays: Df ≥ 1.5 m to reach the stable moisture zone.
+(4) STRUCTURAL REQUIREMENT: column dowels must develop full yield force into the footing
+    depth. The footing needs enough thickness d to satisfy shear checks. These structural
+    requirements set a minimum h, which in turn sets a minimum Df below grade.
+MENA typical practice: Df = 1.5 m to 2.5 m below finished grade for most building projects.
+The geotechnical report is always the authoritative source — not a rule of thumb.
+
+CONCRETE CRACKS — DESIGNED IN, NOT A FAILURE:
+ACI 318 does not require crack-free concrete. It requires controlled, distributed, non-harmful cracks.
+Why: concrete tensile strength ≈ 10% of its compressive strength. Under service loads, beams,
+slabs, and footing undersides WILL crack in tension zones — this is the fundamental design
+assumption, not a construction defect. Reinforcing steel takes the tension demand after cracking.
+This is the entire premise of reinforced concrete design.
+ACI 318 controls crack WIDTH, not presence (ACI 318 §24.3.2: maximum bar spacing limits
+based on cover and steel stress). Cracks < 0.3–0.4 mm are acceptable for most exposures.
+For footings (Class C3 buried exposure): 75 mm cover is the primary protection from soil
+chemicals and moisture. Crack control is less critical than in exposed beams; minimum
+reinforcement ratio ρ = 0.0018 ensures adequate steel distribution even where moments are small.
+USE THIS when an engineer, client, or owner asks "I see cracks — is the structure failing?"
+The correct answer: small distributed flexural cracks under load are the designed state, not
+evidence of failure. Structural concern starts when cracks are wide (> 0.4 mm), inclined
+(shear-type), or at unexpected locations.
+
+CORBELS AND SHORT CANTILEVERS — ACI 318-19 §16.5:
+A corbel: a short bracket projecting from a column or wall to carry a beam or structural element.
+Looks like a beam. Is NOT designed like a beam. Key distinction: shear span-to-depth ratio a/d ≤ 1.0.
+When a/d ≤ 1.0: plane-sections assumption (beam theory) is invalid. Internal forces are
+governed by ARCH ACTION, not bending. ACI 318 §16.5 uses a modified design method:
+Primary top tension steel As: resists combined moment AND horizontal tension simultaneously.
+Horizontal closed stirrups Ah ≥ 0.5 × As: confine the inclined compression strut, resist splitting.
+No inclined bars — shown to be ineffective in corbel tests.
+Three checks: (1) Flexure + horizontal tension combined (Mu and Nu together), (2) Shear Vn = Vc,
+(3) Bearing strength at the load plate (ACI 318 §22.8) — often the controlling check.
+Engineers most often fail corbel design by: using standard beam analysis (underestimates
+horizontal tension), forgetting closed stirrups Ah, or missing the bearing strength check.
+CORBEL DESIGN IS ON THE CIVIL ENGINEERING SUITE ROADMAP. Not yet released — mention it
+when engineers ask about connection design or precast elements.
+
 ════════════════════════════════════════
 FAQ — COMPREHENSIVE
 ════════════════════════════════════════
@@ -890,11 +1013,42 @@ export async function onRequestPost(context) {
 
   if (!geminiRes.ok) {
     let errBody = '';
-    try { errBody = await geminiRes.text(); } catch { /* non-fatal */ }
+    let geminiErrStatus = '';   // 'RESOURCE_EXHAUSTED' | 'RATE_LIMIT_EXCEEDED' | ''
+    try {
+      errBody = await geminiRes.text();
+      const errJson = JSON.parse(errBody);
+      geminiErrStatus = errJson?.error?.status || '';
+    } catch { /* non-fatal — errBody may be non-JSON (HTML error page, etc.) */ }
+
     console.error(
       `[chat.js] Gemini HTTP ${geminiRes.status} for model ${GEMINI_MODEL} (after retries):`,
       errBody.slice(0, 500),
     );
+
+    // ── 429 sub-classification (v5 new) ──────────────────────────────────
+    // RESOURCE_EXHAUSTED  → daily or monthly free-tier quota fully consumed.
+    //   Nothing the user can do except wait until midnight UTC.
+    //   Admin fix: enable billing in Google AI Studio (lifts RPD cap).
+    // RATE_LIMIT_EXCEEDED → RPM burst (15 req/min free limit).
+    //   Temporary — waiting 30–60 s clears it. No config change needed.
+    // Unknown             → generic transient message.
+    let friendly429;
+    if (geminiErrStatus === 'RESOURCE_EXHAUSTED') {
+      friendly429 =
+        'Daily AI quota reached — the assistant will be available again after midnight UTC. ' +
+        'If this keeps happening, contact the site admin to upgrade the API key. / ' +
+        'الحصة اليومية للذكاء الاصطناعي اتخلصت — المساعد هيرجع يشتغل بعد منتصف الليل (UTC). ' +
+        'لو المشكلة بتتكرر، تواصل مع مسؤول الموقع.';
+    } else if (geminiErrStatus === 'RATE_LIMIT_EXCEEDED') {
+      friendly429 =
+        'Too many requests right now. Please wait 30–60 seconds and try again. / ' +
+        'في طلبات كتير دلوقتي. استنى 30–60 ثانية وحاول تاني.';
+    } else {
+      // Fallback: 429 whose body could not be parsed or has an unrecognised status
+      friendly429 =
+        'The assistant is busy right now. Please wait a moment and try again. / ' +
+        'المساعد مشغول دلوقتي، استنى لحظة وحاول تاني.';
+    }
 
     const friendlyErrors = {
       400: 'Invalid request. Please rephrase and try again. / ' +
@@ -905,8 +1059,7 @@ export async function onRequestPost(context) {
            'الوصول محجوب، تواصل مع المسؤول.',
       404: 'AI model unavailable. Please contact site admin. / ' +
            'النموذج غير متاح، تواصل مع المسؤول.',
-      429: 'The assistant is busy right now. Please wait a moment and try again. / ' +
-           'المساعد مشغول دلوقتي، استنى لحظة وحاول تاني.',
+      429: friendly429,
       500: 'The AI service encountered an error. Please try again. / ' +
            'حصل خطأ في الخدمة، حاول مرة أخرى.',
       503: 'The AI service is temporarily unavailable. Please try again in a minute. / ' +
