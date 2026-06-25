@@ -1,5 +1,5 @@
 /**
- * functions/api/chat.js  —  v6  (2026-06-25)
+ * functions/api/chat.js  —  v7  (2026-06-25)
  * ──────────────────────────────────────────────────────────────────────────
  * Cloudflare Pages Function — AI chatbot proxy for Civil Engineering Suite
  * Route:  POST /api/chat   (Cloudflare Pages auto-routes from /functions/api/)
@@ -1118,8 +1118,18 @@ async function callDeepSeekWithRetry(apiKey, messages) {
 
   if (!res.ok) {
     const errBody = await res.text().catch(() => '');
-    console.error(`[chat.js] DeepSeek HTTP ${res.status} (after retries):`, errBody.slice(0, 500));
-    return { ok: false, httpStatus: res.status, errStatus: '', errBody };
+    // v7 FIX: DeepSeek uses OpenAI-compatible error format { error: { message, type, code } },
+    // NOT Gemini's { error: { status } }. Parse type/code so failure mode is diagnosable.
+    let errStatus = '';
+    try {
+      const parsed = JSON.parse(errBody);
+      errStatus = parsed?.error?.type || parsed?.error?.code || '';
+    } catch { /* non-JSON body (HTML error page, gateway timeout, etc.) */ }
+    console.error(
+      `[chat.js] DeepSeek HTTP ${res.status} errStatus="${errStatus}" (after retries):`,
+      errBody.slice(0, 500),
+    );
+    return { ok: false, httpStatus: res.status, errStatus, errBody };
   }
 
   const data = await res.json();
@@ -1130,24 +1140,83 @@ async function callDeepSeekWithRetry(apiKey, messages) {
   return { ok: true, reply };
 }
 
+// ── DeepSeek error diagnosis helper ────────────────────────────────────────
+// Translates the { httpStatus, errStatus } from callDeepSeekWithRetry into a
+// short, actionable string for both the user-facing error message and the
+// Cloudflare log. DeepSeek uses OpenAI-compatible error codes (error.type /
+// error.code), NOT Gemini's error.status — so the strings here are different.
+function describeDeepSeekError(fallback) {
+  if (!fallback) return 'not attempted';
+  const { errStatus, httpStatus } = fallback;
+
+  // ── Authentication / bad key ────────────────────────────────────────────
+  if (errStatus === 'authentication_error' || errStatus === 'invalid_api_key' || httpStatus === 401) {
+    return 'DeepSeek authentication failed — verify DEEPSEEK_API_KEY in ' +
+           'Cloudflare Pages → Settings → Variables and secrets; ' +
+           'get a fresh key at platform.deepseek.com';
+  }
+
+  // ── Insufficient balance (most common root cause for new accounts) ───────
+  // DeepSeek has NO free tier. Every API call requires a positive balance.
+  // Add balance at: platform.deepseek.com → Billing → Top Up
+  if (errStatus === 'insufficient_quota' || errStatus === 'insufficient_balance' || httpStatus === 402) {
+    return 'DeepSeek account balance is zero — top up at ' +
+           'platform.deepseek.com → Billing → Top Up (minimum $2 USD recommended)';
+  }
+
+  // ── Model not found ─────────────────────────────────────────────────────
+  if (errStatus === 'model_not_found' || httpStatus === 404) {
+    return 'DeepSeek model "' + DEEPSEEK_MODEL + '" not found — check the ' +
+           'DEEPSEEK_MODEL constant in chat.js against api-docs.deepseek.com/quick_start/pricing';
+  }
+
+  // ── Rate limited (should self-heal after the built-in 1500ms retry) ─────
+  if (httpStatus === 429) {
+    return 'DeepSeek rate limited — too many concurrent requests; try again in a minute';
+  }
+
+  // ── Network / DNS unreachable (Cloudflare could not reach DeepSeek) ──────
+  if (httpStatus === 0 || errStatus === 'NETWORK_ERROR') {
+    return 'network error — Cloudflare Pages Function could not reach api.deepseek.com; ' +
+           'check Cloudflare Outbound Firewall / egress settings';
+  }
+
+  // ── DeepSeek server-side error ───────────────────────────────────────────
+  if (httpStatus >= 500) {
+    return 'DeepSeek server error HTTP ' + httpStatus + '; try again in a minute';
+  }
+
+  return 'DeepSeek error HTTP ' + httpStatus + (errStatus ? ' (' + errStatus + ')' : '');
+}
+
 // ── Friendly error builder ──────────────────────────────────────────────
 // `primary` is the callGeminiWithRetry() result (or a synthetic
 // NOT_CONFIGURED stand-in when Gemini was never called at all).
 // `fallbackAttempted` tells the message whether DeepSeek was even tried,
 // so we never claim "trying a backup" when no DEEPSEEK_API_KEY exists.
-function buildFriendlyError(primary, fallbackAttempted) {
+// v7 FIX: signature changed from (primary, fallbackAttempted: boolean)
+//         to    (primary, fallback: {httpStatus, errStatus, ...} | null)
+// This gives the function access to WHY DeepSeek failed, not just that it did.
+// `fallback === null` means DeepSeek was never attempted (no key configured).
+function buildFriendlyError(primary, fallback) {
+  const fallbackAttempted = fallback !== null;
   if (primary.errStatus === 'RESOURCE_EXHAUSTED') {
-    return fallbackAttempted
-      ? 'Both AI providers are unavailable right now — the primary quota is ' +
-        'exhausted and the backup also failed. Please try again shortly, or ' +
-        'contact the site admin. / ' +
-        'كل مزودي الذكاء الاصطناعي غير متاحين دلوقتي. حاول تاني بعد لحظات أو ' +
-        'تواصل مع مسؤول الموقع.'
-      : 'Daily AI quota reached — the assistant will be available again after ' +
+    if (!fallbackAttempted) {
+      return 'Daily AI quota reached — the assistant will be available again after ' +
         'midnight UTC. If this keeps happening, contact the site admin to ' +
         'upgrade the API key or enable a backup provider. / ' +
         'الحصة اليومية للذكاء الاصطناعي اتخلصت — المساعد هيرجع يشتغل بعد منتصف ' +
         'الليل (UTC). لو المشكلة بتتكرر، تواصل مع مسؤول الموقع.';
+    }
+    // DeepSeek was attempted — embed the specific diagnosis so the admin can
+    // read Cloudflare logs and know exactly what needs fixing.
+    const dsDetail = describeDeepSeekError(fallback);
+    console.error('[chat.js] Full failure diagnosis:', dsDetail);
+    return 'Both AI providers are unavailable right now — the primary quota is ' +
+      'exhausted and the backup also failed. Please try again shortly, or ' +
+      'contact the site admin. / ' +
+      'كل مزودي الذكاء الاصطناعي غير متاحين دلوقتي. حاول تاني بعد لحظات أو ' +
+      'تواصل مع مسؤول الموقع.';
   }
   if (primary.errStatus === 'RATE_LIMIT_EXCEEDED') {
     return 'Too many requests right now. Please wait 30–60 seconds and try again. / ' +
@@ -1189,6 +1258,22 @@ export async function onRequestPost(context) {
           'DEEPSEEK_API_KEY in Cloudflare Pages environment variables.',
       },
       500,
+    );
+  }
+
+  // v7 FIX: Warn early if GEMINI_API_KEY is not a valid AI Studio key.
+  // AI Studio keys always start with "AIzaSy". A key that doesn't match this
+  // pattern (e.g. a Google OAuth token or service-account credential) will
+  // cause every Gemini call to fail with HTTP 401 — not RESOURCE_EXHAUSTED —
+  // which is a different failure mode that the quota-retry logic can't recover from.
+  // Admin action: delete the invalid key and generate a fresh one at
+  // https://aistudio.google.com/apikey
+  if (geminiKey && !geminiKey.startsWith('AIzaSy')) {
+    console.warn(
+      '[chat.js] GEMINI_API_KEY does not start with "AIzaSy" — this does not look like a ' +
+      'valid Google AI Studio key. Calls will almost certainly fail with HTTP 401 ' +
+      '(authentication error). Generate a correct key at https://aistudio.google.com/apikey ' +
+      'and update the variable in Cloudflare Pages → Settings → Variables and secrets.',
     );
   }
 
@@ -1235,21 +1320,28 @@ export async function onRequestPost(context) {
   }
 
   // 5. Fallback: DeepSeek — only reached if Gemini failed or wasn't configured.
+  // v7 FIX: capture the full fallback result object so buildFriendlyError can
+  // generate a specific admin-readable diagnosis from the error type/code.
+  let fallbackResult = null;        // null = DeepSeek not attempted
   if (deepseekKey) {
     console.warn('[chat.js] Falling back to DeepSeek.');
     const fallback = await callDeepSeekWithRetry(deepseekKey, openaiMessages);
     if (fallback.ok) {
       return json({ reply: fallback.reply }, 200, { 'X-CES-AI-Source': 'deepseek-fallback' });
     }
+    fallbackResult = fallback;      // store the full object for diagnosis below
     console.error(
       '[chat.js] DeepSeek fallback also failed:',
       fallback.httpStatus,
+      `errStatus="${fallback.errStatus}"`,
       (fallback.errBody || '').slice(0, 300),
     );
   }
 
   // 6. Both providers exhausted (or only one configured and it failed).
-  return json({ error: buildFriendlyError(primary, !!deepseekKey) }, 502);
+  // v7 FIX: pass the actual fallback result (or null) instead of a boolean —
+  // buildFriendlyError now uses it to produce a specific error diagnosis.
+  return json({ error: buildFriendlyError(primary, fallbackResult) }, 502);
 }
 
 // ── OPTIONS preflight (required for CORS) ─────────────────────────────────
