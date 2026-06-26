@@ -788,7 +788,10 @@ const CSP_COMMON = [
   "object-src 'none'",
   "worker-src 'none'",
   "manifest-src 'none'",
-  "media-src 'none'",
+  // [V2-TTS] media-src: 'none' → 'self'
+  // HTMLAudioElement in the chat widget loads audio from /api/tts (same origin).
+  // 'self' permits that. 'none' blocked it, silently preventing proxy TTS playback.
+  "media-src 'self'",
   "style-src 'self' 'unsafe-inline'",
   "font-src 'self'",
   "img-src 'self' data: https://www.google-analytics.com",
