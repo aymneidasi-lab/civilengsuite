@@ -53,7 +53,25 @@
  *        the /payment/* _headers block which governs the checkout flow.
  *
  *
- * 2026-06-24 v26 — Resend OTP: replaced EmailJS with Resend via CF Pages Function (V26-RESEND):
+ * 2026-06-26 v27 — Voice chat microphone unblock (V1-MIC):
+ *
+ *   [V1-MIC] SHARED_SECURITY_HEADERS: microphone=() → microphone=(self)
+ *     ROOT CAUSE: Permissions-Policy: microphone=() is an EMPTY allowlist — it tells
+ *     the browser "no origin on this page may use the microphone, ever." The browser
+ *     enforces this policy header BEFORE JavaScript executes, so window.SpeechRecognition
+ *     fires onerror({error:'not-allowed'}) instantly with no permission prompt appearing.
+ *     Both the bootstrap (function response) and the decoded app HTML inherit this header
+ *     via SHARED_SECURITY_HEADERS spread into every Response returned by this function.
+ *     FIX: microphone=(self) restricts mic access to the same origin only (correct
+ *     principle of least privilege — allows mic on civilengsuite.pages.dev pages only,
+ *     blocks all third-party iframes from mic access). The Web Speech API SpeechRecognition
+ *     can now call recognition.start() and the browser will display the microphone
+ *     permission prompt to the user on first use.
+ *     NOTE: _headers /* block has the identical fix applied in parallel (affects static
+ *     landing pages at /footing-pro/engineers/, /offices/, /students/ which are served
+ *     by Cloudflare Pages static file serving, not by this function).
+ *
+
  *
  *   [V26-RESEND] OTP delivery switched from EmailJS (client-side, key exposed in HTML) to
  *     Resend.com via a Cloudflare Pages Function at /api/send-otp (functions/api/send-otp.js).
@@ -814,7 +832,7 @@ const SHARED_SECURITY_HEADERS = {
   'X-Frame-Options':                   'DENY',
   'Strict-Transport-Security':         'max-age=31536000; includeSubDomains; preload',
   'Referrer-Policy':                   'strict-origin-when-cross-origin',
-  'Permissions-Policy':                'camera=(), microphone=(), geolocation=(), accelerometer=(), gyroscope=(), magnetometer=(), display-capture=(), screen-wake-lock=(), autoplay=(), clipboard-read=()',
+  'Permissions-Policy':                'camera=(), microphone=(self), geolocation=(), accelerometer=(), gyroscope=(), magnetometer=(), display-capture=(), screen-wake-lock=(), autoplay=(), clipboard-read=()',
   'Cross-Origin-Opener-Policy':        'same-origin',
   'X-DNS-Prefetch-Control':            'off',
   'X-Permitted-Cross-Domain-Policies': 'none',

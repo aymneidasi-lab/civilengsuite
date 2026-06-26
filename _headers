@@ -30,6 +30,15 @@
 #      No X-Robots-Tag override — default Allow from robots.txt is correct.
 #      No CSP override — font-src 'self' from /* is satisfied: Google Fonts CDN
 #      removed from these files; self-hosted /fonts/*.woff2 used instead.
+#
+# FIX LOG (2026-06-26): VOICE CHAT MIC UNBLOCK
+# [V1] /* block: microphone=() → microphone=(self)
+#      Allows Web Speech API (SpeechRecognition) on all static/landing pages.
+#      /payment/* block intentionally left as microphone=() — no mic needed there.
+#      NOTE: App pages (footing_pro, pc_suite) are served by functions/[[path]].js
+#      and get their Permissions-Policy from SHARED_SECURITY_HEADERS in that file.
+#      That file ALSO needs microphone=() → microphone=(self) to unblock mic on the
+#      encrypted app pages. See functions/[[path]].js → SHARED_SECURITY_HEADERS.
 
 # [F2] Default cache + security for all static HTML pages
 /*
@@ -42,7 +51,7 @@
   Cross-Origin-Opener-Policy: same-origin
   Cross-Origin-Embedder-Policy: unsafe-none
   Cross-Origin-Resource-Policy: same-origin
-  Permissions-Policy: camera=(), microphone=(), geolocation=(), accelerometer=(), gyroscope=(), magnetometer=(), display-capture=(), screen-wake-lock=(), autoplay=(), clipboard-read=()
+  Permissions-Policy: camera=(), microphone=(self), geolocation=(), accelerometer=(), gyroscope=(), magnetometer=(), display-capture=(), screen-wake-lock=(), autoplay=(), clipboard-read=()
   Cache-Control: public, max-age=600, must-revalidate
 
 # [F1] FIX: Block crawlers from indexing encrypted .enc source files
