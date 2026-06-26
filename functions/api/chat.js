@@ -1,5 +1,5 @@
 /**
- * functions/api/chat.js  —  v11  (2026-06-26)
+ * functions/api/chat.js  —  v12  (2026-06-26)
  * ──────────────────────────────────────────────────────────────────────────
  * Cloudflare Pages Function — AI chatbot proxy for Civil Engineering Suite
  * Route:  POST /api/chat   (Cloudflare Pages auto-routes from /functions/api/)
@@ -12,7 +12,9 @@
  *                                      starts with AIzaSy…)
  *
  *   OPTIONAL — Groq (console.groq.com → API Keys → Create API Key, free, no card):
- *     GROQ_API_KEY            Secret   Groq account 1   (14,400 req/day free)
+ *     GROQ_API_KEY            Secret   Groq account 1   (1,000 req/day free —
+ *                                      corrected in v12, was misstated as
+ *                                      14,400; see CHANGELOG v12, Change 3)
  *     GROQ_API_KEY_1          Secret   Groq account 2
  *     GROQ_API_KEY_2          Secret   Groq account 3
  *     GROQ_API_KEY_3          Secret   Groq account 4
@@ -25,7 +27,7 @@
  *     GROQ_API_KEY_10         Secret   Groq account 11
  *     GROQ_API_KEY_11         Secret   Groq account 12
  *     GROQ_API_KEY_12         Secret   Groq account 13
- *     All 13 keys = 187,200 Groq req/day free.
+ *     All 13 keys = 13,000 Groq req/day free (corrected, see v12).
  *
  *   OPTIONAL — OpenRouter (openrouter.ai → Settings → Keys, free, $0 balance):
  *     OPENROUTER_API_KEY      Secret   OpenRouter account 1   (50 req/day free)
@@ -69,6 +71,99 @@
  *   Gemini alone — you just lose the Workers AI free fallback layer.
  *
  * ════════════════════════════════════════
+ * CHANGELOG v12 — QUOTA SURVIVAL: SYSTEM PROMPT SIZE + WASTED RETRIES
+ * ════════════════════════════════════════
+ * CONTEXT: v11 maximised the NUMBER of free-tier keys (×13 per provider) but
+ *   did nothing about the SIZE of each request or which failures were worth
+ *   retrying. v12 addresses both — the two levers that actually determine
+ *   how far a free-tier quota stretches once you already have multiple keys.
+ *
+ * CHANGE 1 (QUOTA — the big one): Gemini Layers 1/2 were sending the full
+ *   SYSTEM_PROMPT (measured: 51,660 chars, ~13,000 input tokens) on EVERY
+ *   Gemini call — every turn, every one of up to 13 keys, both models, every
+ *   retry. A single 5-message conversation cost ~65,000 system-prompt input
+ *   tokens; a full fallback sweep could resend it 20+ times for one message.
+ *   Free-tier Gemini Flash/Flash-Lite TPM is ~250,000 tokens/minute shared
+ *   per project (ai.google.dev/gemini-api/docs/rate-limits, verified June
+ *   2026) — at 13K tokens/request that's under 20 requests/minute before
+ *   429s start, no matter how many keys are pooled behind it. Context
+ *   caching cannot fix this: gemini-3.5-flash and gemini-3.1-flash-lite are
+ *   preview-tier models and do not support context caching on the free tier
+ *   (every request sends full, uncached context — confirmed June 2026).
+ *   FIX: added GEMINI_FOLLOWUP_PROMPT, a ~1,150-token condensed prompt sent
+ *   on every turn AFTER the first (turns.length > 1); the full SYSTEM_PROMPT
+ *   is now sent only once, on a conversation's opening message. The model's
+ *   own prior replies remain in `contents` history so identity/tone persist.
+ *   callGeminiWithRetry() now takes `systemPrompt` as a parameter instead of
+ *   reading the SYSTEM_PROMPT global directly. Same 5-message conversation:
+ *   ~65,000 → ~17,600 system-prompt tokens, a ~73% reduction.
+ *
+ * CHANGE 2 (QUOTA): Groq and OpenRouter no longer retry on HTTP 429.
+ *   OpenRouter's own docs (openrouter.ai/docs/api/reference/limits) state
+ *   failed attempts still count toward the 50/day free quota — retrying a
+ *   429 there spent a second unit of an already-tiny daily budget for almost
+ *   no chance of success inside the 1.2s retry delay. Groq's free tier (30
+ *   RPM / 6,000 TPM / 1,000 RPD per account) has the same shape: an RPM or
+ *   RPD ceiling does not clear in 1.2 seconds. Both functions now retry only
+ *   on 500/503 (genuine transient server errors); 429 fails over to the next
+ *   key immediately. Gemini's retry logic was already correct on this point
+ *   (it special-cases RESOURCE_EXHAUSTED vs RATE_LIMIT_EXCEEDED) and is
+ *   unchanged.
+ *
+ * CHANGE 3 (ACCURACY — corrects a v10/v11 capacity overestimate): the v11
+ *   capacity comments claimed Groq's llama-3.1-8b-instant gives 14,400
+ *   req/day per account. Multiple independent sources citing Groq's current
+ *   rate-limit docs (console.groq.com/docs/rate-limits, verified June 2026)
+ *   put the actual free-tier figure at 1,000 req/day, 30 RPM, 6,000 TPM per
+ *   account — Groq reduced free-tier limits at some point after the 14,400
+ *   figure was originally sourced. This does not change any code path (the
+ *   per-key loop logic is unaffected either way), but the capacity totals
+ *   below and in the v11 section are corrected so capacity planning isn't
+ *   based on a number that's roughly 14× too high:
+ *     Groq    (13 keys × 1,000 req/day)       :  13,000 req/day  (was stated
+ *                                                  as 187,200 — that number
+ *                                                  was wrong; see Change 3)
+ *   Gemini and OpenRouter per-key figures in v11 were checked against
+ *   current docs and are reasonably accurate; only Groq needed correction.
+ *
+ * UPDATED COMBINED FREE DAILY CAPACITY (all 13 keys active per provider,
+ *   corrected per Change 3 — supersedes the v11 table below):
+ *   Gemini  (13 keys × primary + fallback)  : ~20,000–39,000 req/day
+ *                                              (range reflects free-tier
+ *                                              variance between sources;
+ *                                              verify in AI Studio per key)
+ *   Workers AI (env.AI binding, unchanged)  :    ~100 req/day
+ *   Groq    (13 keys × llama-3.1-8b-instant):  13,000 req/day  (corrected)
+ *   OpenRouter (13 keys × :free model)      :    ~650 req/day
+ *   ──────────────────────────────────────────────────────────
+ *   TOTAL: roughly 34,000–53,000 req/day, $0.00 — still comfortably above
+ *   normal chatbot traffic, but meaningfully less than the ~226,950/day
+ *   figure v11 claimed. Treat any specific number here as an estimate;
+ *   Google/Groq/OpenRouter can and do change free-tier limits without
+ *   notice (Groq's own limits already moved once between when v10/v11 were
+ *   written and this v12 pass). Check each provider's live dashboard for
+ *   the current per-account figure rather than trusting any number in this
+ *   file indefinitely.
+ *
+ * NOT CHANGED in v12 (left as-is; candidates for a future pass if quota
+ *   pressure continues after this fix):
+ *   · History cap is still 10 turns × 2,000 chars (~5,000–6,000 extra input
+ *     tokens on top of the system prompt, on every call). Could be tightened
+ *     (e.g. 6 turns × 1,200 chars) for further savings at the cost of how
+ *     much earlier conversation the model can see.
+ *   · Provider order is still Gemini (all 13 keys × 2 models) → Workers AI →
+ *     Groq → OpenRouter. Worst case for a single message still means up to
+ *     26 Gemini attempts before reaching the cheaper/faster Groq/OpenRouter
+ *     pool. Re-ordering to try fewer Gemini keys first and fail over to Groq
+ *     sooner would reduce both latency and worst-case token burn further,
+ *     at the cost of using Gemini's (generally stronger) output less often.
+ *   · SYSTEM_PROMPT itself (the first-turn version) is unchanged — still
+ *     ~13,000 tokens. It could be trimmed further (the Arabic phrase banks
+ *     and persuasion-angle prose are the largest single blocks) without
+ *     touching GEMINI_FOLLOWUP_PROMPT, if first-message cost still matters
+ *     after this fix.
+ *
+ * ════════════════════════════════════════
  * CHANGELOG v11 — KEY POOL EXPANSION: ×13 GROQ + ×13 OPENROUTER + ×13 GEMINI
  * ════════════════════════════════════════
  * PURPOSE: The project team has 13 members, each with a free account on Groq,
@@ -81,6 +176,9 @@
  *   the existing GROQ_API_KEY). All keys are collected into groqKeys[] and
  *   iterated in order. Blank or missing keys are silently skipped via .filter().
  *   Capacity: 14,400 req/day × 13 keys = 187,200 Groq req/day, $0.
+ *   [CORRECTED in v12 — this 14,400/day figure was wrong; current Groq free
+ *   tier is 1,000 req/day per account, i.e. 13,000 req/day for 13 keys.
+ *   See CHANGELOG v12, Change 3.]
  *
  * CHANGE 2 (AVAILABILITY): OpenRouter key pool expanded from 1 to 13 keys.
  *   New env vars: OPENROUTER_API_KEY_1 through OPENROUTER_API_KEY_12.
@@ -105,7 +203,8 @@
  *   The first successful response is returned immediately.
  *   All helper functions (callGeminiWithRetry, callGroqWithRetry,
  *   callOpenRouterWithRetry, callWorkersAIWithRetry, buildFriendlyError)
- *   are unchanged from v10.
+ *   are unchanged from v10. [v12 note: callGeminiWithRetry, callGroqWithRetry,
+ *   and callOpenRouterWithRetry are no longer unchanged — see CHANGELOG v12.]
  *
  * CLOUDFLARE DASHBOARD SETUP:
  *   Pages → civilengsuite → Settings → Environment variables → + Add variable.
@@ -115,6 +214,9 @@
  *   build. Keys can be added incrementally; any missing key is silently skipped.
  *
  * COMBINED FREE DAILY CAPACITY (all 13 keys active per provider):
+ *   [SUPERSEDED by the corrected table in CHANGELOG v12 — the Groq figure
+ *   below was wrong by roughly 14×. Kept here only as the historical record
+ *   of what v11 originally claimed; use the v12 table for planning.]
  *   Gemini  (13 keys × primary + fallback)  : ~39,000 req/day
  *   Workers AI (env.AI binding, unchanged)  :    ~100 req/day
  *   Groq    (13 keys × llama-3.1-8b-instant): 187,200 req/day
@@ -1225,6 +1327,97 @@ BEHAVIOUR RULES
 • When conversation is genuinely about buying/pricing, end with a clear varied next step —
   don't bolt the same canned CTA onto messages that aren't about buying.`;
 
+// ── Gemini follow-up system prompt — v12 QUOTA FIX ────────────────────────
+// PROBLEM (see CHANGELOG v12 at top of file): SYSTEM_PROMPT above is ~13,000
+// input tokens (measured: 51,660 chars). It was being sent IN FULL on every
+// Gemini call — for every turn of every conversation, for every one of up to
+// 13 keys, for both PRIMARY and FALLBACK models, on every retry. A single
+// 5-message conversation cost ~65,000 system-prompt input tokens before this
+// fix; a worst-case fallback sweep (13 keys × 2 models, each retried) could
+// resend the full 13K-token prompt over 20 times for ONE user message.
+// Free-tier Gemini Flash/Flash-Lite TPM is ~250,000 tokens/minute shared per
+// project (ai.google.dev/gemini-api/docs/rate-limits, verified June 2026) —
+// at 13K tokens/request that ceiling absorbs well under 20 concurrent
+// requests/minute before 429s start, regardless of how many keys are pooled.
+// Context caching is NOT a fix here: Google's preview-tier Flash/Flash-Lite
+// models (gemini-3.5-flash, gemini-3.1-flash-lite) do not support context
+// caching on the free tier — every request sends full, uncached context.
+// FIX: send the full SYSTEM_PROMPT only on a conversation's first turn (no
+// prior history) and switch to this condensed ~1,150-token reminder for every
+// turn after that. The model's own prior replies are still present in
+// `contents` history, so tone/identity persist; this prompt re-states the
+// rules that must never drift (language selection above all) plus compact
+// product/pricing/technical facts, without resending the full phrase banks,
+// FAQ, and education sections the model no longer needs once it has replied
+// once. Net effect on a typical 5-message exchange: ~65,000 system-prompt
+// tokens → ~13,000 + 4×1,150 ≈ 17,600 tokens, a ~73% reduction.
+const GEMINI_FOLLOWUP_PROMPT = `\
+You are continuing an existing conversation as the AI assistant for Civil Engineering Suite
+(civilengsuite.pages.dev), built by Eng. Aymn Asi — a practicing Licensed Structural Engineer.
+The full identity, tone, and product knowledge were already established earlier in this thread
+via your own prior replies (visible in the conversation history below). Stay in that voice.
+This is a condensed reminder, not the full brief — answer naturally from what you already know
+and from the facts below; don't act like context was lost.
+
+LANGUAGE RULE — CRITICAL (re-check every reply, never drift):
+• Arabic message → reply ENTIRELY in Arabic (Egyptian dialect, عامية مصرية). NEVER فصحى.
+• English message → reply ENTIRELY in English. Never mix languages in one reply.
+• Keep technical terms as-is in both languages: ACI 318-19, ECP 203, ASCE 7, EPS 2012, kN, kPa,
+  MPa, qallowable, As, ld, fcu, f'c.
+
+TONE: Knowledgeable engineer texting a colleague — direct, warm, occasionally informal. Match
+the person's energy (short question → short answer). Vary phrasing; never repeat the same
+opener or CTA every message. No emoji-headers, hashtags, "━━━" dividers. Prose over bullets
+unless content is genuinely list-shaped. Egyptian Arabic register: default "حضرتك", mirror
+"إنت" if they use it; favour دلوقتي، يعني، بصراحة، خالص، طب/طيب، مفيش، بقى، علشان، كمان، برضو
+over فصحى equivalents.
+
+CORE PRODUCT FACTS — Civil Engineering Suite / Footing Pro v.2026 (the only live product):
+• Three standalone apps: Rectangular Combined Footing (equal/near-equal loads), Trapezoidal
+  Combined Footing (unequal loads, shifts centroid to the heavier column), Strap Footing
+  (edge column on the property line, rigid strap beam transfers eccentricity moment).
+• 19 connected ACI 318-19 modules — change one input, all 19 recalc instantly. Print-ready
+  output. ~17 min with the tool vs 3.5–4 hrs manual per footing; a 12-footing project recovers
+  roughly 46 hours of engineering time.
+• 4 world-firsts: circular-reference self-weight solver, directional field lock (blocks typing,
+  not the live formula engine), automatic negative-soil-pressure detection with one-click
+  correction, tooltips on disabled/locked fields.
+• Offline-first after activation (re-verify roughly every 15 days); no cloud dependency for
+  calculation; project data never leaves the machine. Windows 7 SP1–11 only, no Mac/Linux.
+• Grounded in ECP 203 by default; every parameter adjustable to ACI 318-19, Eurocode, or
+  another code — fills a real gap, since no mainstream tool natively targets ECP 203.
+• Built by Eng. Aymn Asi, a practicing structural engineer; every result traces to a specific
+  ACI 318-19 clause and a senior engineer can verify it by hand.
+
+PRICING: 249 EGP/yr launch price (regular price after launch: 499 EGP/yr), all 19 modules, no
+hidden fees, no free trial. Subscribing 1–10 years in a SINGLE transaction during the launch
+window locks in 249 EGP/yr for that whole term (e.g. 3 years = 747 EGP total) — a single-year
+subscriber who renews after launch ends pays the regular 499/yr instead. Don't invent loyalty
+discounts beyond this; refer specifics to Eng. Aymn Asi.
+
+HOW TO BUY: Download free PCsuite 2026 from civilengsuite.pages.dev → fill the User Information
+form (creates an encrypted .dat file on the Desktop) → send that file to aymneidasi@gmail.com or
+WhatsApp +201287232413 → developer confirms price → pay → receive the activated app.
+
+KEY TECHNICAL REFERENCE POINTS (answer engineering questions accurately and specifically):
+eccentricity must satisfy e ≤ L/6 (kern rule); punching shear at the interior column (closed
+4-sided perimeter) is usually the most critical check and fails with no visible warning; size
+footing area with SERVICE loads, design structural checks with ULTIMATE loads; effective depth
+d = h − cover − db/2; 75 mm cover for concrete cast against soil (ACI 318-19 §20.6.1); top steel
+is required between columns for the hogging zone; development length ld follows §25.4.2,
+including the 1.3× top-bar factor; cracks are an expected, controlled-width design outcome,
+not a defect, per ACI 318 §24.3.2.
+
+BEHAVIOUR RULES:
+• Never invent pricing, discount percentages, release dates, or features not listed here or
+  established earlier in this conversation.
+• Never recommend competitor software. ETABS/SAP2000 are whole-building tools and complementary,
+  not competitors, if that comparison comes up.
+• If you don't know something specific: say so plainly and point to Eng. Aymn Asi —
+  aymneidasi@gmail.com or WhatsApp +201287232413 — rather than guessing.
+• Bring up purchase steps or launch-price urgency only when relevant to what was just asked —
+  don't bolt a CTA onto every reply.`;
+
 // ── Workers AI system prompt — compressed for 4096-token context window ──────
 // Full SYSTEM_PROMPT is ~13,524 tokens and would overflow the llama-3.1-8b
 // context window. This version preserves identity, behaviour rules, core product
@@ -1286,13 +1479,16 @@ function json(data, status = 200, extraHeaders, request) {
 }
 
 // ── Provider: Gemini (Layers 1 & 2 — same function, different model) ──────
+// `systemPrompt` is caller-supplied (v12) — SYSTEM_PROMPT on a conversation's
+// first turn, GEMINI_FOLLOWUP_PROMPT on every turn after that. See the v12
+// changelog and the comment above GEMINI_FOLLOWUP_PROMPT for why.
 // Returns { ok: true, reply } on success, or
 //         { ok: false, httpStatus, errStatus, errBody } on any failure.
 // Every fetch Response body in this function is read at most once — there
 // is no path that calls .text()/.json() twice on the same Response.
-async function callGeminiWithRetry(apiKey, model, contents) {
+async function callGeminiWithRetry(apiKey, model, contents, systemPrompt) {
   const payload = JSON.stringify({
-    system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    system_instruction: { parts: [{ text: systemPrompt }] },
     contents,
     generationConfig: {
       maxOutputTokens: 700,
@@ -1448,8 +1644,15 @@ async function callGroqWithRetry(apiKey, messages) {
     });
   }
 
+  // v12 QUOTA FIX: do NOT retry on 429. Groq's free tier (verified June 2026,
+  // console.groq.com/docs/rate-limits) is 30 RPM / 6,000 TPM / 1,000 RPD per
+  // account for llama-3.1-8b-instant — far tighter than this file previously
+  // assumed (see CHANGELOG v12). A 429 here is RPM or RPD exhaustion; neither
+  // clears in 1.2 seconds, so retrying only spends a second request against
+  // an already-scarce daily cap for no realistic chance of success. 500/503
+  // are genuine transient server errors and are still worth one retry.
   const RETRY_DELAY_MS  = 1200;
-  const RETRYABLE_CODES = new Set([429, 500, 503]);
+  const RETRYABLE_CODES = new Set([500, 503]);
 
   let res;
   try {
@@ -1517,8 +1720,14 @@ async function callOpenRouterWithRetry(apiKey, messages) {
     });
   }
 
+  // v12 QUOTA FIX: do NOT retry on 429. OpenRouter's free tier is 50 req/day,
+  // 20 RPM per zero-balance account (openrouter.ai/docs/api/reference/limits,
+  // verified June 2026) — and OpenRouter's own docs state failed attempts
+  // still count toward that daily quota. Retrying a 429 here spends a second
+  // unit of a 50/day budget for almost no chance of success within 1.2s.
+  // 500/503 are genuine transient server errors and are still worth one retry.
   const RETRY_DELAY_MS  = 1200;
-  const RETRYABLE_CODES = new Set([429, 500, 503]);
+  const RETRYABLE_CODES = new Set([500, 503]);
 
   let res;
   try {
@@ -1698,6 +1907,14 @@ export async function onRequestPost(context) {
 
   const geminiContents = turns.map(t => ({ role: t.role, parts: [{ text: t.text }] }));
 
+  // v12 QUOTA FIX: full SYSTEM_PROMPT (~13,000 tokens) only on the first turn
+  // of a conversation (no prior history) — every turn after that uses the
+  // condensed ~1,150-token GEMINI_FOLLOWUP_PROMPT instead. turns.length === 1
+  // means only the live message is present, i.e. recentHistory was empty.
+  // See the comment above GEMINI_FOLLOWUP_PROMPT for the full rationale.
+  const isFirstTurn       = turns.length === 1;
+  const geminiSystemPrompt = isFirstTurn ? SYSTEM_PROMPT : GEMINI_FOLLOWUP_PROMPT;
+
   // 4. Build Gemini key pool — all 13 keys across 13 Google accounts.
   //    GEMINI_API_KEY is required (guarded above). Keys 2–13 are optional.
   //    Blank / absent keys are excluded by the .filter() and silently skipped.
@@ -1727,7 +1944,7 @@ export async function onRequestPost(context) {
     const gKey   = geminiKeys[i];
     const keyTag = i === 0 ? '' : `key${i + 1}-`;
 
-    const resA = await callGeminiWithRetry(gKey, GEMINI_MODEL_PRIMARY, geminiContents);
+    const resA = await callGeminiWithRetry(gKey, GEMINI_MODEL_PRIMARY, geminiContents, geminiSystemPrompt);
     if (resA.ok) {
       return json(
         { reply: resA.reply },
@@ -1742,7 +1959,7 @@ export async function onRequestPost(context) {
     );
     lastGeminiResult = resA;
 
-    const resB = await callGeminiWithRetry(gKey, GEMINI_MODEL_FALLBACK, geminiContents);
+    const resB = await callGeminiWithRetry(gKey, GEMINI_MODEL_FALLBACK, geminiContents, geminiSystemPrompt);
     if (resB.ok) {
       return json(
         { reply: resB.reply },
