@@ -84,22 +84,16 @@ export async function onRequestGet(context) {
   const safeLang = ALLOWED_LANGS.has(lang) ? lang : 'ar-EG';
 
   // 2. Build Google Translate TTS URL
-  // ttsspeed: '1' = normal speed (only '0' or '1' accepted by Google TTS).
-  // [V3-TTS] Natural Arabic speech improvements:
-  //   • client=tw-ob is Google Translate's own widget client — highest quality voice.
-  //   • prev=input improves prosody by signalling the text is direct input, not a
-  //     translation — gives Google's TTS engine a clearer naturalness hint.
-  //   • textlen=<n> helps the engine plan intonation for the whole chunk length.
-  //   • ie=UTF-8 = input encoding. tl=safeLang = target language.
-  const textLen = text.length.toString();
+  // ttsspeed=1 = normal speed (0 = slow mode).
+  // ie=UTF-8   = input encoding.
+  // client=tw-ob is the standard identifier used by Google's own Translate
+  // widget and the gTTS library (github.com/pndurette/gTTS).
   const gttsUrl = new URL('https://translate.google.com/translate_tts');
   gttsUrl.searchParams.set('ie',       'UTF-8');
   gttsUrl.searchParams.set('client',   'tw-ob');
   gttsUrl.searchParams.set('tl',       safeLang);
   gttsUrl.searchParams.set('q',        text);
   gttsUrl.searchParams.set('ttsspeed', '1');
-  gttsUrl.searchParams.set('prev',     'input');
-  gttsUrl.searchParams.set('textlen',  textLen);
 
   // 3. Proxy fetch — mimic a browser to satisfy Google's endpoint
   let gttsRes;
