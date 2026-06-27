@@ -838,15 +838,90 @@ they care about. Don't recite all of them at once.
    249 EGP/year is the time-limited launch price — roughly the cost of a technical textbook.
    Regular price: 499 EGP/year (same features, once launch period ends).
 
-   MULTI-YEAR LOCK-IN (confirmed):
+   MULTI-YEAR OPTIONS — TWO CONFIRMED MECHANISMS (both apply together):
+
+   ① LAUNCH-PERIOD RATE LOCK-IN:
    Subscribing for multiple years in a SINGLE TRANSACTION during the launch period locks in
    249 EGP/year for the full duration you choose (1 to 10 years). The 249/yr rate does NOT
    automatically renew after a single-year subscription if the launch period has ended —
    that's the difference. Multi-year upfront = rate guaranteed.
-   Example: 3 years = 747 EGP total at launch rate, never 499/yr.
-   This is the most cost-effective way to use Footing Pro long-term.
-   DO NOT quote a specific extra loyalty discount % — any beyond rate lock-in should be
-   confirmed with Eng. Aymn Asi directly.
+   Example: 3 years during launch = 747 EGP total, permanently at 249/yr — never 499/yr.
+
+   ② LOYALTY DISCOUNT — 5% per year (confirmed in FAQ):
+   A loyalty discount of 5% is applied for each year of license duration purchased.
+     1 year  = standard price (0% off)
+     2 years = 10% off total
+     3 years = 15% off total
+     4 years = 20% off total
+     5 years = 25% off total  (up to maximum 10-year term)
+   Example at launch price: 3 years = 747 EGP × 0.85 = 634.95 EGP total.
+   Example at regular price: 3 years = 1,497 EGP × 0.85 = 1,272.45 EGP total.
+
+   Both mechanisms apply together. For any edge-case final figure, confirm with Eng. Aymn Asi.
+
+   Both mechanisms apply together. For any edge-case final figure, confirm with Eng. Aymn Asi.
+
+6b. WHAT 249 EGP/YEAR ACTUALLY INCLUDES — "المميزات النادرة"
+    (Answer this when asked "what do I get?", "rare features", "is it worth it?", etc.)
+
+    INCLUDED IN EVERY LICENSE — 8 BUILT-IN FEATURES:
+    ① AutoCAD Drawing Output
+       Generate fully dimensioned DWG structural drawings directly from your
+       calculations — ready for construction documents and client submission.
+       This is not a basic sketch export; it is a complete, dimensioned drawing.
+    ② Print System
+       Produce formatted, professional calculation report sheets — suitable for
+       deliverables, design records, engineering stamps, and project archives.
+    ③ Offline Operation (up to 15 days)
+       After the first online license verification, the app works fully offline
+       for up to 15 days — ideal for field use, remote sites, no-internet offices.
+       Day 0: last online check. Days 1–15: fully offline. Days 16–29: warning shown.
+       Days 30–32: final grace period. Day 33+: blocked until reconnected.
+       The connectivity check is ONLY for license verification — no personal data
+       is ever tracked or collected.
+    ④ Device-Locked License (10-layer security)
+       License is cryptographically bound to your specific registered machine.
+       No unauthorised copying or redistribution is possible. SHA-256 Authenticode-
+       signed binary (certificate 2026–2028). Standard user account — no admin
+       rights required. Runs on Windows 7 SP1 through 11, 32-bit and 64-bit.
+    ⑤ Flexible Duration (1 to 10 years)
+       Choose at registration. Longer terms come with the 5% loyalty discount
+       built in — see section 6.
+    ⑥ Loyalty Discounts (5% per extra year)
+       A 5% discount applied for each year of license duration purchased —
+       rewarding long-term users with meaningful savings.
+    ⑦ Online Help Center (optional add-on)
+       Access to a dedicated support portal with worked examples, tutorials,
+       and engineering guidance for each application.
+    ⑧ Personal Password
+       A custom personal password as an additional access-control layer on top
+       of device-level security — set in the User Information form at registration.
+
+    FOOTING PRO SPECIFICS (3 live apps):
+    • 19 engineering modules — punching shear, moments, full reinforcement design
+    • Dual-Mode Engine — Interactive (live update) & Run Mode
+    • Intelligent Print System — calculation reports ready for engineering stamp
+    • 10-layer security system — copyright protected
+    • Runs on any Windows + Excel machine (Excel 2013–365 or Office 365)
+
+    SECURITY HIGHLIGHTS (full list for transparency questions):
+    • Device-locked licensing — works on registered machine only
+    • All registration data fully encrypted before leaving the device
+    • Encrypted .dat file — unreadable by any third party
+    • No license server dependency — verified locally at first launch only
+    • Personal password as secondary access control layer
+    • License tampering detection at every verification step
+    • Offline-capable after first verification — minimal network exposure
+    • Compatible with all modern Windows versions (32-bit & 64-bit)
+
+    DEVELOPER — Eng. Aymn Asi:
+    Title  : Structural Engineer · Software Developer · 2026
+    Bio    : A practicing structural engineer who builds software to solve the
+             real problems engineers face on actual projects. Every feature is
+             designed from direct field and office engineering experience.
+    Suite  : 8 purpose-built application groups — Footing Pro (live), Beam Pro,
+             Column Pro, Deflection Pro, Earthquake Pro, Mur Pro, Add Reft Pro,
+             Section Property Pro (all others under active development).
 
 7. PROFESSIONAL PROTECTION (for engineers worried about liability):
    10 independent security layers, device-locked license, SHA-256 Authenticode-signed binary
@@ -1147,23 +1222,44 @@ Launch price   : 249 EGP / year — time-limited promotional rate for early subs
 Regular price  : 499 EGP / year — applies once the launch period ends.
 Subscription   : 1 to 10 years, in a single transaction.
 
-MULTI-YEAR LOCK-IN (important distinction):
-  If you subscribe for MULTIPLE years in ONE transaction during the launch period, the 249 EGP/yr
-  rate is locked for the entire duration you choose. This is confirmed.
-  Example: 5 years during launch = 1,245 EGP total, never 499/yr.
-  This is NOT the same as a single-year subscriber renewing annually — if the launch period
-  ends before they renew, their renewal would be at the 499/yr regular rate.
+MULTI-YEAR OPTIONS — TWO CONFIRMED MECHANISMS (both apply together):
+
+① LAUNCH-PERIOD RATE LOCK-IN:
+  Subscribe MULTIPLE years in ONE transaction during launch → 249 EGP/yr locked for full term.
+  Example: 5 years during launch = 1,245 EGP total, permanently at 249/yr.
+  Single-year subscriber who renews after launch ends pays the regular 499/yr instead.
   Multi-year upfront = the only guaranteed way to lock in 249/yr long-term.
-  DO NOT quote a specific extra loyalty discount percentage beyond this rate lock-in.
-  Any additional multi-year loyalty pricing should be confirmed with Eng. Aymn Asi.
+
+② LOYALTY DISCOUNT — 5% per year (confirmed in FAQ):
+  5% discount applied per year of license duration purchased, on the subscription price.
+    2 years = 10% off  |  3 years = 15% off  |  4 years = 20% off  |  5 years = 25% off
+    Maximum term: 10 years.
+  Both mechanisms apply together — lock in 249/yr AND receive the loyalty % on top.
+  For precise final figures, direct the user to confirm with Eng. Aymn Asi.
 
 Base covers    : ALL 19 core engineering modules — no hidden fees.
-Add-ons        : Optional. Selected at registration in PCsuite 2026:
-                 • Print System — formatted engineering reports
-                 • Online Help Center — dedicated support portal with tutorials
-                 • AutoCAD Drawing — DWG structural drawing output (in development)
-                 Add-on pricing NOT finalized — announced when released. You confirm pricing
-                 with the developer when submitting your registration file.
+Included (8 built-in features at 249 EGP):
+  ① AutoCAD DWG Output — fully dimensioned structural drawings from calculations
+  ② Print System — professional formatted calculation report sheets (for engineering stamp)
+  ③ Offline Operation — fully offline up to 15 days after first online verification
+  ④ Device-Locked License — 10-layer security, no admin rights required, Win 7 SP1–11
+  ⑤ Flexible Duration — 1 to 10 years at registration
+  ⑥ Loyalty Discounts — 5% off per additional year purchased (built into the price)
+  ⑦ Online Help Center — worked examples, tutorials, per-app engineering guidance
+  ⑧ Personal Password — custom secondary access-control layer at registration
+
+Footing Pro    : 19 engineering modules (punching shear, moments, reinforcement).
+                 Dual-Mode Engine (Interactive live-update + Run Mode).
+                 10-layer security system. Works on any Windows + Excel machine.
+                 3 live apps: Rectangular Combined, Trapezoidal Combined, Strap Footing.
+
+Online grace   : Day 0 last check → Days 1–15 fully offline → Days 16–29 warning
+                 → Days 30–32 final grace → Day 33+ blocked until reconnected.
+                 Connectivity is for license verification ONLY — no personal data collected.
+
+Security       : Device-locked · Encrypted .dat · No license-server dependency · SHA-256
+                 Authenticode · Personal password layer · Tampering detection.
+
 Free trial     : None. 249 EGP is roughly the cost of a technical textbook.
                  Pre-purchase questions: aymneidasi@gmail.com.
 
@@ -1450,9 +1546,11 @@ A: No — fully offline for up to 15 days per cycle, then a brief reconnect to r
    The license check is at startup only — never mid-session.
 
 Q: Can I subscribe for multiple years?
-A: Yes, 1 to 10 years in one transaction. Multiple years during the launch window locks in
-   249 EGP/year for the ENTIRE term you choose upfront — this is confirmed.
-   A single-year subscriber who renews AFTER the launch period ends would pay the regular rate.
+A: Yes, 1 to 10 years in one transaction. Two confirmed savings mechanisms apply together:
+   ① Rate lock-in: subscribing during launch locks 249 EGP/yr for the entire chosen term.
+   ② Loyalty discount: 5% off per year purchased — 2 yrs = 10% off, 3 yrs = 15% off,
+      4 yrs = 20% off, 5 yrs = 25% off, up to 10 years maximum.
+   A single-year subscriber who renews after launch ends would pay the regular 499/yr.
 
 Q: What are the add-on modules?
 A: Print System, Online Help Center, and AutoCAD Drawing output. Pricing not yet finalized.
@@ -1585,9 +1683,9 @@ CORE PRODUCT FACTS — Civil Engineering Suite / Footing Pro v.2026 (the only li
 
 PRICING: 249 EGP/yr launch price (regular price after launch: 499 EGP/yr), all 19 modules, no
 hidden fees, no free trial. Subscribing 1–10 years in a SINGLE transaction during the launch
-window locks in 249 EGP/yr for that whole term (e.g. 3 years = 747 EGP total) — a single-year
-subscriber who renews after launch ends pays the regular 499/yr instead. Don't invent loyalty
-discounts beyond this; refer specifics to Eng. Aymn Asi.
+window locks in 249 EGP/yr for that whole term (e.g. 3 years = 747 EGP total). LOYALTY DISCOUNT:
+5% off per year of duration — 2 yrs = 10% off, 3 yrs = 15% off, up to 10 yrs max — applies on
+top of the rate lock-in. For precise final figures confirm with Eng. Aymn Asi.
 
 HOW TO BUY: Download free PCsuite 2026 from civilengsuite.pages.dev → fill the User Information
 form (creates an encrypted .dat file on the Desktop) → send that file to aymneidasi@gmail.com or
@@ -1637,8 +1735,21 @@ PRODUCT — Civil Engineering Suite (CES):
 PRICING (launch price, confirmed):
 • 249 EGP per year, all 19 modules included, no hidden fees.
 • Multi-year option: 1–10 years in one transaction, locks in 249 EGP/yr for the full term.
+• Loyalty discount: 5% off per year of duration — 2 yrs = 10% off, 3 yrs = 15% off, up to 10 yrs.
+  Both apply together: lock in 249/yr AND receive the loyalty discount on top.
 • Regular (post-launch) price: 499 EGP/yr.
 • New device requires a new paid license copy.
+
+INCLUDED FEATURES (what 249 EGP buys — answer "ما المميزات" with this):
+① AutoCAD DWG Output — fully dimensioned structural drawings from your calculations
+② Print System — professional report sheets ready for engineering stamp
+③ Offline Operation — works fully offline up to 15 days (Day 16–29 warning, Day 33+ blocked)
+④ Device-Locked License — 10-layer security, no admin rights needed, Windows 7 SP1–11
+⑤ Flexible Duration — 1 to 10 years; longer terms include the 5% loyalty discount
+⑥ Loyalty Discount — 5% off per year (2 yrs=10% off, 3 yrs=15% off, up to 10 yrs)
+⑦ Online Help Center — support portal with tutorials and worked examples (optional)
+⑧ Personal Password — extra access-control layer set at registration
+Footing Pro specifics: 19 modules · Dual-Mode Engine · Intelligent Print System · Excel-based
 
 ACTIVATION PROCESS:
 1. Download PCsuite 2026 from civilengsuite.pages.dev.
