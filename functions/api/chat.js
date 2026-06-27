@@ -1,4 +1,78 @@
 /**
+ * functions/api/chat.js  —  v13  (2026-06-27)
+ * ──────────────────────────────────────────────────────────────────────────
+ * ════════════════════════════════════════
+ * CHANGELOG v13 — CONCURRENCY: MANY SIMULTANEOUS USERS, NOT JUST MANY DAYS
+ * ════════════════════════════════════════
+ * CONTEXT: v11/v12 optimised this file for AVAILABILITY across TIME — surviving
+ *   one key's daily quota exhaustion by failing over through a 13-key, 4-provider
+ *   ordered chain. Neither version addressed CONCURRENCY — many users hitting
+ *   this endpoint in the same few seconds. Four concrete gaps, fixed below:
+ *
+ * CHANGE 1 (THROUGHPUT — the big one): every request, from every concurrent
+ *   user, previously started the Gemini/Groq/OpenRouter loops at keys[0].
+ *   That is an ORDERED FAILOVER LIST, not a load-balanced pool: under real
+ *   simultaneous traffic, every request piles onto the SAME first key's
+ *   per-minute (RPM) ceiling while the other 12 keys sit idle until key 0 is
+ *   already failing. Effective concurrent throughput was bounded by one
+ *   upstream account's RPM limit, not by the 13-key pool's combined limit.
+ *   FIX: rotateStart() picks a random starting offset into each key pool per
+ *   request, so simultaneous requests fan out across all 13 keys from the
+ *   first attempt instead of converging on one. Daily-quota failover
+ *   behaviour is unchanged (every key is still tried, in rotated order).
+ *
+ * CHANGE 2 (LATENCY/THUNDERING HERD): on a 429, the v6–v12 logic retried
+ *   RATE_LIMIT_EXCEEDED in place with a fixed 2s/5s/11s backoff. That is
+ *   reasonable for one isolated burst but pathological under concurrency:
+ *   many simultaneous requests hitting the same saturated key all back off
+ *   and retry on the same schedule, re-converging on the same key at T+2s,
+ *   T+7s, T+18s — the herd never disperses. FIX: any 429 (RESOURCE_EXHAUSTED
+ *   or RATE_LIMIT_EXCEEDED) now fails over to the next key immediately, no
+ *   backoff-retry in place. Retry-with-backoff is kept ONLY for 500/503
+ *   (genuine transient errors, where retrying the same key is still the
+ *   right move), reduced to 2 attempts with ±20% jitter (was 3, no jitter).
+ *
+ * CHANGE 3 (PLATFORM CEILING): Cloudflare Workers/Pages Functions cap a
+ *   single invocation at 50 fetch() subrequests on the Free plan (10,000 on
+ *   Paid — developers.cloudflare.com/workers/platform/limits/, confirmed
+ *   June 2026). Worst case, the pre-v13 chain could issue 100+ fetches in
+ *   one invocation if many keys returned retryable statuses. The existing
+ *   try/catch around every call() already prevented a hard crash (fetch()
+ *   past the cap rejects with a catchable error, it does not throw an
+ *   uncaught exception), but the request would still churn through dozens
+ *   of doomed attempts before reaching the final error response. FIX:
+ *   makeFetchBudget() is a shared counter threaded through every provider
+ *   call for one invocation; every layer stops and returns the friendly
+ *   error the moment the budget runs low, on EVERY plan tier, instead of
+ *   relying on (or being surprised by) the platform's own enforcement.
+ *
+ * CHANGE 4 (ABUSE / NO THROTTLING): /api/chat had zero request-level rate
+ *   limiting. getCorsHeaders() restricts browser-issued cross-origin calls,
+ *   but CORS is a browser-enforced policy — a non-browser client (script,
+ *   bot, curl) can POST directly to this endpoint and bypass it entirely.
+ *   An unthrottled client can exhaust the ENTIRE shared 13-key pool across
+ *   every provider in well under a minute, zeroing out quota for every real
+ *   visitor — and that risk scales with traffic. FIX: checkRateLimit() uses
+ *   Cloudflare's native Rate Limiting binding (env.RATE_LIMITER) if present,
+ *   falling back to a KV fixed-window counter (env.CES_CHAT_KV) if not, and
+ *   failing OPEN (no throttling) if neither is bound — logged at WARN so the
+ *   gap is visible rather than silent. See the comment block above
+ *   checkRateLimit() for the honest caveat on KV's Free-plan write quota.
+ *
+ * NOT CHANGED in v13 (see the response this shipped with for full discussion):
+ *   · Upgrading the underlying Cloudflare account from Workers Free to
+ *     Workers Paid ($5/mo) raises the subrequest cap 50→10,000 and CPU time
+ *     10ms→30s, and is a prerequisite for the env.RATE_LIMITER binding used
+ *     in Change 4. This file works on either plan — budget/jitter/rotation
+ *     all degrade gracefully — but Paid removes the platform ceiling this
+ *     changelog had to work around in Change 3 entirely.
+ *   · GEMINI_FOLLOWUP_PROMPT / SYSTEM_PROMPT sizing (v12) is unchanged.
+ *   · Provider order (Gemini → Workers AI → Groq → OpenRouter) is unchanged;
+ *     only the order WITHIN each provider's key pool is now rotated.
+ * ──────────────────────────────────────────────────────────────────────────
+ */
+
+/**
  * functions/api/chat.js  —  v12  (2026-06-26)
  * ──────────────────────────────────────────────────────────────────────────
  * Cloudflare Pages Function — AI chatbot proxy for Civil Engineering Suite
@@ -466,6 +540,76 @@ const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 // Requires OPENROUTER_API_KEY env var (free signup, no billing — openrouter.ai).
 const OPENROUTER_MODEL   = 'meta-llama/llama-3.3-70b-instruct:free';
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
+
+// ── v13 CONCURRENCY HELPERS ────────────────────────────────────────────────
+// Added to address documented failure modes under simultaneous multi-user
+// load (see CHANGELOG v13 below). Three problems, three helpers:
+//
+// 1. SUBREQUEST_BUDGET — Cloudflare Workers Free plan caps a single
+//    invocation at 50 fetch() subrequests (Paid: 10,000). Worst case, this
+//    file's full Gemini→Workers AI→Groq→OpenRouter chain can issue well
+//    over 100 fetches if every key returns a retryable status. The provider
+//    try/catch already prevents that from crashing the isolate (fetch()
+//    rejects with a catchable error past the cap), but it still wastes the
+//    *first* ~50 attempts churning before degrading to a generic error.
+//    fetchBudget() is a simple mutable counter threaded through
+//    onRequestPost; every helper that issues a fetch() decrements it first
+//    and refuses to call out once it hits zero, so we fail over to the
+//    friendly-error response deterministically instead of relying on the
+//    platform to reject the 51st call.
+function makeFetchBudget(max) {
+  let remaining = max;
+  return {
+    take() { if (remaining <= 0) return false; remaining--; return true; },
+    remaining() { return remaining; },
+  };
+}
+// Free-plan ceiling is 50; stop two attempts short so the final friendly-
+// error response itself is never the thing that trips the platform limit.
+const SUBREQUEST_BUDGET_FREE_PLAN = 48;
+
+// 2. fetchWithTimeout — every provider call below previously had no upper
+//    bound on wall time. A stalled upstream connection held the invocation
+//    open indefinitely (no CPU billed, but the user-visible chat widget
+//    just hangs with no error — worse than a fast failure). 8s is generous
+//    for a sub-second-to-few-second LLM completion call and still leaves
+//    room for the per-layer retry/backoff budget below.
+const PROVIDER_TIMEOUT_MS = 8000;
+async function fetchWithTimeout(url, init, timeoutMs = PROVIDER_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// 3. rotateStart — the Gemini/Groq/OpenRouter key pools are iterated as an
+//    ORDERED FAILOVER LIST: every request, from every concurrent user,
+//    starts at keys[0]. That is correct for surviving one key's daily quota
+//    exhaustion, but it means concurrent traffic never spreads across the
+//    other 12 keys until key 0 is already failing — effective concurrent
+//    throughput is bounded by ONE upstream account's per-minute limit, not
+//    by the pool. rotateStart() picks a random starting offset per request
+//    so simultaneous requests fan out across the whole pool from the first
+//    attempt. Order within the rotation is preserved (still tries every key
+//    exactly once), so daily-quota failover behaviour is unchanged — this
+//    only changes which key is tried *first* on any given request.
+function rotateStart(arr) {
+  if (arr.length <= 1) return arr.slice();
+  const offset = Math.floor(Math.random() * arr.length);
+  return arr.slice(offset).concat(arr.slice(0, offset));
+}
+
+// Adds ±20% jitter to a backoff delay so concurrent requests retrying the
+// same saturated key do not all wake up and retry in lockstep (thundering
+// herd). Applied to the one remaining retry case (500/503) — see v13
+// changelog for why 429 no longer retries with backoff at all.
+function withJitter(ms) {
+  const jitter = ms * 0.2 * (Math.random() * 2 - 1);
+  return Math.max(0, Math.round(ms + jitter));
+}
 
 // ── CORS — origin-restricted to the production domain and local dev ───────────
 const ALLOWED_ORIGINS = new Set(['https://civilengsuite.pages.dev']);
@@ -1482,11 +1626,28 @@ function json(data, status = 200, extraHeaders, request) {
 // `systemPrompt` is caller-supplied (v12) — SYSTEM_PROMPT on a conversation's
 // first turn, GEMINI_FOLLOWUP_PROMPT on every turn after that. See the v12
 // changelog and the comment above GEMINI_FOLLOWUP_PROMPT for why.
+// `budget` (v13) is the shared makeFetchBudget() counter for this invocation —
+// see the v13 helper block above GEMINI_API_URL... err, above OPENROUTER_API_URL.
 // Returns { ok: true, reply } on success, or
 //         { ok: false, httpStatus, errStatus, errBody } on any failure.
 // Every fetch Response body in this function is read at most once — there
 // is no path that calls .text()/.json() twice on the same Response.
-async function callGeminiWithRetry(apiKey, model, contents, systemPrompt) {
+//
+// v13 CHANGE: 429 of EITHER kind (RESOURCE_EXHAUSTED or RATE_LIMIT_EXCEEDED)
+// now skips backoff-retry and returns immediately, same as RESOURCE_EXHAUSTED
+// already did in v6. Rationale: the v6 comment's premise — "RATE_LIMIT_EXCEEDED
+// can clear within seconds, so retry in place" — holds for a single isolated
+// burst, but under genuinely concurrent multi-user traffic every simultaneous
+// request hitting the same saturated key backs off and retries on the same
+// schedule (2s/5s/11s), so the retry lands while the herd is still saturating
+// that key. Under heavy traffic specifically, failing over to the NEXT key in
+// the (now-rotated, see rotateStart()) pool is strictly more likely to
+// succeed, faster, than waiting out a fixed backoff on the same key. Retry-
+// with-backoff is kept only for 500/503 (genuine transient server errors,
+// where the same key is fine and worth a second try) — reduced to 2 attempts
+// with jitter instead of 3, to bound worst-case latency now that there's a
+// 13-key pool to fail over into instead.
+async function callGeminiWithRetry(apiKey, model, contents, systemPrompt, budget) {
   const payload = JSON.stringify({
     system_instruction: { parts: [{ text: systemPrompt }] },
     contents,
@@ -1498,46 +1659,40 @@ async function callGeminiWithRetry(apiKey, model, contents, systemPrompt) {
   });
 
   async function call() {
-    return fetch(`${GEMINI_API_URL(model)}?key=${apiKey}`, {
+    if (!budget.take()) {
+      throw new Error('SUBREQUEST_BUDGET_EXHAUSTED');
+    }
+    return fetchWithTimeout(`${GEMINI_API_URL(model)}?key=${apiKey}`, {
       method : 'POST',
       headers: { 'Content-Type': 'application/json' },
       body   : payload,
     });
   }
 
-  // v4: 3 retries, exponential backoff 2s → 5s → 11s.
-  const RETRY_DELAYS_MS = [2000, 5000, 11000];
-  const RETRYABLE_CODES = new Set([429, 500, 503]);
+  // v13: 2 retries (was 3), backoff with jitter, 500/503 only.
+  const RETRY_DELAYS_MS = [1500, 3500];
 
   let res;
   try {
     res = await call();
   } catch (err) {
-    console.error(`[chat.js] Network error calling Gemini (${model}):`, err.message);
-    return { ok: false, httpStatus: 0, errStatus: 'NETWORK_ERROR', errBody: err.message };
+    if (err.message !== 'SUBREQUEST_BUDGET_EXHAUSTED') {
+      console.error(`[chat.js] Network error calling Gemini (${model}):`, err.message);
+    }
+    return { ok: false, httpStatus: 0, errStatus: err.message === 'SUBREQUEST_BUDGET_EXHAUSTED'
+      ? 'SUBREQUEST_BUDGET_EXHAUSTED' : 'NETWORK_ERROR', errBody: err.message };
   }
 
   for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
     if (res.ok) break;
-    if (!RETRYABLE_CODES.has(res.status)) break;
 
-    // v6: classify 429s *before* deciding to retry. RESOURCE_EXHAUSTED is a
-    // daily cap that resets at midnight Pacific time — retrying within the
-    // same minute can never succeed, so stop burning the retry budget and
-    // let the caller fail over to the next layer immediately.
-    if (res.status === 429) {
-      const text = await res.text();
-      let errStatus = '';
-      try { errStatus = JSON.parse(text)?.error?.status || ''; } catch { /* non-JSON body */ }
-      if (errStatus === 'RESOURCE_EXHAUSTED') {
-        console.warn(`[chat.js] Gemini ${model} RESOURCE_EXHAUSTED — quota exhausted, skipping retries.`);
-        return { ok: false, httpStatus: res.status, errStatus, errBody: text };
-      }
-      // RATE_LIMIT_EXCEEDED (RPM burst) or unrecognised 429 body — these can
-      // clear within seconds, so fall through to the normal retry below.
-    }
+    // v13: any 429 — RESOURCE_EXHAUSTED (daily cap, never clears within the
+    // request) or RATE_LIMIT_EXCEEDED (per-minute burst, but see rationale
+    // above) — fails over to the next key/model immediately. Only 500/503
+    // are retried in place.
+    if (res.status !== 500 && res.status !== 503) break;
 
-    const delay = RETRY_DELAYS_MS[attempt];
+    const delay = withJitter(RETRY_DELAYS_MS[attempt]);
     console.warn(
       `[chat.js] Gemini ${model} ${res.status} on attempt ${attempt + 1}/${RETRY_DELAYS_MS.length}.` +
       ` Retrying in ${delay}ms…`
@@ -1546,8 +1701,11 @@ async function callGeminiWithRetry(apiKey, model, contents, systemPrompt) {
     try {
       res = await call();
     } catch (err) {
-      console.error(`[chat.js] Network error calling Gemini ${model} (retry):`, err.message);
-      return { ok: false, httpStatus: 0, errStatus: 'NETWORK_ERROR', errBody: err.message };
+      if (err.message !== 'SUBREQUEST_BUDGET_EXHAUSTED') {
+        console.error(`[chat.js] Network error calling Gemini ${model} (retry):`, err.message);
+      }
+      return { ok: false, httpStatus: 0, errStatus: err.message === 'SUBREQUEST_BUDGET_EXHAUSTED'
+        ? 'SUBREQUEST_BUDGET_EXHAUSTED' : 'NETWORK_ERROR', errBody: err.message };
     }
   }
 
@@ -1558,10 +1716,12 @@ async function callGeminiWithRetry(apiKey, model, contents, systemPrompt) {
       errBody = await res.text();
       errStatus = JSON.parse(errBody)?.error?.status || '';
     } catch { /* non-fatal — body may be non-JSON (HTML error page, etc.) */ }
-    console.error(
-      `[chat.js] Gemini HTTP ${res.status} for model ${model} (after retries):`,
-      errBody.slice(0, 500),
-    );
+    if (res.status !== 429) {
+      console.error(
+        `[chat.js] Gemini HTTP ${res.status} for model ${model} (after retries):`,
+        errBody.slice(0, 500),
+      );
+    }
     return { ok: false, httpStatus: res.status, errStatus, errBody };
   }
 
@@ -1578,17 +1738,28 @@ async function callGeminiWithRetry(apiKey, model, contents, systemPrompt) {
 // no URL and no API key involved. `aiBinding` is `context.env.AI`; if the
 // binding was never added in the dashboard this returns a clean NOT_BOUND
 // failure instead of throwing, so the optional 3rd layer degrades safely.
+// v13: aiBinding.run() takes no AbortSignal, so the timeout is enforced with
+// Promise.race against a timer instead of fetchWithTimeout. Note this races
+// the *wait*, not the underlying call — if Workers AI is simply slow rather
+// than hung, the call may still complete on Cloudflare's side after we've
+// already moved on. That's an acceptable trade for never hanging the
+// response to the user, and Workers AI never bills for time we're not
+// waiting on, this layer is also not part of the fetch() subrequest count.
 async function callWorkersAIWithRetry(aiBinding, messages) {
   if (!aiBinding) {
     return { ok: false, httpStatus: 0, errStatus: 'NOT_BOUND', errBody: '' };
   }
 
-  async function call() {
-    return aiBinding.run(WORKERS_AI_MODEL, {
-      messages,
-      max_tokens : 700,
-      temperature: 0.35,
-    });
+  function callWithTimeout() {
+    return Promise.race([
+      aiBinding.run(WORKERS_AI_MODEL, {
+        messages,
+        max_tokens : 700,
+        temperature: 0.35,
+      }),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('WORKERS_AI_TIMEOUT')), PROVIDER_TIMEOUT_MS)),
+    ]);
   }
 
   // Workers AI failures seen in practice are almost always brief "capacity
@@ -1599,12 +1770,12 @@ async function callWorkersAIWithRetry(aiBinding, messages) {
 
   let result;
   try {
-    result = await call();
+    result = await callWithTimeout();
   } catch (err) {
     console.warn('[chat.js] Workers AI attempt 1 failed:', err.message);
     await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
     try {
-      result = await call();
+      result = await callWithTimeout();
     } catch (err2) {
       console.error('[chat.js] Workers AI failed after retry:', err2.message);
       return { ok: false, httpStatus: 0, errStatus: 'WORKERS_AI_ERROR', errBody: err2.message };
@@ -1618,14 +1789,15 @@ async function callWorkersAIWithRetry(aiBinding, messages) {
   return { ok: true, reply };
 }
 
-// ── Provider: Groq (Layer 4 — llama-3.1-8b-instant, 14,400 req/day free) ──
+// ── Provider: Groq (Layer 4 — llama-3.1-8b-instant, 1,000 req/day free) ──
 // OpenAI-compatible API. Accepts the workersMsgs array already built for
 // Layer 3 — no message conversion needed in the caller.
+// `budget` (v13) — see makeFetchBudget() above.
 // Returns { ok: true, reply } on success, or
 //         { ok: false, httpStatus, errStatus, errBody } on failure.
-// Single retry on 429/500/503. Layer 4 fires only after Layers 1–3 have all
+// Single retry on 500/503. Layer 4 fires only after Layers 1–3 have all
 // failed, so we limit added latency to one short retry delay.
-async function callGroqWithRetry(apiKey, messages) {
+async function callGroqWithRetry(apiKey, messages, budget) {
   const payload = JSON.stringify({
     model      : GROQ_MODEL,
     messages,
@@ -1634,7 +1806,8 @@ async function callGroqWithRetry(apiKey, messages) {
   });
 
   async function call() {
-    return fetch(GROQ_API_URL, {
+    if (!budget.take()) throw new Error('SUBREQUEST_BUDGET_EXHAUSTED');
+    return fetchWithTimeout(GROQ_API_URL, {
       method : 'POST',
       headers: {
         'Content-Type' : 'application/json',
@@ -1651,15 +1824,18 @@ async function callGroqWithRetry(apiKey, messages) {
   // clears in 1.2 seconds, so retrying only spends a second request against
   // an already-scarce daily cap for no realistic chance of success. 500/503
   // are genuine transient server errors and are still worth one retry.
-  const RETRY_DELAY_MS  = 1200;
+  const RETRY_DELAY_MS  = withJitter(1200);
   const RETRYABLE_CODES = new Set([500, 503]);
 
   let res;
   try {
     res = await call();
   } catch (err) {
-    console.error('[chat.js] Network error calling Groq:', err.message);
-    return { ok: false, httpStatus: 0, errStatus: 'NETWORK_ERROR', errBody: err.message };
+    if (err.message !== 'SUBREQUEST_BUDGET_EXHAUSTED') {
+      console.error('[chat.js] Network error calling Groq:', err.message);
+    }
+    return { ok: false, httpStatus: 0, errStatus: err.message === 'SUBREQUEST_BUDGET_EXHAUSTED'
+      ? 'SUBREQUEST_BUDGET_EXHAUSTED' : 'NETWORK_ERROR', errBody: err.message };
   }
 
   if (!res.ok && RETRYABLE_CODES.has(res.status)) {
@@ -1668,8 +1844,11 @@ async function callGroqWithRetry(apiKey, messages) {
     try {
       res = await call();
     } catch (err) {
-      console.error('[chat.js] Network error calling Groq (retry):', err.message);
-      return { ok: false, httpStatus: 0, errStatus: 'NETWORK_ERROR', errBody: err.message };
+      if (err.message !== 'SUBREQUEST_BUDGET_EXHAUSTED') {
+        console.error('[chat.js] Network error calling Groq (retry):', err.message);
+      }
+      return { ok: false, httpStatus: 0, errStatus: err.message === 'SUBREQUEST_BUDGET_EXHAUSTED'
+        ? 'SUBREQUEST_BUDGET_EXHAUSTED' : 'NETWORK_ERROR', errBody: err.message };
     }
   }
 
@@ -1699,7 +1878,7 @@ async function callGroqWithRetry(apiKey, messages) {
 // OpenRouter's usage dashboard and can improve rate-limit priority.
 // Returns { ok: true, reply } on success, or
 //         { ok: false, httpStatus, errStatus, errBody } on failure.
-async function callOpenRouterWithRetry(apiKey, messages) {
+async function callOpenRouterWithRetry(apiKey, messages, budget) {
   const payload = JSON.stringify({
     model      : OPENROUTER_MODEL,
     messages,
@@ -1708,7 +1887,8 @@ async function callOpenRouterWithRetry(apiKey, messages) {
   });
 
   async function call() {
-    return fetch(OPENROUTER_API_URL, {
+    if (!budget.take()) throw new Error('SUBREQUEST_BUDGET_EXHAUSTED');
+    return fetchWithTimeout(OPENROUTER_API_URL, {
       method : 'POST',
       headers: {
         'Content-Type' : 'application/json',
@@ -1726,15 +1906,18 @@ async function callOpenRouterWithRetry(apiKey, messages) {
   // still count toward that daily quota. Retrying a 429 here spends a second
   // unit of a 50/day budget for almost no chance of success within 1.2s.
   // 500/503 are genuine transient server errors and are still worth one retry.
-  const RETRY_DELAY_MS  = 1200;
+  const RETRY_DELAY_MS  = withJitter(1200);
   const RETRYABLE_CODES = new Set([500, 503]);
 
   let res;
   try {
     res = await call();
   } catch (err) {
-    console.error('[chat.js] Network error calling OpenRouter:', err.message);
-    return { ok: false, httpStatus: 0, errStatus: 'NETWORK_ERROR', errBody: err.message };
+    if (err.message !== 'SUBREQUEST_BUDGET_EXHAUSTED') {
+      console.error('[chat.js] Network error calling OpenRouter:', err.message);
+    }
+    return { ok: false, httpStatus: 0, errStatus: err.message === 'SUBREQUEST_BUDGET_EXHAUSTED'
+      ? 'SUBREQUEST_BUDGET_EXHAUSTED' : 'NETWORK_ERROR', errBody: err.message };
   }
 
   if (!res.ok && RETRYABLE_CODES.has(res.status)) {
@@ -1743,8 +1926,11 @@ async function callOpenRouterWithRetry(apiKey, messages) {
     try {
       res = await call();
     } catch (err) {
-      console.error('[chat.js] Network error calling OpenRouter (retry):', err.message);
-      return { ok: false, httpStatus: 0, errStatus: 'NETWORK_ERROR', errBody: err.message };
+      if (err.message !== 'SUBREQUEST_BUDGET_EXHAUSTED') {
+        console.error('[chat.js] Network error calling OpenRouter (retry):', err.message);
+      }
+      return { ok: false, httpStatus: 0, errStatus: err.message === 'SUBREQUEST_BUDGET_EXHAUSTED'
+        ? 'SUBREQUEST_BUDGET_EXHAUSTED' : 'NETWORK_ERROR', errBody: err.message };
     }
   }
 
@@ -1793,6 +1979,15 @@ function buildFriendlyError(geminiResult, workersAttempted) {
     return 'Too many requests right now. Please wait 30–60 seconds and try again. / ' +
            'في طلبات كتير دلوقتي. استنى 30–60 ثانية وحاول تاني.';
   }
+  // v13: distinct message for "we stopped trying more providers to stay
+  // under the platform's per-request subrequest cap" — this is a genuine
+  // heavy-traffic symptom (lots of concurrent users, lots of retries
+  // burning the budget), not a quota or single-provider outage, so the
+  // wording is shorter-timescale than the RESOURCE_EXHAUSTED message.
+  if (geminiResult.errStatus === 'SUBREQUEST_BUDGET_EXHAUSTED') {
+    return 'The assistant is extremely busy right now. Please try again in a moment. / ' +
+           'المساعد مشغول جداً دلوقتي. حاول تاني بعد لحظات.';
+  }
 
   const friendlyErrors = {
     400: 'Invalid request. Please rephrase and try again. / ' +
@@ -1814,6 +2009,81 @@ function buildFriendlyError(geminiResult, workersAttempted) {
     'WhatsApp +201287232413 · aymneidasi@gmail.com. / ' +
     'حصل مشكلة، حاول مرة أخرى، أو تواصل معنا مباشرة: واتساب +201287232413 · aymneidasi@gmail.com.'
   );
+}
+
+// ── v13 RATE LIMITER — abuse / overload protection ─────────────────────────
+// This endpoint previously had NO request-level throttling at all. CORS
+// (getCorsHeaders) is a browser-enforced policy, not a server-side control —
+// any script can POST directly to /api/chat from outside a browser entirely,
+// bypassing it. Combined with the 13-key fallback pool, an unthrottled
+// client (bot, scraper, or just a buggy retry loop in someone's browser tab)
+// can burn through the ENTIRE shared free-tier quota pool — every account,
+// every provider — in well under a minute, leaving nothing for real users.
+// That risk scales with traffic: more visitors means more chances one of
+// them is abusive, and more legitimate concurrent load to compete with.
+//
+// Preferred mechanism: Cloudflare's native Workers Rate Limiting binding
+// (env.RATE_LIMITER) — in-isolate counters, no added latency, no extra
+// fetch/subrequest cost. It requires Workers PAID plan and a `ratelimits`
+// block in a wrangler.jsonc/toml deployed alongside this Pages project (see
+// the wrangler.jsonc snippet shipped alongside this file). It is NOT
+// configurable from the Pages dashboard alone.
+//
+// Fallback mechanism: if env.RATE_LIMITER is absent but a KV namespace is
+// bound as env.CES_CHAT_KV (dashboard-addable, no wrangler config needed,
+// works on the Free plan), a coarse fixed-window counter is used instead.
+// HONEST CAVEAT, left in the code on purpose: Workers KV's Free plan caps
+// writes at 1,000/day. A 60s window with one write per request hits that
+// ceiling at roughly 42 messages/HOUR sustained — i.e. a KV-only limiter can
+// itself start failing during the exact heavy-traffic conditions it exists
+// to guard against. checkRateLimit() fails OPEN (treats a KV error as "not
+// rate limited") specifically so a quota-exhausted limiter degrades to "no
+// protection" rather than "blocks everyone" — availability for real users
+// takes priority over strict enforcement for a sales chatbot. Track real
+// volume and move to the RATE_LIMITER binding (Workers Paid, $5/mo) once
+// traffic regularly approaches that ceiling.
+//
+// `key` is the caller-supplied identifier (IP via CF-Connecting-IP) — see
+// inline note in onRequestPost about IP-based keys vs NAT/shared-IP limits.
+async function checkRateLimit(env, key) {
+  if (env.RATE_LIMITER) {
+    try {
+      const { success } = await env.RATE_LIMITER.limit({ key });
+      return { limited: !success, mechanism: 'binding' };
+    } catch (err) {
+      console.error('[chat.js] RATE_LIMITER binding error (failing open):', err.message);
+      return { limited: false, mechanism: 'binding-error' };
+    }
+  }
+
+  if (env.CES_CHAT_KV) {
+    try {
+      const WINDOW_SECONDS = 60;
+      const MAX_PER_WINDOW = 8; // ~1 message every 7.5s sustained, generous for one real user
+      const bucket = Math.floor(Date.now() / 1000 / WINDOW_SECONDS);
+      const kvKey  = `rl:${key}:${bucket}`;
+      const current = parseInt((await env.CES_CHAT_KV.get(kvKey)) || '0', 10);
+      if (current >= MAX_PER_WINDOW) {
+        return { limited: true, mechanism: 'kv' };
+      }
+      // expirationTtl auto-cleans old buckets — no manual deletion needed.
+      await env.CES_CHAT_KV.put(kvKey, String(current + 1), { expirationTtl: WINDOW_SECONDS * 2 });
+      return { limited: false, mechanism: 'kv' };
+    } catch (err) {
+      console.error('[chat.js] CES_CHAT_KV error (failing open):', err.message);
+      return { limited: false, mechanism: 'kv-error' };
+    }
+  }
+
+  // Neither binding configured — no-op. Logged once per ISOLATE (not per
+  // request — a busy isolate could otherwise emit this on every single chat
+  // message) at WARN so the gap is visible in Cloudflare Logs without
+  // drowning out everything else during real traffic.
+  if (!checkRateLimit._warned) {
+    checkRateLimit._warned = true;
+    console.warn('[chat.js] No rate limiter bound (RATE_LIMITER or CES_CHAT_KV) — /api/chat is unthrottled.');
+  }
+  return { limited: false, mechanism: 'none' };
 }
 
 // ── POST handler ───────────────────────────────────────────────────────────
@@ -1849,6 +2119,31 @@ function buildFriendlyError(geminiResult, workersAttempted) {
 // callWorkersAIWithRetry, buildFriendlyError) were already correct and unchanged.
 export async function onRequestPost(context) {
   const { request, env } = context;
+
+  // 0. v13 RATE LIMIT — see checkRateLimit() above for the full rationale.
+  //    CF-Connecting-IP is Cloudflare's own header carrying the real client
+  //    IP (not spoofable by the client — Cloudflare sets it at the edge).
+  //    NOTE ON IP AS A KEY: Cloudflare's own Rate Limiting docs recommend
+  //    against IP-based keys for fine-grained per-user limits, because NAT
+  //    / shared-IP users (offices, mobile carriers) can share one counter.
+  //    For THIS endpoint that trade-off is acceptable: the goal here is
+  //    abuse/overload protection, not fairness between individual users
+  //    behind the same IP, and a shared office IP legitimately sending 8+
+  //    chat messages within the same 60s window is itself a reasonable
+  //    point to ask it to slow down.
+  const clientIp = request.headers.get('CF-Connecting-IP') || 'unknown';
+  const rateCheck = await checkRateLimit(env, clientIp);
+  if (rateCheck.limited) {
+    return json(
+      {
+        error: 'Too many messages too quickly. Please wait a moment and try again. / ' +
+               'رسائل كتير بسرعة. استنى لحظة وحاول تاني.',
+      },
+      429,
+      undefined,
+      request,
+    );
+  }
 
   // 1. Validate Gemini API key — the only required key after v7/v8.
   //    DEEPSEEK_API_KEY is intentionally not read; DeepSeek is paid-only and
@@ -1915,10 +2210,17 @@ export async function onRequestPost(context) {
   const isFirstTurn       = turns.length === 1;
   const geminiSystemPrompt = isFirstTurn ? SYSTEM_PROMPT : GEMINI_FOLLOWUP_PROMPT;
 
+  // v13: a single fetch-subrequest budget shared across every provider call
+  // made for this one incoming request — see makeFetchBudget() above for why.
+  const budget = makeFetchBudget(SUBREQUEST_BUDGET_FREE_PLAN);
+
   // 4. Build Gemini key pool — all 13 keys across 13 Google accounts.
   //    GEMINI_API_KEY is required (guarded above). Keys 2–13 are optional.
   //    Blank / absent keys are excluded by the .filter() and silently skipped.
-  const geminiKeys = [
+  //    v13: each entry keeps its ORIGINAL pool index (for the X-CES-AI-Source
+  //    header / log tag) separately from iteration order, because rotation
+  //    (below) changes which key is tried first without changing its identity.
+  const geminiKeysIndexed = [
     env.GEMINI_API_KEY    || '',
     env.GEMINI_API_KEY_2  || '',
     env.GEMINI_API_KEY_3  || '',
@@ -1932,19 +2234,29 @@ export async function onRequestPost(context) {
     env.GEMINI_API_KEY_11 || '',
     env.GEMINI_API_KEY_12 || '',
     env.GEMINI_API_KEY_13 || '',
-  ].filter(k => k);
+  ]
+    .map((key, originalIndex) => ({ key, originalIndex }))
+    .filter(k => k.key);
 
-  // 5. GEMINI LAYERS — try each key with PRIMARY then FALLBACK model.
-  //    Replaces v10's Layers 1, 2, 6a, and 6b. Same callGeminiWithRetry()
-  //    function; now generalised to loop over N keys instead of hard-coding two.
+  // v13: rotateStart() — see the helper block above OPENROUTER_API_URL for
+  // the full rationale. Every concurrent request gets a different starting
+  // key instead of every request piling onto geminiKeysIndexed[0] first.
+  const geminiPool = rotateStart(geminiKeysIndexed);
+
+  // 5. GEMINI LAYERS — try each key (in rotated order) with PRIMARY then
+  //    FALLBACK model. Replaces v10's Layers 1, 2, 6a, and 6b.
   //    lastGeminiResult carries the final Gemini failure into buildFriendlyError.
   let lastGeminiResult = { ok: false, httpStatus: 0, errStatus: 'NOT_ATTEMPTED', errBody: '' };
 
-  for (let i = 0; i < geminiKeys.length; i++) {
-    const gKey   = geminiKeys[i];
-    const keyTag = i === 0 ? '' : `key${i + 1}-`;
+  for (const { key: gKey, originalIndex } of geminiPool) {
+    if (budget.remaining() <= 0) {
+      console.warn('[chat.js] Subrequest budget exhausted during Gemini layer — stopping early.');
+      lastGeminiResult = { ok: false, httpStatus: 0, errStatus: 'SUBREQUEST_BUDGET_EXHAUSTED', errBody: '' };
+      break;
+    }
+    const keyTag = originalIndex === 0 ? '' : `key${originalIndex + 1}-`;
 
-    const resA = await callGeminiWithRetry(gKey, GEMINI_MODEL_PRIMARY, geminiContents, geminiSystemPrompt);
+    const resA = await callGeminiWithRetry(gKey, GEMINI_MODEL_PRIMARY, geminiContents, geminiSystemPrompt, budget);
     if (resA.ok) {
       return json(
         { reply: resA.reply },
@@ -1953,13 +2265,16 @@ export async function onRequestPost(context) {
         request,
       );
     }
-    console.warn(
-      `[chat.js] Gemini ${keyTag || 'key1-'}${GEMINI_MODEL_PRIMARY} failed:`,
-      resA.errStatus, resA.httpStatus,
-    );
+    if (resA.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED') {
+      console.warn(
+        `[chat.js] Gemini ${keyTag || 'key1-'}${GEMINI_MODEL_PRIMARY} failed:`,
+        resA.errStatus, resA.httpStatus,
+      );
+    }
     lastGeminiResult = resA;
+    if (budget.remaining() <= 0) break;
 
-    const resB = await callGeminiWithRetry(gKey, GEMINI_MODEL_FALLBACK, geminiContents, geminiSystemPrompt);
+    const resB = await callGeminiWithRetry(gKey, GEMINI_MODEL_FALLBACK, geminiContents, geminiSystemPrompt, budget);
     if (resB.ok) {
       return json(
         { reply: resB.reply },
@@ -1968,14 +2283,18 @@ export async function onRequestPost(context) {
         request,
       );
     }
-    console.warn(
-      `[chat.js] Gemini ${keyTag || 'key1-'}${GEMINI_MODEL_FALLBACK} failed:`,
-      resB.errStatus, resB.httpStatus,
-    );
+    if (resB.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED') {
+      console.warn(
+        `[chat.js] Gemini ${keyTag || 'key1-'}${GEMINI_MODEL_FALLBACK} failed:`,
+        resB.errStatus, resB.httpStatus,
+      );
+    }
     lastGeminiResult = resB;
   }
 
-  // 6. WORKERS AI LAYER — unchanged from v10.
+  // 6. WORKERS AI LAYER — unchanged routing from v10 (binding call, not a
+  //    fetch() subrequest, so it does not draw from `budget` — see v13 note
+  //    on callWorkersAIWithRetry above).
   //    Build workersMsgs here using WORKERS_AI_SYSTEM_PROMPT (<800 tokens).
   //    Workers AI uses OpenAI-style {role,content} messages, not Gemini's
   //    {role,parts:[{text}]} format. workersMsgs is shared by Groq and
@@ -2001,12 +2320,12 @@ export async function onRequestPost(context) {
     console.error('[chat.js] Workers AI failed:', layerWorkers.errStatus);
   }
 
-  // 7. GROQ LAYERS — try each of up to 13 keys in sequence.
+  // 7. GROQ LAYERS — try each of up to 13 keys, in rotated order (v13).
   //    All keys use llama-3.1-8b-instant via callGroqWithRetry().
-  //    Free tier: 14,400 req/day, 30 RPM, 6K TPM per key.
+  //    Free tier: 1,000 req/day, 30 RPM, 6K TPM per key (corrected v12).
   //    WORKERS_AI_SYSTEM_PROMPT (~800 tokens) keeps requests below 6K TPM cap.
   //    Naming: GROQ_API_KEY (member 1) + GROQ_API_KEY_1…GROQ_API_KEY_12 (members 2–13).
-  const groqKeys = [
+  const groqKeysIndexed = [
     env.GROQ_API_KEY    || '',
     env.GROQ_API_KEY_1  || '',
     env.GROQ_API_KEY_2  || '',
@@ -2020,30 +2339,39 @@ export async function onRequestPost(context) {
     env.GROQ_API_KEY_10 || '',
     env.GROQ_API_KEY_11 || '',
     env.GROQ_API_KEY_12 || '',
-  ].filter(k => k);
+  ]
+    .map((key, originalIndex) => ({ key, originalIndex }))
+    .filter(k => k.key);
+  const groqPool = rotateStart(groqKeysIndexed);
 
-  for (let i = 0; i < groqKeys.length; i++) {
-    const resG = await callGroqWithRetry(groqKeys[i], workersMsgs);
+  for (const { key: gqKey, originalIndex } of groqPool) {
+    if (budget.remaining() <= 0) {
+      console.warn('[chat.js] Subrequest budget exhausted during Groq layer — stopping early.');
+      break;
+    }
+    const resG = await callGroqWithRetry(gqKey, workersMsgs, budget);
     if (resG.ok) {
       return json(
         { reply: resG.reply },
         200,
-        { 'X-CES-AI-Source': i === 0 ? 'groq-fallback' : `groq-key${i + 1}-fallback` },
+        { 'X-CES-AI-Source': originalIndex === 0 ? 'groq-fallback' : `groq-key${originalIndex + 1}-fallback` },
         request,
       );
     }
-    console.warn(
-      `[chat.js] Groq key${i === 0 ? '' : i + 1} failed:`,
-      resG.errStatus, resG.httpStatus,
-    );
+    if (resG.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED') {
+      console.warn(
+        `[chat.js] Groq key${originalIndex === 0 ? '' : originalIndex + 1} failed:`,
+        resG.errStatus, resG.httpStatus,
+      );
+    }
   }
 
-  // 8. OPENROUTER LAYERS — try each of up to 13 keys in sequence.
+  // 8. OPENROUTER LAYERS — try each of up to 13 keys, in rotated order (v13).
   //    All keys use meta-llama/llama-3.3-70b-instruct:free via callOpenRouterWithRetry().
   //    Free tier: 50 req/day, 20 RPM per key. HTTP-Referer and X-Title sent
   //    per OpenRouter docs (handled inside callOpenRouterWithRetry).
   //    Naming: OPENROUTER_API_KEY (member 1) + OPENROUTER_API_KEY_1…_12 (members 2–13).
-  const openRouterKeys = [
+  const openRouterKeysIndexed = [
     env.OPENROUTER_API_KEY    || '',
     env.OPENROUTER_API_KEY_1  || '',
     env.OPENROUTER_API_KEY_2  || '',
@@ -2057,28 +2385,38 @@ export async function onRequestPost(context) {
     env.OPENROUTER_API_KEY_10 || '',
     env.OPENROUTER_API_KEY_11 || '',
     env.OPENROUTER_API_KEY_12 || '',
-  ].filter(k => k);
+  ]
+    .map((key, originalIndex) => ({ key, originalIndex }))
+    .filter(k => k.key);
+  const openRouterPool = rotateStart(openRouterKeysIndexed);
 
-  for (let i = 0; i < openRouterKeys.length; i++) {
-    const resOR = await callOpenRouterWithRetry(openRouterKeys[i], workersMsgs);
+  for (const { key: orKey, originalIndex } of openRouterPool) {
+    if (budget.remaining() <= 0) {
+      console.warn('[chat.js] Subrequest budget exhausted during OpenRouter layer — stopping early.');
+      break;
+    }
+    const resOR = await callOpenRouterWithRetry(orKey, workersMsgs, budget);
     if (resOR.ok) {
       return json(
         { reply: resOR.reply },
         200,
-        { 'X-CES-AI-Source': i === 0 ? 'openrouter-fallback' : `openrouter-key${i + 1}-fallback` },
+        { 'X-CES-AI-Source': originalIndex === 0 ? 'openrouter-fallback' : `openrouter-key${originalIndex + 1}-fallback` },
         request,
       );
     }
-    console.warn(
-      `[chat.js] OpenRouter key${i === 0 ? '' : i + 1} failed:`,
-      resOR.errStatus, resOR.httpStatus,
-    );
+    if (resOR.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED') {
+      console.warn(
+        `[chat.js] OpenRouter key${originalIndex === 0 ? '' : originalIndex + 1} failed:`,
+        resOR.errStatus, resOR.httpStatus,
+      );
+    }
   }
 
   // 9. All layers exhausted.
   //    lastGeminiResult = the final callGeminiWithRetry() outcome (last key,
-  //    FALLBACK model). workersAttempted = whether Workers AI was tried.
-  //    buildFriendlyError() is unchanged from v10.
+  //    FALLBACK model) — or the synthetic SUBREQUEST_BUDGET_EXHAUSTED result
+  //    set above if we broke out of the Gemini loop early (v13).
+  //    workersAttempted = whether Workers AI was tried.
   return json({ error: buildFriendlyError(lastGeminiResult, workersAttempted) }, 502, undefined, request);
 }
 
