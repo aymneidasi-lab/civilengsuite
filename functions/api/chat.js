@@ -1,6 +1,38 @@
 /**
- * functions/api/chat.js  —  v13  (2026-06-27)
+ * functions/api/chat.js  —  v14  (2026-06-27)
  * ──────────────────────────────────────────────────────────────────────────
+ * ════════════════════════════════════════
+ * CHANGELOG v14 — IDENTITY + DEVELOPER MODE + SECURITY FIX
+ * ════════════════════════════════════════
+ *
+ * CHANGE 1 (IDENTITY): Added ASSISTANT_NAME constant and YOUR NAME & IDENTITY
+ *   block to SYSTEM_PROMPT, GEMINI_FOLLOWUP_PROMPT, and WORKERS_AI_SYSTEM_PROMPT.
+ *   Bot now recognises its name "Eng_pro assist" when addressed, and answers
+ *   name questions ("ما اسمك؟", "who are you?") in both languages correctly.
+ *   Never claims to be Gemini, ChatGPT, Claude, or any other AI brand.
+ *
+ * CHANGE 2 (DEVELOPER MODE): Added DEVELOPER_SYSTEM_PROMPT and server-side
+ *   isDeveloperMode validation. When the Cloudflare Pages secret DEVELOPER_PASSWORD
+ *   matches body.devPassword sent by the client, DEVELOPER_SYSTEM_PROMPT is
+ *   prepended to the active base prompt, granting the programmer full technical
+ *   access: complete code generation for any project file, architecture discussion,
+ *   internal file details, TTS provider alternatives.
+ *   All five provider return paths include { devMode: true } so the client can
+ *   display the 🔓 [Dev] badge on bot bubbles.
+ *   ENV VAR REQUIRED: DEVELOPER_PASSWORD (Secret) in Cloudflare Pages dashboard.
+ *   CLIENT PROTOCOL: type /dev YOUR_PASSWORD in the chat widget; widget sends
+ *   devPassword on every subsequent request; server re-validates each turn.
+ *
+ * CHANGE 3 (SECURITY FIX — v13 bug corrected here):
+ *   crypto.subtle.timingSafeEqual() does NOT exist in the Web Crypto API (WHATWG
+ *   spec). It is a Node.js-only method on the crypto module — a completely
+ *   different object. On Cloudflare Workers the call always threw TypeError,
+ *   the outer try/catch caught it, and fell back to a direct === compare —
+ *   functionally correct but not cryptographically timing-safe.
+ *   FIX: replaced with hmacTimingSafeEqual() — an HMAC-SHA256 based constant-time
+ *   comparison using only real Web Crypto API primitives (generateKey + sign +
+ *   XOR accumulator). See the helper's comment block for full rationale.
+ *
  * ════════════════════════════════════════
  * CHANGELOG v13 — CONCURRENCY: MANY SIMULTANEOUS USERS, NOT JUST MANY DAYS
  * ════════════════════════════════════════
@@ -629,9 +661,25 @@ function getCorsHeaders(request) {
 }
 
 // ── System prompt — complete product knowledge base (v4) ──────────────────
+// ── Bot identity constant (single source of truth across all prompts) ─────
+const ASSISTANT_NAME = 'Eng_pro assist';
+
 const SYSTEM_PROMPT = `\
-You are the official AI assistant and sales advisor for Civil Engineering Suite
+You are Eng_pro assist — the official AI assistant and sales advisor for Civil Engineering Suite
 (civilengsuite.pages.dev), built by Eng. Aymn Asi — a practicing Licensed Structural Engineer.
+
+════════════════════════════════════════
+YOUR NAME & IDENTITY — CRITICAL
+════════════════════════════════════════
+• Your name is Eng_pro assist. This is the only name you go by.
+• When a user addresses you as "Eng_pro", "eng pro", "Eng pro assist", "Eng_pro assist",
+  "مساعد المهندس", "المساعد", "إنت مين", or any direct address — acknowledge it naturally
+  and continue without breaking stride. Do not make a production of it.
+• When asked "ما اسمك؟" / "what is your name?" / "من أنت؟" / "who are you?" — reply plainly:
+  Arabic  → "أنا Eng_pro assist، المساعد الرسمي لـ Civil Engineering Suite."
+  English → "I'm Eng_pro assist, the official AI assistant for Civil Engineering Suite."
+• Never claim to be ChatGPT, Gemini, Bard, Claude, or any other AI brand. You are Eng_pro assist.
+• You were built specifically for Civil Engineering Suite by Eng. Aymn Asi.
 
 YOUR ROLE: Talk to engineers the way a sharp, helpful colleague would — answer real technical
 questions, teach when useful, and steer genuine interest toward purchase without sounding scripted.
@@ -1496,8 +1544,10 @@ BEHAVIOUR RULES
 // once. Net effect on a typical 5-message exchange: ~65,000 system-prompt
 // tokens → ~13,000 + 4×1,150 ≈ 17,600 tokens, a ~73% reduction.
 const GEMINI_FOLLOWUP_PROMPT = `\
-You are continuing an existing conversation as the AI assistant for Civil Engineering Suite
-(civilengsuite.pages.dev), built by Eng. Aymn Asi — a practicing Licensed Structural Engineer.
+You are continuing an existing conversation as Eng_pro assist — the official AI assistant for
+Civil Engineering Suite (civilengsuite.pages.dev), built by Eng. Aymn Asi.
+Your name is Eng_pro assist. If asked your name at any point: Arabic → "أنا Eng_pro assist"،
+English → "I'm Eng_pro assist." Never claim to be ChatGPT, Gemini, or any other AI brand.
 The full identity, tone, and product knowledge were already established earlier in this thread
 via your own prior replies (visible in the conversation history below). Stay in that voice.
 This is a condensed reminder, not the full brief — answer naturally from what you already know
@@ -1567,8 +1617,10 @@ BEHAVIOUR RULES:
 // context window. This version preserves identity, behaviour rules, core product
 // facts, and contact info in under 800 tokens — enough for Layer 3 fallback use.
 const WORKERS_AI_SYSTEM_PROMPT = `\
-You are the official AI assistant for Civil Engineering Suite (civilengsuite.pages.dev),
-built by Eng. Aymn Asi — a licensed structural engineer.
+Your name is Eng_pro assist. You are the official AI assistant for Civil Engineering Suite
+(civilengsuite.pages.dev), built by Eng. Aymn Asi — a licensed structural engineer.
+If asked your name: Arabic → "أنا Eng_pro assist" — English → "I'm Eng_pro assist."
+Never claim to be ChatGPT, Gemini, or any other AI brand.
 
 LANGUAGE RULE (critical): Arabic message → reply only in Egyptian Arabic dialect
 (عامية مصرية), never Modern Standard Arabic. English message → reply only in English.
@@ -1609,6 +1661,117 @@ BEHAVIOUR:
 • If you lack information: direct the user to Eng. Aymn Asi at aymneidasi@gmail.com
   or WhatsApp +201287232413 — do not guess.
 • Bring up purchase steps only when the user shows genuine buying intent.`;
+
+// ── Developer / Programmer Mode prompt extension ──────────────────────────
+// Injected as a PREFIX to whichever system prompt is in use when a request
+// arrives with a valid DEVELOPER_PASSWORD match. The base prompt (SYSTEM_PROMPT
+// or GEMINI_FOLLOWUP_PROMPT or WORKERS_AI_SYSTEM_PROMPT) is appended after it,
+// keeping all normal persona and language rules active.
+//
+// ENV VAR: DEVELOPER_PASSWORD  (Secret, Cloudflare Dashboard)
+//   Set this to any strong passphrase — it is never sent to the AI model,
+//   only validated server-side. Keep it out of source control.
+//
+// CLIENT PROTOCOL:
+//   Send { message, history, devPassword: "your-secret" } in the request body.
+//   Server compares devPassword === env.DEVELOPER_PASSWORD (constant-time).
+//   On success, response includes { reply, devMode: true }.
+//   Client stores devMode state for the session and forwards devPassword on
+//   every subsequent request so the mode persists across turns.
+//
+// WHAT DEVELOPER MODE ENABLES (in the AI's behaviour):
+//   • Full technical discussion of internal implementation files
+//     (chat.js, tts.js, __path__.js, pc_suite_v2_FIXED_4.html)
+//   • Complete, production-ready code generation / modification suggestions
+//     the developer can copy-paste and deploy — no placeholders, no TODOs
+//   • Architectural critique and improvement recommendations
+//   • TTS provider alternatives with complete replacement tts.js code
+//   • No limit on technical depth — the programmer has full access
+//
+// WHAT IT CANNOT DO (hard reality, stated honestly in the prompt):
+//   The AI cannot directly write to or execute files on the Cloudflare
+//   edge — it generates content; the developer deploys it.
+const DEVELOPER_SYSTEM_PROMPT = `
+══════════════════════════════════════════════════════════════
+DEVELOPER MODE ACTIVE — AUTHENTICATED: Eng. Aymn Asi (programmer)
+══════════════════════════════════════════════════════════════
+The human in this conversation is the developer who built Civil Engineering Suite
+and programmed you (Eng_pro assist). Full technical access is granted for this session.
+
+YOU MAY NOW:
+• Discuss your own implementation files in complete technical detail:
+  – functions/api/chat.js     (this file — AI proxy, provider chain, rate limiting)
+  – functions/api/tts.js      (Google Translate TTS proxy, Cloudflare edge cache)
+  – functions/api/__path__.js (route handler / CSP / headers)
+  – pc_suite_v2_FIXED_4.html  (frontend — chat widget, TTS engine, voice recognition)
+• Generate complete, production-ready modifications to any of these files —
+  full working code, correct indentation, zero placeholders, zero TODO comments.
+• Analyse bugs, performance issues, and architectural gaps in the current system.
+• Provide complete alternative implementations (e.g., replacement tts.js for a
+  different TTS provider) with all integration details.
+• Discuss Cloudflare Pages/Workers architecture, KV bindings, Rate Limiter
+  bindings, env vars, subrequest budgets, and deployment steps.
+• Answer any system design question with no restriction on technical depth.
+
+HARD REALITY (state this honestly if the developer asks):
+You cannot directly execute code or write to files on the Cloudflare edge.
+What you deliver is complete file content the developer copies and deploys via
+the Cloudflare dashboard or git push. That IS the correct workflow for this stack.
+
+TTS IMPROVEMENT — CONTEXT FOR DEVELOPER QUESTIONS:
+Current: tts.js proxies Google Translate TTS (translate_tts endpoint).
+Quality: Good for Arabic — better than browser SpeechSynthesis — but synthetic.
+Alternatives the developer can request a complete new tts.js for:
+  1. ElevenLabs API  — most natural Arabic voice; free tier 10,000 chars/month.
+     Env var: ELEVENLABS_API_KEY + ELEVENLABS_VOICE_ID (Arabic voice ID)
+  2. Azure Cognitive Services Speech — free tier 5 hrs TTS/month.
+     Env var: AZURE_SPEECH_KEY + AZURE_SPEECH_REGION
+  3. Google Cloud Text-to-Speech (not Translate) — WaveNet/Neural2 Arabic voices.
+     Env var: GOOGLE_TTS_API_KEY
+  If the developer says "improve TTS", generate a complete drop-in replacement
+  tts.js for their chosen provider with all error handling and CORS intact.
+
+TONE IN DEVELOPER MODE:
+Technical, precise, direct. Skip the sales persona when the developer is asking
+about system internals. Switch back to full assistant persona for any
+non-developer engineering or product question that a regular user might also ask.
+══════════════════════════════════════════════════════════════
+`;
+
+// ── [v14] Timing-safe password comparison — Web Crypto API (Cloudflare Workers) ──
+// BUG in v13: crypto.subtle.timingSafeEqual() was called but that method does NOT
+// exist in the Web Crypto API (WHATWG spec). It exists only in Node.js as
+// crypto.timingSafeEqual() — a completely different object and runtime.
+// In Cloudflare Workers the call always threw TypeError, caught by the outer
+// try/catch, and fell back to a direct === compare — functionally correct but
+// not cryptographically timing-safe (JS engines may short-circuit on the first
+// differing byte, leaking length/prefix info under precise timing measurements).
+//
+// FIX: HMAC-SHA256 based comparison.
+//   Both passwords are HMAC'd under the SAME freshly-generated random key.
+//   HMAC output is always 32 bytes regardless of input length, eliminating the
+//   length side-channel. The outputs are then compared with a bitwise XOR
+//   accumulator that runs all 32 iterations unconditionally — constant-time.
+//   This is the standard pattern in the Web Crypto API cookbook for timing-safe
+//   equality, and is the approach recommended by Cloudflare's own docs.
+async function hmacTimingSafeEqual(a, b) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.generateKey(
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const [sigA, sigB] = await Promise.all([
+    crypto.subtle.sign('HMAC', key, enc.encode(a)),
+    crypto.subtle.sign('HMAC', key, enc.encode(b)),
+  ]);
+  const arrA = new Uint8Array(sigA);
+  const arrB = new Uint8Array(sigB);
+  // HMAC-SHA256 always returns 32 bytes — lengths are always identical.
+  let diff = 0;
+  for (let i = 0; i < arrA.length; i++) diff |= arrA[i] ^ arrB[i];
+  return diff === 0;
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function json(data, status = 200, extraHeaders, request) {
@@ -2187,6 +2350,32 @@ export async function onRequestPost(context) {
     );
   }
 
+  // 2b. Developer mode authentication.
+  //     Client sends { message, history, devPassword: "secret" } when the user
+  //     has activated dev mode via the /dev command in the chat widget.
+  //     Validated server-side only — the password never reaches the AI model.
+  //     DEVELOPER_PASSWORD must be set as a Secret in Cloudflare Pages dashboard.
+  //     [v14] Uses hmacTimingSafeEqual() — see the helper above for full rationale.
+  const incomingDevPw   = typeof body.devPassword === 'string' ? body.devPassword : '';
+  const configuredDevPw = typeof env.DEVELOPER_PASSWORD === 'string' ? env.DEVELOPER_PASSWORD : '';
+  let isDeveloperMode = false;
+  if (incomingDevPw && configuredDevPw) {
+    try {
+      isDeveloperMode = await hmacTimingSafeEqual(incomingDevPw, configuredDevPw);
+    } catch (_) {
+      // hmacTimingSafeEqual failed (crypto.subtle unavailable — should never
+      // happen on Cloudflare Workers). Fall back to direct compare: functionally
+      // correct, not timing-safe, but rate limiting above throttles brute-force
+      // attempts that would exploit a timing side-channel.
+      isDeveloperMode = (incomingDevPw === configuredDevPw);
+    }
+    if (isDeveloperMode) {
+      console.info('[chat.js] Developer mode authenticated for request from', clientIp);
+    } else {
+      console.warn('[chat.js] Developer mode: wrong password attempt from', clientIp);
+    }
+  }
+
   // 3. Normalize history — keep last 10 turns (5 exchanges) for token budget.
   //    Single normalisation pass; geminiContents is the only payload built here.
   //    (openaiMessages was dead code in v7 — it only existed for the now-removed
@@ -2207,8 +2396,13 @@ export async function onRequestPost(context) {
   // condensed ~1,150-token GEMINI_FOLLOWUP_PROMPT instead. turns.length === 1
   // means only the live message is present, i.e. recentHistory was empty.
   // See the comment above GEMINI_FOLLOWUP_PROMPT for the full rationale.
-  const isFirstTurn       = turns.length === 1;
-  const geminiSystemPrompt = isFirstTurn ? SYSTEM_PROMPT : GEMINI_FOLLOWUP_PROMPT;
+  const isFirstTurn        = turns.length === 1;
+  const baseSystemPrompt   = isFirstTurn ? SYSTEM_PROMPT : GEMINI_FOLLOWUP_PROMPT;
+  // In developer mode, prefix DEVELOPER_SYSTEM_PROMPT so the model has full
+  // technical context while the base persona stays active below it.
+  const geminiSystemPrompt = isDeveloperMode
+    ? DEVELOPER_SYSTEM_PROMPT + baseSystemPrompt
+    : baseSystemPrompt;
 
   // v13: a single fetch-subrequest budget shared across every provider call
   // made for this one incoming request — see makeFetchBudget() above for why.
@@ -2259,7 +2453,7 @@ export async function onRequestPost(context) {
     const resA = await callGeminiWithRetry(gKey, GEMINI_MODEL_PRIMARY, geminiContents, geminiSystemPrompt, budget);
     if (resA.ok) {
       return json(
-        { reply: resA.reply },
+        { reply: resA.reply, ...(isDeveloperMode && { devMode: true }) },
         200,
         { 'X-CES-AI-Source': `gemini-${keyTag}primary` },
         request,
@@ -2277,7 +2471,7 @@ export async function onRequestPost(context) {
     const resB = await callGeminiWithRetry(gKey, GEMINI_MODEL_FALLBACK, geminiContents, geminiSystemPrompt, budget);
     if (resB.ok) {
       return json(
-        { reply: resB.reply },
+        { reply: resB.reply, ...(isDeveloperMode && { devMode: true }) },
         200,
         { 'X-CES-AI-Source': `gemini-${keyTag}fallback` },
         request,
@@ -2299,8 +2493,11 @@ export async function onRequestPost(context) {
   //    Workers AI uses OpenAI-style {role,content} messages, not Gemini's
   //    {role,parts:[{text}]} format. workersMsgs is shared by Groq and
   //    OpenRouter layers below (same OpenAI-compatible format).
+  const workersSystemContent = isDeveloperMode
+    ? DEVELOPER_SYSTEM_PROMPT + WORKERS_AI_SYSTEM_PROMPT
+    : WORKERS_AI_SYSTEM_PROMPT;
   const workersMsgs = [
-    { role: 'system', content: WORKERS_AI_SYSTEM_PROMPT },
+    { role: 'system', content: workersSystemContent },
     ...turns.map(t => ({
       role   : t.role === 'model' ? 'assistant' : 'user',
       content: t.text,
@@ -2310,7 +2507,7 @@ export async function onRequestPost(context) {
   const layerWorkers = await callWorkersAIWithRetry(env.AI, workersMsgs);
   if (layerWorkers.ok) {
     return json(
-      { reply: layerWorkers.reply },
+      { reply: layerWorkers.reply, ...(isDeveloperMode && { devMode: true }) },
       200,
       { 'X-CES-AI-Source': 'workers-ai-fallback' },
       request,
@@ -2352,7 +2549,7 @@ export async function onRequestPost(context) {
     const resG = await callGroqWithRetry(gqKey, workersMsgs, budget);
     if (resG.ok) {
       return json(
-        { reply: resG.reply },
+        { reply: resG.reply, ...(isDeveloperMode && { devMode: true }) },
         200,
         { 'X-CES-AI-Source': originalIndex === 0 ? 'groq-fallback' : `groq-key${originalIndex + 1}-fallback` },
         request,
@@ -2398,7 +2595,7 @@ export async function onRequestPost(context) {
     const resOR = await callOpenRouterWithRetry(orKey, workersMsgs, budget);
     if (resOR.ok) {
       return json(
-        { reply: resOR.reply },
+        { reply: resOR.reply, ...(isDeveloperMode && { devMode: true }) },
         200,
         { 'X-CES-AI-Source': originalIndex === 0 ? 'openrouter-fallback' : `openrouter-key${originalIndex + 1}-fallback` },
         request,
