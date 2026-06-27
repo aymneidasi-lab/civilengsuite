@@ -835,7 +835,7 @@ const SHARED_SECURITY_HEADERS = {
   'X-Frame-Options':                   'DENY',
   'Strict-Transport-Security':         'max-age=31536000; includeSubDomains; preload',
   'Referrer-Policy':                   'strict-origin-when-cross-origin',
-  'Permissions-Policy':                'camera=(), microphone=(self), geolocation=(), accelerometer=(), gyroscope=(), magnetometer=(), display-capture=(), screen-wake-lock=(), autoplay=(), clipboard-read=()',
+  'Permissions-Policy':                'camera=(), microphone=(self), geolocation=(), accelerometer=(), gyroscope=(), magnetometer=(), display-capture=(), screen-wake-lock=(), autoplay=(self), clipboard-read=()',
   'Cross-Origin-Opener-Policy':        'same-origin',
   'X-DNS-Prefetch-Control':            'off',
   'X-Permitted-Cross-Domain-Policies': 'none',

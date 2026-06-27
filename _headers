@@ -51,7 +51,7 @@
   Cross-Origin-Opener-Policy: same-origin
   Cross-Origin-Embedder-Policy: unsafe-none
   Cross-Origin-Resource-Policy: same-origin
-  Permissions-Policy: camera=(), microphone=(self), geolocation=(), accelerometer=(), gyroscope=(), magnetometer=(), display-capture=(), screen-wake-lock=(), autoplay=(), clipboard-read=()
+  Permissions-Policy: camera=(), microphone=(self), geolocation=(), accelerometer=(), gyroscope=(), magnetometer=(), display-capture=(), screen-wake-lock=(), autoplay=(self), clipboard-read=()
   Cache-Control: public, max-age=600, must-revalidate
 
 # [F1] FIX: Block crawlers from indexing encrypted .enc source files
