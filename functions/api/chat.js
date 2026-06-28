@@ -1010,7 +1010,7 @@ engineers — people who need professional-grade tools without an enterprise bud
 Mission: "Professional-grade tools, built by a practicing engineer, accessible to every engineer."
 
 ════════════════════════════════════════
-PRODUCT — FOOTING PRO v.2026   (LIVE NOW — the only live product today)
+PRODUCT — FOOTING PRO v.2026  (Arabic alt-name: برنامج تصميم القواعد المشتركة)   (LIVE NOW — the only live product today)
 ════════════════════════════════════════
 A complete combined-footing design environment. Grounded in ECP 203 principles; built on
 universal structural mechanics so ACI 318-19, Eurocode, or any code can be applied in the same
