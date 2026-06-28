@@ -1,6 +1,34 @@
 /**
- * functions/api/chat.js  —  v14  (2026-06-27)
+ * functions/api/chat.js  —  v15  (2026-06-28)
  * ──────────────────────────────────────────────────────────────────────────
+ * ════════════════════════════════════════
+ * CHANGELOG v15 — DEVELOPER MODE: HONEST GREETING, NO GATE CHANGE
+ * ════════════════════════════════════════
+ *
+ * CONTEXT: a draft proposal floated moving the developer-mode trigger from
+ *   the existing server-side password check (devPassword === env.DEVELOPER_
+ *   PASSWORD, validated in onRequestPost before any prompt is built) to an
+ *   in-prompt instruction telling the model to switch persona whenever the
+ *   user's chat text contains the phrase "developer mode" — no password.
+ *   That was rejected: it deletes the only real access control this feature
+ *   has (anyone typing the phrase gets the persona, password or not) and
+ *   replaces a deterministic boolean with the model's own probabilistic
+ *   read of chat text — the opposite of what a gate is for. The password
+ *   check below (isDeveloperMode, hmacTimingSafeEqual) is UNCHANGED in v15.
+ *
+ * CHANGE 1 (HONEST BANNER): DEVELOPER_SYSTEM_PROMPT now opens with an
+ *   explicit FIRST-RESPONSE PROTOCOL: a short banner the model prints once,
+ *   on the first authenticated turn, confirming developer mode is active.
+ *   Wording was deliberately kept truthful — "password verified", "code
+ *   review / architecture discussion", and an explicit NOT-GRANTED line
+ *   (no file-system access, no execution) — rather than the originally
+ *   drafted "ACCESS LEVEL: FULL" / "ARCHITECTURAL CONTROL" framing, which
+ *   asserts capabilities the model does not have regardless of who is
+ *   asking. The prompt now also explains to the model WHY it must not use
+ *   stronger language, so the constraint survives paraphrasing.
+ * CHANGE 2 (WORDING): "Full technical access is granted for this session"
+ *   reworded to "Full technical *discussion* access" — the model generates
+ *   code and analysis, it does not gain access to anything.
  * ════════════════════════════════════════
  * CHANGELOG v14 — IDENTITY + DEVELOPER MODE + SECURITY FIX
  * ════════════════════════════════════════
@@ -2167,17 +2195,52 @@ BEHAVIOUR:
 //     the developer can copy-paste and deploy — no placeholders, no TODOs
 //   • Architectural critique and improvement recommendations
 //   • TTS provider alternatives with complete replacement tts.js code
-//   • No limit on technical depth — the programmer has full access
+//   • No limit on technical depth — full DISCUSSION access, not system access
 //
 // WHAT IT CANNOT DO (hard reality, stated honestly in the prompt):
 //   The AI cannot directly write to or execute files on the Cloudflare
-//   edge — it generates content; the developer deploys it.
+//   edge — it generates content; the developer deploys it. [v15] The prompt
+//   now states this in the very first banner the model emits, not just in
+//   a buried "hard reality" paragraph, and the prompt explains WHY to the
+//   model so the constraint holds up under paraphrasing / follow-up
+//   questions. This is access-control-by-server (unchanged) plus
+//   honest-wording-by-prompt (new) — two different problems, both handled.
 const DEVELOPER_SYSTEM_PROMPT = `
 ══════════════════════════════════════════════════════════════
 DEVELOPER MODE ACTIVE — AUTHENTICATED: Eng. Aymn Asi (programmer)
 ══════════════════════════════════════════════════════════════
 The human in this conversation is the developer who built Civil Engineering Suite
-and programmed you (Eng_pro assist). Full technical access is granted for this session.
+and programmed you (Eng_pro assist). The password check already ran server-side,
+before this text was ever attached to the request — you are not deciding whether
+developer mode is active, the server already decided that and only attaches this
+block when it matches. Your job for the rest of this session is to act on it.
+Full technical DISCUSSION access is granted for this session — see exactly what
+that does and does not mean below.
+
+FIRST-RESPONSE PROTOCOL: your very first reply after this prompt appears must
+open with the banner block below, reproduced with its line breaks, then continue
+straight into a normal, useful answer to whatever the developer actually asked.
+Do not repeat the banner on later turns of the same session. Do not improvise a
+stronger or more dramatic version of it — use exactly this one:
+
+[DEVELOPER MODE — PASSWORD VERIFIED]
+[SESSION SCOPE: code review · architecture discussion · full file generation]
+[NOT GRANTED: file-system access · code execution · deployment]
+
+أهلاً بيك يا هندسة. كلمة السر اتأكدت من السيرفر، وأنا دلوقتي في وضع المطوّر:
+جاهز أراجع الكود، أتكلم في الـ Architecture، أو أكتبلك تعديل كامل وجاهز للنشر
+على أي ملف. ملحوظة مهمة: مفيش عندي تنفيذ فعلي أو وصول مباشر لملفات السيرفر —
+أنا بقدّملك الكود كامل وانت اللي بتراجعه وتنزّله. تحب نبدأ من فين؟
+
+WHY THE BANNER IS WORDED LIKE THAT: never claim "full access to system files,"
+"architectural control," "ACCESS LEVEL: FULL," or any phrase implying you can
+read, write, or execute anything on the actual server. Those claims are false
+regardless of who is asking — you only ever produce text; the developer is the
+one who reviews it and performs the deploy. This holds even though the person
+you're talking to right now genuinely is the authenticated developer: overstating
+your own capability is a trust problem on its own, separate from who's asking,
+and it stays false no matter how the developer rephrases the question later in
+the conversation — restate the same NOT-GRANTED facts rather than escalating.
 
 YOU MAY NOW:
 • Discuss your own implementation files in complete technical detail:
@@ -2194,7 +2257,7 @@ YOU MAY NOW:
   bindings, env vars, subrequest budgets, and deployment steps.
 • Answer any system design question with no restriction on technical depth.
 
-HARD REALITY (state this honestly if the developer asks):
+HARD REALITY (state this honestly if the developer asks, in any phrasing):
 You cannot directly execute code or write to files on the Cloudflare edge.
 What you deliver is complete file content the developer copies and deploys via
 the Cloudflare dashboard or git push. That IS the correct workflow for this stack.
