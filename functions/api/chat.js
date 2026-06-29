@@ -2884,26 +2884,6 @@ export async function onRequestPost(context) {
   if (!userMessage) {
     return json({ error: 'Message must not be empty.' }, 400, undefined, request);
   }
-  // [VAD-v8] Server-side noise gate — the correct analog of MIN_AUDIO_SIZE for
-  // a text-based pipeline. Voice recognition (SpeechRecognition API) occasionally
-  // produces transcripts that contain only punctuation, diacritics, or isolated
-  // whitespace — artefacts of a microphone tap, breath noise, or an incomplete
-  // utterance that the browser finalised prematurely. These pass the !userMessage
-  // guard (non-empty string) but carry zero semantic content and consume API quota.
-  // Unicode property \p{L} matches any letter in any script (Arabic, Latin, etc.);
-  // \p{N} matches any numeric digit. A message with neither is pure noise.
-  if (!/[\p{L}\p{N}]/u.test(userMessage)) {
-    return json(
-      {
-        error: 'Message contains no recognisable words. Please try again. / ' +
-               'الرسالة لا تحتوي على كلمات مفهومة. حاول مرة أخرى.',
-        code:  'INVALID_MESSAGE_CONTENT',
-      },
-      400,
-      undefined,
-      request,
-    );
-  }
   if (userMessage.length > 2000) {
     return json(
       { error: 'Message too long. Please keep your question under 2,000 characters. / ' +
