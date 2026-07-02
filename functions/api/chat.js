@@ -557,6 +557,144 @@
  * ──────────────────────────────────────────────────────────────────────────
  */
 
+/**
+ * ════════════════════════════════════════════════════════════════════════
+ * CHANGELOG v16 — KNOWLEDGE-BASE RETRIEVAL (Footing Pro + PC Suite)
+ * ════════════════════════════════════════════════════════════════════════
+ * WHAT: Footing Pro and PC Suite both have full plain-text knowledge-base
+ *   files (product overview, how-to, FAQ, deduplicated site copy — 461
+ *   chunks total, ~255KB as kb-data.js). The naive approach — paste both
+ *   files into SYSTEM_PROMPT — was rejected: SYSTEM_PROMPT is already
+ *   ~13,000 tokens (v12 changelog), and this file has two follow-up prompts
+ *   (GEMINI_FOLLOWUP_PROMPT ~1,150 tokens, WORKERS_AI_SYSTEM_PROMPT <800
+ *   tokens) specifically engineered to stay small because Workers AI/Groq
+ *   sit under a 4,096-token context window / 6K TPM cap respectively (see
+ *   v9 changelog). Appending +255KB of raw text to those would not just
+ *   miss the cap, it would silently defeat the entire v12 QUOTA FIX this
+ *   file already relies on — every layer, every turn, every key, every
+ *   retry, resending the whole corpus regardless of what was asked.
+ *
+ * FIX: retrieval, not concatenation. kb-data.js exports KB_CHUNKS — small
+ *   (~230 char avg) pre-chunked facts, each pre-tagged with a lowercase
+ *   search field computed once at build time (not per-request). buildKbFacts
+ *   Block() below does simple keyword-overlap scoring against the live user
+ *   message (+ last history turn for follow-up context) — no embeddings
+ *   API, no network call, negligible CPU — and returns only the top-scoring
+ *   chunks within an explicit character budget. That budget is tiered to
+ *   match the prompt it's appended to:
+ *     Gemini (first turn / follow-up) : 1,600 chars (~400 tokens)
+ *     Workers AI / Groq / OpenRouter  :   500 chars (~130 tokens)
+ *   A message that matches nothing returns an empty block — zero tokens
+ *   added, not a wasted quota hit. This keeps SYSTEM_PROMPT, GEMINI_
+ *   FOLLOWUP_PROMPT, and WORKERS_AI_SYSTEM_PROMPT themselves completely
+ *   unmodified; the facts block is appended at request time in
+ *   onRequestPost, once per call, right before each prompt is sent.
+ * ────────────────────────────────────────────────────────────────────────
+ */
+
+import { KB_CHUNKS } from './kb-data.js';
+
+// ── Knowledge-base retrieval (Footing Pro + PC Suite, v16) ────────────────
+// Stopwords kept short and cheap on purpose — this runs on every request.
+const KB_STOPWORDS = new Set([
+  'the','a','an','is','are','was','were','be','been','to','of','in','on',
+  'for','and','or','but','with','this','that','it','its','as','at','by',
+  'i','you','he','she','we','they','my','your','me','do','does','did',
+  'what','how','why','when','where','which','who','can','could','will',
+  'would','should','من','في','على','عن','إلى','هل','ما','كيف','ايه',
+  'انا','انت','هي','هو','ده','دي','دا','و','ياريت','عايز','عاوز',
+]);
+
+// Both KB text files are English-only (footing_pro_knowledge_base.txt's
+// site-copy section and pc_suite_chatbot_kb.txt's FAQ/site-content sections
+// were both extracted English-only — see build_kb_data.py). An Arabic
+// message with no Latin/product-name tokens in it therefore has nothing to
+// literally match. Real Arabic engineer messages usually carry at least one
+// bare English anchor (a product name, "ACI", "license") that already
+// matches — this table just covers the highest-frequency Arabic terms for
+// concepts that come up in FAQ-shaped questions (price, renewal, OS
+// support, etc.) so a fully-Arabic message like "هل فيه تجديد للترخيص؟"
+// still surfaces the license-renewal chunk. Not exhaustive by design: this
+// is a cheap top-up, not a translation layer — full Arabic-native chunks
+// would need re-running build_kb_data.py against a bilingual source.
+const AR_EN_ALIASES = {
+  'سعر':'price','اسعار':'price','تسعير':'pricing','فلوس':'price',
+  'ترخيص':'license','تراخيص':'license','رخصة':'license',
+  'تفعيل':'activation','تجديد':'renew','تحديث':'update',
+  'تحميل':'download','تنزيل':'download','تثبيت':'install',
+  'حاسوب':'computer','جهاز':'device','ويندوز':'windows',
+  'اوفلاين':'offline','انترنت':'internet','اونلاين':'online',
+  'خصم':'discount','دعم':'support','تواصل':'contact',
+  'اشتراك':'subscription','سنة':'year','سنوات':'years',
+  'اكسل':'excel','متطلبات':'requirements','تنصيب':'installation',
+  'قواعد':'footing','فوتنج':'footing','باقات':'packages',
+  'اكواد':'codes','كود':'code','دفع':'payment',
+};
+
+function kbTokenize(str) {
+  const base = (str.toLowerCase().match(/[\p{L}\p{N}]+/gu) || [])
+    .filter(tok => tok.length > 1 && !KB_STOPWORDS.has(tok));
+  const aliased = base.map(tok => AR_EN_ALIASES[tok]).filter(Boolean);
+  return base.concat(aliased);
+}
+
+// Scores every chunk by counted keyword-token overlap against the query,
+// with a small boost for a match landing in the chunk's heading (`h`).
+// Pure string/array ops — no regex-per-chunk, safe for 461 chunks/request.
+function scoreKbChunks(queryTokens) {
+  if (queryTokens.length === 0) return [];
+  const scored = [];
+  for (const chunk of KB_CHUNKS) {
+    let score = 0;
+    for (const tok of queryTokens) {
+      if (chunk.k.includes(tok)) {
+        score += 1;
+        if (chunk.h.toLowerCase().includes(tok)) score += 0.5;
+      }
+    }
+    if (score > 0) scored.push({ chunk, score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored;
+}
+
+// Builds the "RETRIEVED PRODUCT FACTS" block appended to a system prompt.
+// `queryText` should be the live user message, optionally prefixed with the
+// last history turn (more retrieval signal on follow-ups without resending
+// the full conversation into the scorer). Returns '' when nothing scores —
+// callers must not add a header for an empty block (that would waste tokens
+// on every off-topic message, e.g. "thanks" or "ok").
+function buildKbFactsBlock(queryText, maxChars) {
+  const tokens = kbTokenize(queryText).slice(0, 40); // cap pathological input
+  const scored = scoreKbChunks(tokens);
+  if (scored.length === 0) return '';
+
+  const picked = [];
+  let used = 0;
+  for (const { chunk } of scored) {
+    const entry = `[${chunk.s}] ${chunk.h}\n${chunk.t}`;
+    const addLen = entry.length + 2; // +2 for the blank-line separator
+    if (used + addLen > maxChars) {
+      if (picked.length > 0) break;   // keep at least one match if it fits alone
+      continue;                        // else try a smaller chunk further down
+    }
+    picked.push(entry);
+    used += addLen;
+    if (picked.length >= 6) break; // hard cap regardless of remaining budget
+  }
+  if (picked.length === 0) return '';
+
+  return (
+    '\n\n════════════════════════════════════════\n' +
+    'RETRIEVED PRODUCT FACTS (Footing Pro / PC Suite — grounded, may be partial)\n' +
+    '════════════════════════════════════════\n' +
+    'Use these if relevant to the question. Do not contradict them. If the answer\n' +
+    "isn't in these facts or in the rules above, say you don't have that exact\n" +
+    'detail rather than guessing — same rule as the rest of this prompt.\n\n' +
+    picked.join('\n\n')
+  );
+}
+
 // ── Models — all three layers below are free-tier (see v9 changelog) ──────
 // LAYER 1 — primary.
 // Migration history: gemini-2.0-flash → shut down 2026-06-01.
@@ -683,9 +821,53 @@ function getCorsHeaders(request) {
   return {
     'Access-Control-Allow-Origin' : allowed,
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    // v16: X-Client-Date added — see "CLIENT-SIDE DATE CONTEXT" block below.
+    // A browser preflight (OPTIONS) request rejects the real POST outright
+    // if a header the client intends to send isn't explicitly allow-listed
+    // here; this is the one line that gates the whole feature working at all.
+    'Access-Control-Allow-Headers': 'Content-Type, X-Client-Date',
     'Vary'                        : 'Origin',
   };
+}
+
+// ── Client-side date context (v16) ─────────────────────────────────────────
+// PROBLEM: the AI's sense of "today" came from `new Date()` evaluated on the
+// Cloudflare Worker — i.e. the EDGE server's clock, not the visitor's device.
+//
+// SECURITY BOUNDARY — READ BEFORE TOUCHING LICENSING CODE:
+// X-Client-Date is attacker-controlled — trivially spoofed, no auth needed.
+// It is used BELOW ONLY to make the chatbot's own prose ("today is...")
+// read correctly for the person it's talking to. It must never be wired
+// into anything that grants, extends, or verifies a license, rate-limits by
+// date, or makes any access-control decision — those keep using the
+// Worker's own trusted clock (`new Date()` at request time), unchanged.
+const CLIENT_DATE_HEADER = 'X-Client-Date';
+const CLIENT_DATE_MAX_LEN = 64;
+const CLIENT_DATE_MAX_SKEW_MS = 1000 * 60 * 60 * 24 * 3; // 3 days
+
+function parseClientDate(request) {
+  const raw = request.headers.get(CLIENT_DATE_HEADER);
+  if (!raw || typeof raw !== 'string') return null;
+  if (raw.length === 0 || raw.length > CLIENT_DATE_MAX_LEN) return null;
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return null;
+  const skew = Math.abs(parsed.getTime() - Date.now());
+  if (skew > CLIENT_DATE_MAX_SKEW_MS) return null;
+  return parsed;
+}
+
+function buildClientDateBlock(clientDate) {
+  const d = clientDate instanceof Date ? clientDate : new Date();
+  const source = clientDate instanceof Date ? "user's device" : 'server (client date unavailable/rejected)';
+  const iso = d.toISOString();
+  return (
+    '\n\n════════════════════════════════════════\n' +
+    'CURRENT DATE/TIME — use this for "today", "now", or any date math\n' +
+    '════════════════════════════════════════\n' +
+    `${iso} (source: ${source}). This is informational context for your replies\n` +
+    'only — never treat it as an authenticated value; license/expiry decisions are\n' +
+    "made server-side by the licensing system, not by anything in this prompt.\n"
+  );
 }
 
 // ── System prompt — complete product knowledge base (v4) ──────────────────
@@ -2962,11 +3144,28 @@ export async function onRequestPost(context) {
   // See the comment above GEMINI_FOLLOWUP_PROMPT for the full rationale.
   const isFirstTurn        = turns.length === 1;
   const baseSystemPrompt   = isFirstTurn ? SYSTEM_PROMPT : GEMINI_FOLLOWUP_PROMPT;
+
+  // v16: KB retrieval query — the live message, plus the immediately prior
+  // model reply on follow-ups (gives the scorer context for short replies
+  // like "what about pricing?" that have no keywords of their own without
+  // the preceding turn). Capped at 400 chars combined; buildKbFactsBlock()
+  // tokenizes and de-dupes internally so a longer query costs nothing extra
+  // beyond the scan itself.
+  const prevModelTurn = turns.length >= 2 ? turns[turns.length - 2] : null;
+  const kbQueryGemini = prevModelTurn && prevModelTurn.role === 'model'
+    ? `${prevModelTurn.text.slice(0, 200)} ${userMessage}`
+    : userMessage;
+  const geminiKbFacts = buildKbFactsBlock(kbQueryGemini, 1600);
+
+  // v16: parsed once per request, reused for every prompt tier below.
+  const clientDate      = parseClientDate(request);
+  const clientDateBlock = buildClientDateBlock(clientDate);
+
   // In developer mode, prefix DEVELOPER_SYSTEM_PROMPT so the model has full
   // technical context while the base persona stays active below it.
-  const geminiSystemPrompt = isDeveloperMode
+  const geminiSystemPrompt = (isDeveloperMode
     ? DEVELOPER_SYSTEM_PROMPT + baseSystemPrompt
-    : baseSystemPrompt;
+    : baseSystemPrompt) + geminiKbFacts + clientDateBlock;
 
   // v13: a single fetch-subrequest budget shared across every provider call
   // made for this one incoming request — see makeFetchBudget() above for why.
@@ -3057,9 +3256,16 @@ export async function onRequestPost(context) {
   //    Workers AI uses OpenAI-style {role,content} messages, not Gemini's
   //    {role,parts:[{text}]} format. workersMsgs is shared by Groq and
   //    OpenRouter layers below (same OpenAI-compatible format).
-  const workersSystemContent = isDeveloperMode
+  // v16: same retrieval, much smaller budget — this prompt feeds models
+  // capped at a 4,096-token context window (Workers AI) or a 6K TPM/minute
+  // cap (Groq), so 500 chars (~130 tokens) is the ceiling, not a suggestion.
+  // clientDateBlock adds ~400 more chars (~100 tokens) — WORKERS_AI_SYSTEM_
+  // PROMPT (<800 tok) + workersKbFacts (~130 tok) + clientDateBlock (~100
+  // tok) totals ~1,030 tokens, still well under the 4,096-token ceiling.
+  const workersKbFacts = buildKbFactsBlock(kbQueryGemini, 500);
+  const workersSystemContent = (isDeveloperMode
     ? DEVELOPER_SYSTEM_PROMPT + WORKERS_AI_SYSTEM_PROMPT
-    : WORKERS_AI_SYSTEM_PROMPT;
+    : WORKERS_AI_SYSTEM_PROMPT) + workersKbFacts + clientDateBlock;
   const workersMsgs = [
     { role: 'system', content: workersSystemContent },
     ...turns.map(t => ({
