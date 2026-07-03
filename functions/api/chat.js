@@ -660,15 +660,23 @@ function scoreKbChunks(queryTokens) {
 }
 
 // Builds the "RETRIEVED PRODUCT FACTS" block appended to a system prompt.
-// `queryText` should be the live user message, optionally prefixed with the
-// last history turn (more retrieval signal on follow-ups without resending
-// the full conversation into the scorer). Returns '' when nothing scores —
-// callers must not add a header for an empty block (that would waste tokens
-// on every off-topic message, e.g. "thanks" or "ok").
-function buildKbFactsBlock(queryText, maxChars) {
+// v18 PERF FIX: onRequestPost calls this twice per request — once for the
+// Gemini tier (1600-char budget) and once for Workers AI/Groq/OpenRouter
+// (500-char budget) — but both calls pass the SAME queryText. The original
+// version re-tokenized and re-ran the full KB_CHUNKS scan (measured: ~1.7ms
+// per scan at 501 chunks) inside each call, doubling that cost for zero
+// benefit since the token list and scores are identical either way — only
+// the char budget differs. Split into scoreKbForQuery() (tokenize + scan,
+// runs ONCE) and packKbFactsBlock() (budget-fit + format, cheap, runs once
+// per tier on the already-computed scores). Workers CPU is metered, so a
+// free, correctness-neutral ~1.7ms saved per request is worth taking.
+function scoreKbForQuery(queryText) {
   const tokens = kbTokenize(queryText).slice(0, 40); // cap pathological input
-  const scored = scoreKbChunks(tokens);
-  if (scored.length === 0) return '';
+  return scoreKbChunks(tokens);
+}
+
+function packKbFactsBlock(scored, maxChars) {
+  if (!scored || scored.length === 0) return '';
 
   const picked = [];
   let used = 0;
@@ -1660,6 +1668,13 @@ guide auto-saved to the Desktop.
 ❶ Microsoft Excel — REQUIRED
    Minimum: Excel 2002 (XP). Recommended: Excel 2016, 2019, or Microsoft 365.
    NOT compatible: Excel Viewer (read-only), LibreOffice Calc, Google Sheets.
+   Footing Pro does not include, bundle, or distribute Excel itself — it is a separate Microsoft
+   product the user must already own or obtain independently. If Excel isn't detected, the
+   PCsuite 2026 installer stops immediately, shows a bilingual (Arabic/English) explanation, and
+   links directly to microsoft.com/microsoft-365 to purchase it, plus saves a step-by-step guide
+   to the Desktop. If asked "is there a download link for Excel," answer: not from us directly —
+   Excel is Microsoft's product — but yes, the installer/site points you to microsoft.com/
+   microsoft-365. Never say flatly "no such link exists anywhere."
 
 ❷ Windows — REQUIRED
    Minimum: Windows 7 SP1. Recommended: Windows 10 or 11.
@@ -2242,7 +2257,10 @@ CORE PRODUCT FACTS — Civil Engineering Suite / Footing Pro v.2026 (the only li
   run. "Standalone application" describes the USER EXPERIENCE (one .exe, no manual Excel work) —
   it does NOT mean Excel is unnecessary. Never say Footing Pro/PC Suite "has no relation to
   Excel" or "doesn't need Excel" — that is factually wrong and contradicts this requirement.
-  Not compatible with Excel Viewer, LibreOffice Calc, or Google Sheets.
+  Not compatible with Excel Viewer, LibreOffice Calc, or Google Sheets. We don't distribute
+  Excel ourselves (it's Microsoft's product), but if it's missing, the installer detects that,
+  explains it bilingually, and links to microsoft.com/microsoft-365 to get it — never say flatly
+  "no download link exists," the correct answer is "not from us, but yes via that Microsoft link."
 • Also REQUIRES .NET Framework 4.8+ (pre-installed on Win 10/11; manual install needed on Win 7
   SP1) — checked automatically at startup alongside Excel and Windows version.
 • License is DEVICE-LOCKED — one license = one device. Moving to a new PC needs a new paid
@@ -2254,6 +2272,13 @@ CORE PRODUCT FACTS — Civil Engineering Suite / Footing Pro v.2026 (the only li
   License check happens ONLY at startup, never mid-session — an open session is never interrupted.
 • If subscription expires: the app stops launching. Project/design data is NEVER deleted — it
   stays on the local machine, just inaccessible until renewal.
+• Uninstalling and reinstalling on the SAME device is safe and needs no new payment — the license
+  is device-bound, not installation-bound. Working session files are memory-only and cleared on
+  close by design (security/footprint feature); saved projects persist on disk via the app's own
+  save button regardless of reinstalls. Version updates: no uninstall needed, just replace the
+  file and run — no registry entries, no admin rights, ~70MB footprint either way.
+• Personal Password: optional custom secondary access-control layer set once at registration
+  (separate from the license/device binding itself) — not required, adds an extra login step.
 • Grounded in ECP 203 by default; every parameter adjustable to ACI 318-19, Eurocode, or
   another code — fills a real gap, since no mainstream tool natively targets ECP 203.
 • Built by Eng. Aymn Asi, a practicing structural engineer; every result traces to a specific
@@ -2333,7 +2358,8 @@ PRICING (launch price, confirmed):
 • Loyalty discount: 5% off per year of duration — 2 yrs = 10% off, 3 yrs = 15% off, up to 10 yrs.
   Both apply together: lock in 249/yr AND receive the loyalty discount on top.
 • Regular (post-launch) price: 499 EGP/yr.
-• New device requires a new paid license copy.
+• New device requires a new paid license copy. Reinstalling on the SAME device is free and safe —
+  license is device-bound, not install-bound; saved projects are unaffected by reinstall.
 
 INCLUDED FEATURES (what 249 EGP buys — answer "ما المميزات" with this):
 ① AutoCAD DWG Output — fully dimensioned structural drawings from your calculations
@@ -2347,7 +2373,8 @@ INCLUDED FEATURES (what 249 EGP buys — answer "ما المميزات" with thi
 Footing Pro specifics: 19 modules · Dual-Mode Engine · Intelligent Print System.
 REQUIRES Microsoft Excel 2002+ installed (invisible backend engine — user never opens Excel, but
 it must be present or the app won't run). "Standalone" = no manual Excel work, NOT "no Excel
-needed." Never say the app has no relation to Excel. Also requires .NET Framework 4.8+ (usually
+needed." Never say the app has no relation to Excel. We don't distribute Excel ourselves, but if
+missing, the installer links to microsoft.com/microsoft-365 to get it — don't say "no link exists." Also requires .NET Framework 4.8+ (usually
 pre-installed on Win 10/11). License is device-locked, no transfer between PCs. On expiry the
 app stops launching but project data is never deleted.
 
@@ -3179,14 +3206,15 @@ export async function onRequestPost(context) {
   // v16: KB retrieval query — the live message, plus the immediately prior
   // model reply on follow-ups (gives the scorer context for short replies
   // like "what about pricing?" that have no keywords of their own without
-  // the preceding turn). Capped at 400 chars combined; buildKbFactsBlock()
+  // the preceding turn). Capped at 400 chars combined; scoreKbForQuery()
   // tokenizes and de-dupes internally so a longer query costs nothing extra
   // beyond the scan itself.
   const prevModelTurn = turns.length >= 2 ? turns[turns.length - 2] : null;
   const kbQueryGemini = prevModelTurn && prevModelTurn.role === 'model'
     ? `${prevModelTurn.text.slice(0, 200)} ${userMessage}`
     : userMessage;
-  const geminiKbFacts = buildKbFactsBlock(kbQueryGemini, 1600);
+  const kbScored      = scoreKbForQuery(kbQueryGemini); // v18: scored once, packed twice below
+  const geminiKbFacts = packKbFactsBlock(kbScored, 1600);
 
   // v16: parsed once per request, reused for every prompt tier below.
   const clientDate      = parseClientDate(request);
@@ -3293,7 +3321,7 @@ export async function onRequestPost(context) {
   // clientDateBlock adds ~400 more chars (~100 tokens) — WORKERS_AI_SYSTEM_
   // PROMPT (<800 tok) + workersKbFacts (~130 tok) + clientDateBlock (~100
   // tok) totals ~1,030 tokens, still well under the 4,096-token ceiling.
-  const workersKbFacts = buildKbFactsBlock(kbQueryGemini, 500);
+  const workersKbFacts = packKbFactsBlock(kbScored, 500); // v18: reuses kbScored, no re-scan
   const workersSystemContent = (isDeveloperMode
     ? DEVELOPER_SYSTEM_PROMPT + WORKERS_AI_SYSTEM_PROMPT
     : WORKERS_AI_SYSTEM_PROMPT) + workersKbFacts + clientDateBlock;
