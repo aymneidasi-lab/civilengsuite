@@ -208,12 +208,7 @@ export async function onRequestPost({ request, env }) {
 
   let audioBytes;
   try {
-    // Defense-in-depth: tolerate stray whitespace/line-wrap artifacts in the
-    // base64 payload (the real bug -- unescaped CR/LF breaking JSON.parse
-    // itself -- is fixed client-side in modSTTAPI.Base64EncodeFile; this
-    // only guards against a *future* client reintroducing the same class
-    // of issue after JSON has already parsed successfully).
-    audioBytes = base64ToUint8Array(audioB64.replace(/\s+/g, ''));
+    audioBytes = base64ToUint8Array(audioB64);
   } catch (e) {
     return jsonResponse(400, { error: 'Audio is not valid base64.' }, request);
   }
