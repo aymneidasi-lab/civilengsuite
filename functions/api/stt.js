@@ -1,5 +1,5 @@
 /**
- * functions/api/stt.js  —  v1.3  (2026-07-03)
+ * functions/api/stt.js  —  v1.4  (2026-07-04)
  * ──────────────────────────────────────────────────────────────────────────
  * Cloudflare Pages Function — STT Proxy
  * Route:  POST /api/stt   { "audio": "<base64>", "mime": "audio/wav", "lang": "ar" }
@@ -13,22 +13,29 @@
  * v5.0 changelog / the reported Settings screenshots); this endpoint gives
  * it a cloud path that needs no local language pack at all.
  *
- * v1.3 [ARABIC-CLOUD-DIAGNOSTICS]: after the VBA-side v1.2 JSON-escaping fix
- * (modSTTAPI.bas) shipped, ces_stt_debug.log showed CallSTTEndpoint reaching
- * this endpoint successfully but landing on the generic 503 "STT provider
- * unavailable. Retry shortly." on every attempt. That message was, by
- * design, identical whether the cause was a missing/invalid key, an
- * ElevenLabs-side rejection (bad audio, quota), or a network-level failure —
- * useful for not leaking provider internals to the client, useless for
- * debugging without direct access to this file's console.error output
- * (Cloudflare's function logs), which the VBA client has no way to read.
- * fetchElevenSTT/fetchOpenAiSTT now attach the SAME pre-sanitized category
- * string (never the raw provider response body) plus the numeric HTTP
- * status to the thrown Error; onRequestPost surfaces both via
- * X-STT-Tier1-Status / X-STT-Tier1-Reason (and Tier2 equivalents) response
- * headers on the 503 path only. Response bodies are byte-identical to v1 —
- * this is a strictly additive, header-only change. See modSTTAPI.bas v1.3
- * for the client-side read of these headers.
+ * v1.4 [QUOTA-DIAGNOSTIC-FIX]: v1.3's tier1/tier2 header diagnostics reused
+ * a fixed HTTP-status -> hint table (401/422/429/other) that assumed
+ * ElevenLabs always reports quota exhaustion as HTTP 429. Live traffic
+ * showed that's wrong: a direct curl reproduction against
+ * https://api.elevenlabs.io/v1/speech-to-text with a fully valid,
+ * correctly-permissioned key returned a *body* of
+ *   { "detail": { "type": "invalid_request", "code": "quota_exceeded",
+ *                  "status": "quota_exceeded",
+ *                  "message": "This request exceeds your quota of 10000.
+ *                  You have 0 credits remaining, while 9 credits are
+ *                  required for this request." } }
+ * under an HTTP status this file's old table mapped straight to
+ * "invalid or missing ELEVEN_API_KEY" -- three separate live debugging
+ * sessions chased a phantom key/permissions bug because the true cause
+ * (0 ElevenLabs credits remaining) was sitting in the response body the
+ * whole time and was never read. FIX: fetchElevenSTT/fetchOpenAiSTT now
+ * read+parse the JSON error body FIRST and check for a quota/credit
+ * signal there before falling back to the old status-code table. Response
+ * bodies returned to the VBA client are still byte-identical to v1 (this
+ * is a header-only diagnostic change, same as v1.3) — only the
+ * X-STT-Tier1-Reason / X-STT-Tier2-Reason header values are more accurate
+ * now. modSTTAPI.bas needs no change: it already just relays whatever
+ * string is in those headers.
  *
  * ── ARCHITECTURE ──────────────────────────────────────────────────────────
  *
@@ -68,6 +75,8 @@
  *
  * ── RESPONSE HEADERS ─────────────────────────────────────────────────────
  *   X-STT-Engine : 'elevenlabs' | 'whisper'
+ *   X-STT-Tier1-Status / X-STT-Tier1-Reason : present only on the final
+ *     503 path (see v1.3/v1.4 notes above). Tier2 equivalents likewise.
  *
  * ── CSP NOTE ─────────────────────────────────────────────────────────────
  *   Called from the VBA client via MSXML2.ServerXMLHTTP, not from a browser
@@ -134,6 +143,55 @@ function base64ToUint8Array(b64) {
   return bytes;
 }
 
+/**
+ * v1.4: Read a failed fetch Response body ONCE, safely, and pull out
+ * whatever quota/credit signal ElevenLabs (or OpenAI) put there. Returns
+ * null if the body isn't JSON or doesn't look quota-related -- callers
+ * fall back to their existing HTTP-status table in that case.
+ *
+ * IMPORTANT: a Response body can only be read once. This function OWNS
+ * that read for the error path -- callers must not also call res.json()
+ * or res.text() on the same Response after calling this.
+ *
+ * @param {Response} res
+ * @returns {Promise<{ raw: any, quotaMessage: string|null }>}
+ */
+async function readErrorBody(res) {
+  let raw = null;
+  try {
+    raw = await res.json();
+  } catch (_e) {
+    return { raw: null, quotaMessage: null };
+  }
+
+  // ElevenLabs shape: { detail: { code, status, message, type } }
+  const detail = raw?.detail;
+  const code   = detail?.code || detail?.status || raw?.code || raw?.status || '';
+  const msg    = detail?.message || raw?.message || '';
+
+  const looksLikeQuota =
+    /quota_exceeded/i.test(String(code)) ||
+    /quota/i.test(String(msg)) ||
+    /credits?\s+remaining/i.test(String(msg)) ||
+    /insufficient_quota/i.test(String(code)); // OpenAI's equivalent code
+
+  if (looksLikeQuota) {
+    // Keep this short and account-agnostic -- never forward raw provider
+    // text verbatim (may vary in format/wording), just the fixed category
+    // plus the numeric credit counts if present (safe, non-identifying).
+    const creditsMatch = String(msg).match(/(\d+)\s+credits?\s+remaining/i);
+    const remaining = creditsMatch ? creditsMatch[1] : null;
+    return {
+      raw,
+      quotaMessage: remaining !== null
+        ? `quota exceeded (${remaining} credits remaining)`
+        : 'quota exceeded (0 credits remaining)',
+    };
+  }
+
+  return { raw, quotaMessage: null };
+}
+
 // ── TIER 1 — ElevenLabs Scribe v2 ──────────────────────────────────────────
 /**
  * @param {Uint8Array} audioBytes
@@ -155,16 +213,21 @@ async function fetchElevenSTT(audioBytes, mime, lang, apiKey) {
   });
 
   if (!res.ok) {
-    // Never forward the raw ElevenLabs error body to the client -- `hint`
-    // below is already a fixed, pre-sanitized category string (no account
-    // info, no request IDs, no provider response text), so it is safe to
-    // surface via a response header for client-side diagnostics. See the
-    // v1.3 note in onRequestPost for how this gets attached.
+    // v1.4: check the response BODY for a quota signal before trusting
+    // the HTTP status code alone -- see readErrorBody() header comment
+    // for why the old status-only table was actively misleading.
+    const { quotaMessage } = await readErrorBody(res);
+
     const hint =
+      quotaMessage ? `ElevenLabs ${quotaMessage}` :
       res.status === 401 ? 'invalid or missing ELEVEN_API_KEY' :
       res.status === 422 ? 'unsupported/unreadable audio for Scribe v2' :
       res.status === 429 ? 'ElevenLabs quota exceeded' :
       `HTTP ${res.status}`;
+    // Never forward the raw ElevenLabs error body to the client -- `hint`
+    // is a fixed, pre-sanitized category string (no account info, no
+    // request IDs, no provider response text), so it is safe to surface
+    // via a response header for client-side diagnostics.
     const err = new Error(`ElevenLabs STT: ${hint}`);
     err.httpStatus = res.status;
     err.category = hint;
@@ -193,7 +256,14 @@ async function fetchOpenAiSTT(audioBytes, mime, lang, apiKey) {
   });
 
   if (!res.ok) {
+    // v1.4: same body-first quota check as fetchElevenSTT. OpenAI reports
+    // quota exhaustion as code "insufficient_quota", almost always under
+    // HTTP 429 already -- but check the body anyway for consistency and
+    // in case that changes upstream.
+    const { quotaMessage } = await readErrorBody(res);
+
     const hint =
+      quotaMessage ? `OpenAI ${quotaMessage}` :
       res.status === 401 ? 'invalid or missing OPENAI_API_KEY' :
       res.status === 429 ? 'OpenAI quota exceeded' :
       `HTTP ${res.status}`;
@@ -229,7 +299,7 @@ export async function onRequestPost({ request, env }) {
   if (langRaw.length > 0 && !ALLOWED_LANGS.has(langRaw)) {
     // Unknown hint -- don't fail the request, just fall back to auto-detect,
     // exactly like tts.js falls back to its default lang on an unknown code.
-    console.error(`[stt.js v1] Unrecognized lang "${langRaw}" -- using auto-detect.`);
+    console.error(`[stt.js v1.4] Unrecognized lang "${langRaw}" -- using auto-detect.`);
   }
   const lang = ALLOWED_LANGS.has(langRaw) ? langRaw : '';
 
@@ -246,15 +316,16 @@ export async function onRequestPost({ request, env }) {
   const elevenKey = env?.ELEVEN_API_KEY?.trim() || '';
   const openAiKey = env?.OPENAI_API_KEY?.trim() || '';
 
-  // v1.3 [ARABIC-CLOUD-DIAGNOSTICS]: capture (not just console.error) each
-  // tier's failure so the final 502/503 response can carry a safe,
+  // v1.3/v1.4 [ARABIC-CLOUD-DIAGNOSTICS]: capture (not just console.error)
+  // each tier's failure so the final 502/503 response can carry a safe,
   // category-only diagnostic header. The VBA client has no access to
   // Cloudflare's function logs, so "no key configured" vs "key present but
   // ElevenLabs rejected the request" vs "quota exhausted" previously all
   // looked identical client-side ("STT provider unavailable. Retry
-  // shortly."). Still never exposes raw provider response bodies, account
-  // details, or request IDs -- only the same fixed category strings this
-  // file already computed and previously discarded after console.error.
+  // shortly."). v1.4 additionally fixed quota_exceeded being misreported
+  // as an auth failure -- see the v1.4 header note above. Still never
+  // exposes raw provider response bodies, account details, or request
+  // IDs -- only the fixed category strings this file already computed.
   let tier1Err = null;
   let tier2Err = null;
 
@@ -264,7 +335,7 @@ export async function onRequestPost({ request, env }) {
       const text = await fetchElevenSTT(audioBytes, mime, lang, elevenKey);
       return jsonResponse(200, { text }, request, { 'X-STT-Engine': 'elevenlabs' });
     } catch (elErr) {
-      console.error('[stt.js v1] ElevenLabs Scribe failed, trying fallback.', elErr.message);
+      console.error('[stt.js v1.4] ElevenLabs Scribe failed, trying fallback.', elErr.message);
       tier1Err = elErr;
     }
   }
@@ -275,7 +346,7 @@ export async function onRequestPost({ request, env }) {
       const text = await fetchOpenAiSTT(audioBytes, mime, lang, openAiKey);
       return jsonResponse(200, { text }, request, { 'X-STT-Engine': 'whisper' });
     } catch (oaErr) {
-      console.error('[stt.js v1] OpenAI Whisper also failed.', oaErr.message);
+      console.error('[stt.js v1.4] OpenAI Whisper also failed.', oaErr.message);
       tier2Err = oaErr;
     }
   }
