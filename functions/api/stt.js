@@ -125,6 +125,41 @@ function base64ToUint8Array(b64) {
  * @param {string} apiKey ElevenLabs key (same as tts.js's ELEVEN_API_KEY)
  * @returns {Promise<string>} transcript text (may be "")
  */
+// [ARABIC-STT-DIAGNOSABILITY] Every failure branch previously collapsed into
+// the single client-facing string "STT provider unavailable. Retry shortly."
+// -- indistinguishable in modSTTAPI's debug log whether the cause was a bad
+// key, a key scoped to TTS-only (ElevenLabs keys support per-endpoint scope
+// restriction -- a key that works fine for tts.js's /v1/text-to-speech can
+// still 401/403 on this route's /v1/speech-to-text if it was never granted
+// STT scope), a quota ceiling, unreadable audio, or a genuine network blip.
+// That ambiguity is why the Arabic-STT investigation kept landing on the
+// local-recognizer fallback instead of the actual cloud-call failure. FIX:
+// classify the failure into a small, closed set of NON-SENSITIVE reason
+// codes (never raw provider response text/JSON) and thread that code to the
+// client via X-STT-Fail-Reason, so the next failure comes with an actual
+// diagnosis instead of a dead end.
+function classifyEleven(status) {
+  switch (status) {
+    case 401: return 'auth';       // bad key OR key not scoped for STT
+    case 403: return 'permission'; // key valid but lacks STT scope/IP allowlist
+    case 422: return 'audio';      // unreadable/unsupported audio for Scribe v2
+    case 429: return 'quota';      // rate limit / credits exhausted
+    default:  return 'upstream';
+  }
+}
+
+function classifyOpenAi(status) {
+  switch (status) {
+    case 401: return 'auth';
+    case 429: return 'quota';
+    default:  return 'upstream';
+  }
+}
+
+/**
+ * @returns {Promise<string>} transcript text (may be "")
+ * @throws {Error} with .reasonCode set to one of classifyEleven()'s codes
+ */
 async function fetchElevenSTT(audioBytes, mime, lang, apiKey) {
   const form = new FormData();
   form.append('file', new Blob([audioBytes], { type: mime }), `audio.${extForMime(mime)}`);
@@ -138,13 +173,14 @@ async function fetchElevenSTT(audioBytes, mime, lang, apiKey) {
   });
 
   if (!res.ok) {
-    // Never forward the raw ElevenLabs error body to the client.
-    const hint =
-      res.status === 401 ? 'invalid or missing ELEVEN_API_KEY' :
-      res.status === 422 ? 'unsupported/unreadable audio for Scribe v2' :
-      res.status === 429 ? 'ElevenLabs quota exceeded' :
-      `HTTP ${res.status}`;
-    throw new Error(`ElevenLabs STT: ${hint}`);
+    const reasonCode = classifyEleven(res.status);
+    // Never forward the raw ElevenLabs error body to the client -- log it
+    // server-side only, where it's actually actionable.
+    let bodySnippet = '';
+    try { bodySnippet = (await res.text()).slice(0, 300); } catch (_) { /* ignore */ }
+    const err = new Error(`ElevenLabs STT HTTP ${res.status}: ${bodySnippet}`);
+    err.reasonCode = reasonCode;
+    throw err;
   }
 
   const payload = await res.json();
@@ -169,11 +205,12 @@ async function fetchOpenAiSTT(audioBytes, mime, lang, apiKey) {
   });
 
   if (!res.ok) {
-    const hint =
-      res.status === 401 ? 'invalid or missing OPENAI_API_KEY' :
-      res.status === 429 ? 'OpenAI quota exceeded' :
-      `HTTP ${res.status}`;
-    throw new Error(`OpenAI STT: ${hint}`);
+    const reasonCode = classifyOpenAi(res.status);
+    let bodySnippet = '';
+    try { bodySnippet = (await res.text()).slice(0, 300); } catch (_) { /* ignore */ }
+    const err = new Error(`OpenAI STT HTTP ${res.status}: ${bodySnippet}`);
+    err.reasonCode = reasonCode;
+    throw err;
   }
 
   const payload = await res.json();
@@ -219,13 +256,19 @@ export async function onRequestPost({ request, env }) {
   const elevenKey = env?.ELEVEN_API_KEY?.trim() || '';
   const openAiKey = env?.OPENAI_API_KEY?.trim() || '';
 
-  // TIER 1 — ElevenLabs Scribe v2 (same key/account as tts.js)
+  let lastReasonCode = '';
+
+  // TIER 1 — ElevenLabs Scribe v2 (same key/account as tts.js -- NOTE this
+  // assumes that key carries STT scope; a key restricted to TTS-only at
+  // creation time will 401/403 here even though tts.js works fine with it.
+  // See classifyEleven's 'auth'/'permission' codes below.)
   if (elevenKey) {
     try {
       const text = await fetchElevenSTT(audioBytes, mime, lang, elevenKey);
       return jsonResponse(200, { text }, request, { 'X-STT-Engine': 'elevenlabs' });
     } catch (elErr) {
-      console.error('[stt.js v1] ElevenLabs Scribe failed, trying fallback.', elErr.message);
+      lastReasonCode = elErr.reasonCode || 'upstream';
+      console.error('[stt.js v1] ElevenLabs Scribe failed, trying fallback.', lastReasonCode, elErr.message);
     }
   }
 
@@ -235,14 +278,30 @@ export async function onRequestPost({ request, env }) {
       const text = await fetchOpenAiSTT(audioBytes, mime, lang, openAiKey);
       return jsonResponse(200, { text }, request, { 'X-STT-Engine': 'whisper' });
     } catch (oaErr) {
-      console.error('[stt.js v1] OpenAI Whisper also failed.', oaErr.message);
+      lastReasonCode = oaErr.reasonCode || 'upstream';
+      console.error('[stt.js v1] OpenAI Whisper also failed.', lastReasonCode, oaErr.message);
     }
   }
 
   if (!elevenKey && !openAiKey) {
-    return jsonResponse(502, { error: 'STT provider not configured on the server.' }, request);
+    return jsonResponse(502, { error: 'STT provider not configured on the server.' }, request,
+      { 'X-STT-Fail-Reason': 'not_configured' });
   }
-  return jsonResponse(503, { error: 'STT provider unavailable. Retry shortly.' }, request);
+
+  // [ARABIC-STT-DIAGNOSABILITY] reasonCode is one of a small closed set
+  // ('auth'|'permission'|'audio'|'quota'|'upstream') -- safe to expose, it
+  // carries no provider response content, just a category modSTTAPI can log
+  // and a human can act on (e.g. 'permission' -> go check the ElevenLabs key
+  // scope in the dashboard instead of assuming the network is down).
+  const humanMsg =
+    lastReasonCode === 'auth'       ? 'STT provider rejected the API key.' :
+    lastReasonCode === 'permission' ? 'STT provider key lacks permission for this operation.' :
+    lastReasonCode === 'audio'      ? 'STT provider could not read the audio.' :
+    lastReasonCode === 'quota'      ? 'STT provider quota exceeded.' :
+                                       'STT provider unavailable. Retry shortly.';
+
+  return jsonResponse(503, { error: humanMsg }, request,
+    { 'X-STT-Fail-Reason': lastReasonCode || 'upstream' });
 }
 
 // ── OPTIONS preflight ─────────────────────────────────────────────────────
