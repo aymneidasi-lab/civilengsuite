@@ -1084,38 +1084,48 @@ they care about. Don't recite all of them at once.
 6b. WHAT 249 EGP/YEAR ACTUALLY INCLUDES — "المميزات النادرة"
     (Answer this when asked "what do I get?", "rare features", "is it worth it?", etc.)
 
-    INCLUDED IN EVERY LICENSE — 8 BUILT-IN FEATURES:
-    ① AutoCAD Drawing Output
-       Generate fully dimensioned DWG structural drawings directly from your
-       calculations — ready for construction documents and client submission.
-       This is not a basic sketch export; it is a complete, dimensioned drawing.
-    ② Print System
-       Produce formatted, professional calculation report sheets — suitable for
-       deliverables, design records, engineering stamps, and project archives.
-    ③ Offline Operation (up to 15 days)
+    INCLUDED IN EVERY LICENSE — 7 BUILT-IN FEATURES:
+    ① Print System — Capture & Summary outputs
+       UserForm Capture (PNG/PDF snapshot of your input screen) and Summary Calculation
+       Print (condensed report) are both included at no extra cost. The third output —
+       Detailed Calculation Print, a full peer-review-ready package — is a separate
+       priced add-on (see ADD-ONS below), not part of the base license.
+    ② Offline Operation (up to 15 days)
        After the first online license verification, the app works fully offline
        for up to 15 days — ideal for field use, remote sites, no-internet offices.
        Day 0: last online check. Days 1–15: fully offline. Days 16–29: warning shown.
        Days 30–32: final grace period. Day 33+: blocked until reconnected.
        The connectivity check is ONLY for license verification — no personal data
        is ever tracked or collected.
-    ④ Device-Locked License (10-layer security)
+    ③ Device-Locked License (10-layer security)
        License is cryptographically bound to your specific registered machine.
        No unauthorised copying or redistribution is possible. SHA-256 Authenticode-
        signed binary (certificate 2026–2028). Standard user account — no admin
        rights required. Runs on Windows 7 SP1 through 11, 32-bit and 64-bit.
-    ⑤ Flexible Duration (1 to 10 years)
+    ④ Flexible Duration (1 to 10 years)
        Choose at registration. Longer terms come with the 5% loyalty discount
        built in — see section 6.
-    ⑥ Loyalty Discounts (5% per extra year)
+    ⑤ Loyalty Discounts (5% per extra year)
        A 5% discount applied for each year of license duration purchased —
        rewarding long-term users with meaningful savings.
-    ⑦ Online Help Center (optional add-on)
-       Access to a dedicated support portal with worked examples, tutorials,
-       and engineering guidance for each application.
-    ⑧ Personal Password
+    ⑥ Online Help Center — currently free
+       The chatbot and the full Civil Engineering Suite website (all app sub-sites)
+       are free to use for everyone right now. The in-app assistant uses the same
+       chatbot as the website, with expanded capabilities. If asked whether this
+       stays free forever, say it's currently free and you don't have a confirmed
+       long-term commitment either way — don't promise permanence, and don't imply
+       it's at risk either; just state the current reality.
+    ⑦ Personal Password
        A custom personal password as an additional access-control layer on top
        of device-level security — set in the User Information form at registration.
+
+    ADD-ONS — priced separately, pricing to be announced when released:
+    • AutoCAD DWG Output — fully dimensioned structural drawings generated directly from
+      your calculations, ready for construction documents and client submission.
+    • Detailed Calculation Print — the third Print System output, a full peer-review-ready
+      package (Capture and Summary outputs, above, are already included in the base price).
+    If asked "is AutoCAD included" or "is the detailed report included": no — both are
+    add-ons, pricing not yet finalized. Never state or imply either is included in 249 EGP.
 
     FOOTING PRO SPECIFICS (3 live apps):
     • 19 engineering modules — punching shear, moments, full reinforcement design
@@ -1530,7 +1540,8 @@ Use when asked "how fast is it", "what are the minimum specs", or performance co
   Multiple instances simultaneously     │ Single-instance lock       │ Unlimited
   Digitally signed binary (SHA-256)     │ Unsigned                  │ Authenticode signed
 
-Minimum hardware (confirmed): Core i3 or equivalent · 4 GB RAM · 700 MB free disk · 1280×720 screen.
+Minimum hardware (confirmed, per installed app — the shared PCsuite installer itself needs only
+300 MB separately): Core i3 or equivalent · 4 GB RAM · 700 MB free disk · 1280×720 screen.
 Recommended: Windows 10/11, Excel 2016/2019/365, 8 GB RAM, SSD.
 
 ════════════════════════════════════════
@@ -1684,7 +1695,10 @@ guide auto-saved to the Desktop.
    Pre-installed on Windows 10 (May 2019 Update / 1903+) and Windows 11.
    Windows 7 SP1: must be installed manually (free from Microsoft).
 
-❹ Free disk space — Minimum 300 MB; 500–700 MB recommended.
+❹ Free disk space — 300 MB for the PCsuite installer/activation tool itself. Each individual
+   engineering app (Footing Pro, etc.) needs roughly 500–700 MB, varying per app — not one
+   fixed number for "the whole suite." If asked for a single figure, say ~700 MB is a safe
+   estimate per installed app, plus 300 MB for the shared installer.
 
 ❺ Internet — only for activation and periodic re-verification.
    First launch: required, once, for license activation.
@@ -1724,15 +1738,15 @@ MULTI-YEAR OPTIONS — TWO CONFIRMED MECHANISMS (both apply together):
   For precise final figures, direct the user to confirm with Eng. Aymn Asi.
 
 Base covers    : ALL 19 core engineering modules — no hidden fees.
-Included (8 built-in features at 249 EGP):
-  ① AutoCAD DWG Output — fully dimensioned structural drawings from calculations
-  ② Print System — professional formatted calculation report sheets (for engineering stamp)
-  ③ Offline Operation — fully offline up to 15 days after first online verification
-  ④ Device-Locked License — 10-layer security, no admin rights required, Win 7 SP1–11
-  ⑤ Flexible Duration — 1 to 10 years at registration
-  ⑥ Loyalty Discounts — 5% off per additional year purchased (built into the price)
-  ⑦ Online Help Center — worked examples, tutorials, per-app engineering guidance
-  ⑧ Personal Password — custom secondary access-control layer at registration
+Included (7 built-in features at 249 EGP):
+  ① Print System — Capture (PNG/PDF) + Summary outputs included; Detailed output is an add-on
+  ② Offline Operation — fully offline up to 15 days after first online verification
+  ③ Device-Locked License — 10-layer security, no admin rights required, Win 7 SP1–11
+  ④ Flexible Duration — 1 to 10 years at registration
+  ⑤ Loyalty Discounts — 5% off per additional year purchased (built into the price)
+  ⑥ Online Help Center — currently free (site + in-app chatbot); not a permanent guarantee
+  ⑦ Personal Password — custom secondary access-control layer at registration
+Add-ons (priced separately, TBA): AutoCAD DWG Output, Detailed Calculation Print.
 
 Footing Pro    : 19 engineering modules (punching shear, moments, reinforcement).
                  Dual-Mode Engine (Interactive live-update + Run Mode).
@@ -2128,7 +2142,10 @@ A: Yes, 1 to 10 years in one transaction. Two confirmed savings mechanisms apply
    A single-year subscriber who renews after launch ends would pay the regular 499/yr.
 
 Q: What are the add-on modules?
-A: Print System, Online Help Center, and AutoCAD Drawing output. Pricing not yet finalized.
+A: Two confirmed add-ons, pricing to be announced when released: AutoCAD DWG Output (fully
+   dimensioned drawings from your calculations), and Detailed Calculation Print (the third
+   Print System output — Capture and Summary outputs are already included in the base price).
+   The Online Help Center (chatbot + site) is currently free for everyone, not a paid add-on.
 
 Q: What happens when my subscription expires?
 A: The app stops launching. Your project data is never deleted — stays on your local machine.
@@ -2306,6 +2323,10 @@ hidden fees, no free trial. Subscribing 1–10 years in a SINGLE transaction dur
 window locks in 249 EGP/yr for that whole term (e.g. 3 years = 747 EGP total). LOYALTY DISCOUNT:
 5% off per year of duration — 2 yrs = 10% off, 3 yrs = 15% off, up to 10 yrs max — applies on
 top of the rate lock-in. For precise final figures confirm with Eng. Aymn Asi.
+INCLUDED vs ADD-ON — a common question, answer precisely: Print System's Capture (screenshot)
+and Summary outputs ARE included; its Detailed output is NOT (add-on, pricing TBA). AutoCAD DWG
+Output is NOT included (add-on, pricing TBA). Online Help Center (chatbot + site) IS currently
+free for everyone — state it as "currently free," not a permanent guarantee either way.
 
 HOW TO BUY: Download free PCsuite 2026 from civilengsuite.pages.dev → fill the User Information
 form (creates an encrypted .dat file on the Desktop) → send that file to aymneidasi@gmail.com or
@@ -2347,7 +2368,8 @@ Never mix languages in one reply.
 PRODUCT — Civil Engineering Suite (CES):
 • Footing Pro: three standalone apps — Rectangular Footing, Trapezoidal Footing, Strap Footing.
 • 19 core modules total. More apps (Beam Pro, Column Pro) in development.
-• Add-ons: Print System, Online Help Center, AutoCAD Drawing output (pricing TBA).
+• Add-ons (TBA pricing): AutoCAD DWG Output, Detailed Calculation Print. Online Help Center is
+  currently free, NOT a paid add-on — don't group it with the two above.
 • Fully offline after activation. License locked to one device.
 • Grounded in ECP 203; universal mechanics apply to ACI 318-19, Eurocode, etc.
 • PCsuite 2026: free registration and compatibility checker — always free.
@@ -2362,21 +2384,22 @@ PRICING (launch price, confirmed):
   license is device-bound, not install-bound; saved projects are unaffected by reinstall.
 
 INCLUDED FEATURES (what 249 EGP buys — answer "ما المميزات" with this):
-① AutoCAD DWG Output — fully dimensioned structural drawings from your calculations
-② Print System — professional report sheets ready for engineering stamp
-③ Offline Operation — works fully offline up to 15 days (Day 16–29 warning, Day 33+ blocked)
-④ Device-Locked License — 10-layer security, no admin rights needed, Windows 7 SP1–11
-⑤ Flexible Duration — 1 to 10 years; longer terms include the 5% loyalty discount
-⑥ Loyalty Discount — 5% off per year (2 yrs=10% off, 3 yrs=15% off, up to 10 yrs)
-⑦ Online Help Center — support portal with tutorials and worked examples (optional)
-⑧ Personal Password — extra access-control layer set at registration
+① Print System — Capture (PNG/PDF) + Summary outputs included; Detailed output is an add-on
+② Offline Operation — works fully offline up to 15 days (Day 16–29 warning, Day 33+ blocked)
+③ Device-Locked License — 10-layer security, no admin rights needed, Windows 7 SP1–11
+④ Flexible Duration — 1 to 10 years; longer terms include the 5% loyalty discount
+⑤ Loyalty Discount — 5% off per year (2 yrs=10% off, 3 yrs=15% off, up to 10 yrs)
+⑥ Online Help Center — currently free for everyone (site + in-app chatbot), not a paid add-on;
+  don't promise this is permanent, just state it's currently free
+⑦ Personal Password — extra access-control layer set at registration
+Add-ons (TBA pricing, NOT included): AutoCAD DWG Output, Detailed Calculation Print.
 Footing Pro specifics: 19 modules · Dual-Mode Engine · Intelligent Print System.
 REQUIRES Microsoft Excel 2002+ installed (invisible backend engine — user never opens Excel, but
 it must be present or the app won't run). "Standalone" = no manual Excel work, NOT "no Excel
 needed." Never say the app has no relation to Excel. We don't distribute Excel ourselves, but if
-missing, the installer links to microsoft.com/microsoft-365 to get it — don't say "no link exists." Also requires .NET Framework 4.8+ (usually
-pre-installed on Win 10/11). License is device-locked, no transfer between PCs. On expiry the
-app stops launching but project data is never deleted.
+missing, the installer links to microsoft.com/microsoft-365 to get it — don't say "no link exists."
+Also requires .NET Framework 4.8+ (usually pre-installed on Win 10/11). License is device-locked,
+no transfer between PCs. On expiry the app stops launching but project data is never deleted.
 
 ACTIVATION PROCESS:
 1. Download PCsuite 2026 from civilengsuite.pages.dev.
@@ -2599,9 +2622,35 @@ async function callGeminiWithRetry(apiKey, model, contents, systemPrompt, budget
     system_instruction: { parts: [{ text: systemPrompt }] },
     contents,
     generationConfig: {
-      maxOutputTokens: 700,
+      maxOutputTokens: 900,
       temperature    : 0.35,
       topP           : 0.9,
+      // v19 FIX — root cause of two bugs reported by the developer (system-
+      // prompt-looking text like "Refining and Polishing... :5" and
+      // "Answering Service:" leaking into visible replies, PLUS replies
+      // sometimes cutting off mid-sentence):
+      //
+      // Gemini 3.x models (gemini-3.5-flash AND gemini-3.1-flash-lite, both
+      // used here) think by default — "Gemini models engage in dynamic
+      // thinking by default, automatically adjusting the amount of
+      // reasoning effort based on the complexity of the user's request"
+      // (ai.google.dev/gemini-api/docs/generate-content/thinking, verified
+      // current as of this fix). Thinking tokens count against the SAME
+      // maxOutputTokens budget as the visible answer, so on any message the
+      // model judged "complex" enough to reason about, part of the 700-
+      // token budget was silently spent on internal reasoning before a
+      // single visible character was produced — explains the intermittent
+      // truncation ("sometimes complete, sometimes not": simple messages
+      // used little/no thinking budget and fit fine; harder ones didn't).
+      //
+      // This chatbot is a FAQ/retrieval-grounded sales-and-support persona
+      // — no multi-step reasoning, math proofs, or agentic tool use — so
+      // thinking has no upside here and only downside (leakage risk, token
+      // cost, latency). thinkingBudget: 0 disables it outright (confirmed
+      // working for gemini-3.5-flash specifically, not just the 3.x family
+      // generally). maxOutputTokens raised 700->900 as a secondary safety
+      // margin now that none of it is being silently consumed by thinking.
+      thinkingConfig : { thinkingBudget: 0 },
     },
   });
 
@@ -2673,7 +2722,30 @@ async function callGeminiWithRetry(apiKey, model, contents, systemPrompt, budget
   }
 
   const data = await res.json();
-  const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+  // v19: surface truncation via Gemini's own finishReason rather than
+  // guessing from the text alone — 'MAX_TOKENS' means the budget above
+  // (900, was 700) was hit before the model naturally finished. If this
+  // still shows up in Cloudflare logs after this fix, maxOutputTokens
+  // needs raising further; if it doesn't, the earlier truncation really
+  // was the thinking-token budget theft described above, not a genuinely
+  // long answer running past 700 tokens on its own.
+  const finishReason = data?.candidates?.[0]?.finishReason;
+  if (finishReason === 'MAX_TOKENS') {
+    console.warn(`[chat.js] Gemini ${model} hit MAX_TOKENS (budget: 900) — reply may be truncated.`);
+  }
+  // v19 FIX: was `parts?.[0]?.text` — silently wrong if the model ever
+  // returns more than one part (e.g. a thought-summary part ahead of the
+  // real answer) since it would grab whichever part happens to be first,
+  // visible-answer or not. Concatenate every part's text EXCEPT any
+  // explicitly marked `thought: true` — correct with thinking disabled
+  // (this response shouldn't contain thought parts at all now) and stays
+  // correct if thinking is ever deliberately re-enabled in the future.
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  const reply = parts
+    .filter(p => !p?.thought && typeof p?.text === 'string')
+    .map(p => p.text)
+    .join('')
+    .trim();
   if (!reply) {
     return { ok: false, httpStatus: res.status, errStatus: 'EMPTY_REPLY', errBody: '' };
   }
