@@ -1,70 +1,67 @@
 /**
- * functions/api/stt.js  —  v1.6  (2026-07-04)
+ * functions/api/stt.js  —  v1.7  (2026-07-04)
  * ──────────────────────────────────────────────────────────────────────────
  * Cloudflare Pages Function — STT Proxy
  * Route:  POST /api/stt   { "audio": "<base64>", "mime": "audio/wav", "lang": "ar" }
  *
  * Companion to functions/api/tts.js — TTS is unchanged by this revision.
  *
- * v1.4 [QUOTA-DIAGNOSTIC-FIX]: fetchElevenSTT/fetchOpenAiSTT read the JSON
- * error body and detect provider-specific quota/credit-exhaustion codes
- * BEFORE falling back to an HTTP-status-only hint table. See readErrorBody()
- * below for why: a live reproduction showed ElevenLabs returning a
- * 401-range status for a quota-exhausted account, which the old table
- * mapped straight to "invalid or missing key".
+ * v1.4 [QUOTA-DIAGNOSTIC-FIX]: read the JSON error body and detect
+ * provider-specific quota/credit-exhaustion codes BEFORE falling back to
+ * an HTTP-status-only hint table. See readErrorBody() below.
  *
  * v1.5 [KEY-POOL-ROTATION]: Tier 1 (ElevenLabs) accepts up to 13
- * independent API keys via ELEVEN_API_KEY_1..ELEVEN_API_KEY_13 (one per
- * team member's own account), tried in a round-robin + quota-failover ring.
- * See getElevenKeyRing()/fetchElevenSTTRotating() below.
+ * independent API keys via ELEVEN_API_KEY_1..ELEVEN_API_KEY_13, tried in a
+ * round-robin + quota-failover ring. See getElevenKeyRing()/
+ * fetchElevenSTTRotating() below.
  *
- * v1.6 [DEEPGRAM-TIER3]: Adds Deepgram as a THIRD, fully independent
- * provider, tried only after the entire Tier 1 ElevenLabs ring AND Tier 2
- * OpenAI Whisper have both failed (absent, misconfigured, or exhausted).
- * Unlike v1.5's ElevenLabs key pool (many accounts on the SAME provider),
- * this is one account on a DIFFERENT provider entirely -- ordinary
- * multi-vendor redundancy, not quota-limit circumvention; each provider's
- * own free-tier terms govern its own account independently.
- *   - Endpoint: POST https://api.deepgram.com/v1/listen (see Deepgram's
- *     "Pre-Recorded Audio" docs). Auth via `Authorization: Token <key>`.
- *   - Deepgram's pre-recorded endpoint takes the RAW audio bytes as the
- *     request body with Content-Type set to the audio's own mime type --
- *     NOT multipart/form-data like ElevenLabs/OpenAI. This is Deepgram's
- *     documented pattern (curl --data-binary @file.wav --header
- *     'Content-Type: audio/wav'), not a guess -- getting this wrong
- *     (e.g. wrapping it in FormData) is a common integration mistake that
- *     produces a generic 400 with no useful hint.
- *   - model=nova-2 is used deliberately, NOT the newer nova-3: at time of
- *     writing nova-3 only covers a handful of languages while nova-2 covers
- *     ~36 including Arabic. Using nova-3 here would silently regress
- *     Arabic support. Re-check Deepgram's current per-model language table
- *     before ever bumping this -- language coverage per model changes
- *     between Deepgram model generations.
- *   - language=ar / language=en-US is set explicitly from the same lang
- *     hint already used for Tier 1/2. When no hint is available,
- *     detect_language=true is set instead of omitting language entirely --
- *     Deepgram defaults to English if neither is provided, which would
- *     silently break Arabic auto-detection.
- *   - readErrorBody() is extended (not duplicated) to also recognize
- *     Deepgram's err_code/err_msg error shape, so quota/credit exhaustion
- *     on Deepgram gets the same accurate diagnostic treatment Tier 1/2
- *     already have, instead of a generic "HTTP 402" guess.
+ * v1.6 [DEEPGRAM-TIER3]: Added Deepgram Nova-2 as a third, independent
+ * provider, tried only after Tier 1 and Tier 2 both fail.
+ *
+ * v1.7 [SPEECHMATICS-REPLACES-OPENAI / ALL-$0-STACK]: Tier 2 is now
+ * Speechmatics instead of OpenAI Whisper. Reasoning: OpenAI has no free
+ * tier at all (requires a card on file and prepayment before any request
+ * succeeds), so it did not belong in an explicitly $0-cost stack. All
+ * THREE tiers are now free-tier-only, no card required anywhere:
+ *   Tier 1  ElevenLabs   10,000 credits/month, recurring monthly
+ *   Tier 2  Speechmatics 480 minutes/month,   recurring monthly
+ *   Tier 3  Deepgram     $200 one-time signup credit, non-recurring
+ *
+ *   Speechmatics is architecturally different from both other tiers: it is
+ *   an ASYNC job API, not a single synchronous call --
+ *     1. POST /v2/jobs/  (multipart: data_file + config JSON string)
+ *        -> 201, body contains the new job's `id`
+ *     2. Poll GET /v2/jobs/{id} until job.status === 'done'
+ *        (status starts 'running'; 'rejected' means it failed)
+ *     3. GET /v2/jobs/{id}/transcript?format=txt -> plain-text transcript
+ *        body (NOT JSON -- format=txt returns raw text directly)
+ *   fetchSpeechmaticsSTT() implements all three steps internally so the
+ *   Tier 2 call site still looks like a single async function to the rest
+ *   of this file. Polling uses a bounded budget (see SPEECHMATICS_POLL_*
+ *   constants) -- short voice-chat clips finish in a few seconds, but if
+ *   you start feeding this longer audio, raise the attempt count/interval
+ *   accordingly or this will time out on legitimately-still-running jobs.
+ *   Speechmatics' documented language field only needs a plain ISO 639-1
+ *   code ("ar"/"en"); when no lang hint is available this defaults to
+ *   "ar" (not a true auto-detect -- Speechmatics batch V2 requires an
+ *   explicit language), since this endpoint's entire reason for existing
+ *   is the Arabic path the local Windows recognizer cannot handle.
+ *   readErrorBody() is broadened (not duplicated) to also recognize a
+ *   plain string raw.error field, in addition to ElevenLabs/OpenAI/
+ *   Deepgram's shapes, since Speechmatics' exact quota-exceeded error body
+ *   shape was not confirmed against a live account at time of writing --
+ *   worth re-verifying the very first time Tier 2 actually fails in
+ *   production, the same way the ElevenLabs quota shape was confirmed by a
+ *   live curl earlier in this project.
  *
  * ── SETUP ─────────────────────────────────────────────────────────────────
  *   Tier 1 (existing): ELEVEN_API_KEY, optionally ELEVEN_API_KEY_1..13.
- *   Tier 2 (existing, optional): OPENAI_API_KEY.
- *   Tier 3 (new, optional): DEEPGRAM_API_KEY -- sign up at deepgram.com
- *     (free $200 signup credit as of this writing), API Keys page, create
- *     a key, paste into Cloudflare Pages → Settings → Environment
- *     variables as DEEPGRAM_API_KEY (Secret), redeploy.
+ *   Tier 2 (new, v1.7): SPEECHMATICS_API_KEY -- signup at speechmatics.com,
+ *     dashboard -> API Keys, no card required.
+ *   Tier 3 (existing, v1.6): DEEPGRAM_API_KEY -- signup at deepgram.com,
+ *     console -> API Keys, no card required.
  *   Every tier is independently optional -- absent env vars are skipped
- *   silently, exactly as before.
- *
- * ── ARCHITECTURE ──────────────────────────────────────────────────────────
- *
- *   TIER 1  ElevenLabs Scribe v2 — key-pool round-robin + quota-failover
- *   TIER 2  OpenAI Whisper — single key, optional
- *   TIER 3  Deepgram Nova-2 — single key, optional, tried last
+ *   silently.
  *
  * ── REQUEST CONTRACT (matches modSTTAPI.bas.CallSTTEndpoint exactly) ──────
  *   POST body : { "audio": "<base64 audio bytes>",
@@ -76,11 +73,10 @@
  *   4xx/5xx  { "error": "<human-readable message>" }
  *
  * ── RESPONSE HEADERS ─────────────────────────────────────────────────────
- *   X-STT-Engine            : 'elevenlabs' | 'whisper' | 'deepgram'
+ *   X-STT-Engine            : 'elevenlabs' | 'speechmatics' | 'deepgram'
  *   X-STT-Eleven-KeyIndex   : ring slot that answered (elevenlabs 200 only)
  *   X-STT-Eleven-KeysTried  : how many ElevenLabs ring keys were attempted
- *   X-STT-Tier1-Status / X-STT-Tier1-Reason : present only on the final
- *     503 path. Tier2/Tier3 equivalents likewise.
+ *   X-STT-Tier1/2/3-Status / -Reason : present only on the final 503 path.
  *
  * ── CSP NOTE ─────────────────────────────────────────────────────────────
  *   Called from the VBA client via MSXML2.ServerXMLHTTP, not from a browser
@@ -122,10 +118,11 @@ function jsonResponse(status, body, request, extraHeaders) {
 const MAX_AUDIO_BASE64_CHARS = 34_000_000; // ~25 MB decoded
 const ELEVEN_STT_URL = 'https://api.elevenlabs.io/v1/speech-to-text';
 const ELEVEN_STT_MODEL = 'scribe_v2'; // scribe_v1 is deprecated (removed 2026-07-09) -- do not use
-const OPENAI_STT_URL = 'https://api.openai.com/v1/audio/transcriptions';
-const OPENAI_STT_MODEL = 'whisper-1';
 const DEEPGRAM_STT_URL = 'https://api.deepgram.com/v1/listen';
 const DEEPGRAM_MODEL = 'nova-2'; // NOT nova-3 -- nova-3 covers far fewer languages; nova-2 covers Arabic
+const SPEECHMATICS_JOBS_URL = 'https://asr.api.speechmatics.com/v2/jobs/';
+const SPEECHMATICS_POLL_INTERVAL_MS = 1500;
+const SPEECHMATICS_POLL_MAX_ATTEMPTS = 14; // ~21s budget -- raise for longer audio
 const MAX_ELEVEN_KEY_SLOTS = 13;
 
 const ALLOWED_LANGS = new Set(['ar', 'en']); // extend as needed; "" = auto-detect
@@ -148,16 +145,23 @@ function base64ToUint8Array(b64) {
   return bytes;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
- * v1.4/v1.6: Read a failed fetch Response body ONCE, safely, and pull out
- * whatever quota/credit signal the provider put there. Returns null if the
- * body isn't JSON or doesn't look quota-related -- callers fall back to
- * their existing HTTP-status table in that case.
+ * v1.4/v1.6/v1.7: Read a failed fetch Response body ONCE, safely, and pull
+ * out whatever quota/credit signal the provider put there. Returns null if
+ * the body isn't JSON or doesn't look quota-related -- callers fall back
+ * to their existing HTTP-status table in that case.
  *
- * Recognizes three provider error shapes seen in production:
- *   ElevenLabs : { detail: { code, status, message } }
- *   OpenAI     : { error: { code, message, type } }  (code: insufficient_quota)
- *   Deepgram   : { err_code, err_msg, request_id }
+ * Recognizes four provider error shapes:
+ *   ElevenLabs   : { detail: { code, status, message } }
+ *   OpenAI-style : { error: { code, message, type } }
+ *   Deepgram     : { err_code, err_msg, request_id }
+ *   Speechmatics : { error: "<plain string message>" }  (shape not yet
+ *                  confirmed against a live quota-exhausted account --
+ *                  re-verify on first real Tier 2 failure)
  *
  * IMPORTANT: a Response body can only be read once. This function OWNS
  * that read for the error path -- callers must not also call res.json()
@@ -177,16 +181,18 @@ async function readErrorBody(res) {
   const detail = raw?.detail;
   const code = detail?.code || detail?.status || raw?.error?.code ||
                raw?.err_code || raw?.code || raw?.status || '';
-  const msg  = detail?.message || raw?.error?.message || raw?.err_msg ||
-               raw?.message || '';
+  const msg  = detail?.message || raw?.error?.message ||
+               (typeof raw?.error === 'string' ? raw.error : '') ||
+               raw?.err_msg || raw?.message || '';
 
   const looksLikeQuota =
     /quota_exceeded/i.test(String(code)) ||
-    /insufficient_quota/i.test(String(code)) ||   // OpenAI
-    /insufficient/i.test(String(code)) ||          // Deepgram-style err_code
+    /insufficient_quota/i.test(String(code)) ||
+    /insufficient/i.test(String(code)) ||
     /quota/i.test(String(msg)) ||
     /credits?\s+remaining/i.test(String(msg)) ||
-    /out of credit/i.test(String(msg));
+    /out of credit/i.test(String(msg)) ||
+    /usage remaining/i.test(String(msg));
 
   if (looksLikeQuota) {
     const creditsMatch = String(msg).match(/(\d+)\s+credits?\s+remaining/i);
@@ -204,11 +210,6 @@ async function readErrorBody(res) {
 
 // ── v1.5 — ElevenLabs key-pool ring ─────────────────────────────────────
 /**
- * Build the ordered, de-duplicated ElevenLabs key ring from env.
- * Order: legacy ELEVEN_API_KEY first (zero-migration compatibility), then
- * ELEVEN_API_KEY_1 .. ELEVEN_API_KEY_13 in numeric order. Blank/unset slots
- * are skipped. Exact-duplicate values are skipped.
- *
  * @param {object} env
  * @returns {string[]} ordered list of trimmed, non-empty, unique keys
  */
@@ -234,16 +235,10 @@ function getElevenKeyRing(env) {
 }
 
 // Module-scoped ring pointer -- best-effort load spreading across requests
-// within a reused isolate (see v1.5 note in prior revision for the
-// isolate-persistence caveat; unchanged here).
+// within a reused isolate.
 let elevenRingPointer = 0;
 
 /**
- * Try each ElevenLabs key in the ring, starting at the current round-robin
- * position, advancing on key-specific failures (quota exhausted / that key
- * invalid), stopping immediately on non-key-specific failures (e.g. bad
- * audio -- every key would fail identically).
- *
  * @returns {Promise<{ text: string, keyIndex: number, keysTried: number }>}
  */
 async function fetchElevenSTTRotating(audioBytes, mime, lang, keys) {
@@ -269,7 +264,7 @@ async function fetchElevenSTTRotating(audioBytes, mime, lang, keys) {
       const isKeySpecific =
         /quota exceeded/i.test(err.category || '') ||
         err.httpStatus === 401;
-      if (!isKeySpecific) break; // e.g. 422 bad audio -- every key fails the same way
+      if (!isKeySpecific) break;
     }
   }
 
@@ -284,13 +279,6 @@ async function fetchElevenSTTRotating(audioBytes, mime, lang, keys) {
 }
 
 // ── TIER 1 — ElevenLabs Scribe v2 (single-key call, used by the ring) ─────
-/**
- * @param {Uint8Array} audioBytes
- * @param {string} mime
- * @param {string} lang   '' | 'ar' | 'en'
- * @param {string} apiKey one ElevenLabs key from the ring
- * @returns {Promise<string>} transcript text (may be "")
- */
 async function fetchElevenSTT(audioBytes, mime, lang, apiKey) {
   const form = new FormData();
   form.append('file', new Blob([audioBytes], { type: mime }), `audio.${extForMime(mime)}`);
@@ -322,51 +310,115 @@ async function fetchElevenSTT(audioBytes, mime, lang, apiKey) {
   return typeof payload.text === 'string' ? payload.text : '';
 }
 
-// ── TIER 2 — OpenAI Whisper (optional fallback) ────────────────────────────
+// ── TIER 2 — Speechmatics (new in v1.7, replaces OpenAI Whisper) ──────────
 /**
+ * Speechmatics batch transcription is an async job API: submit, poll,
+ * fetch. This wrapper performs all three steps and returns a plain
+ * transcript string, so the call site sees the same shape as Tier 1/3.
+ *
+ * @param {Uint8Array} audioBytes
+ * @param {string} mime
+ * @param {string} lang   '' | 'ar' | 'en'  -- '' defaults to 'ar', see v1.7 note
+ * @param {string} apiKey Speechmatics key
  * @returns {Promise<string>} transcript text (may be "")
  */
-async function fetchOpenAiSTT(audioBytes, mime, lang, apiKey) {
-  const form = new FormData();
-  form.append('file', new Blob([audioBytes], { type: mime }), `audio.${extForMime(mime)}`);
-  form.append('model', OPENAI_STT_MODEL);
-  form.append('response_format', 'json');
-  if (lang) form.append('language', lang);
+async function fetchSpeechmaticsSTT(audioBytes, mime, lang, apiKey) {
+  const effectiveLang = lang || 'ar'; // no true auto-detect in batch V2 -- default to Arabic, this route's primary purpose
+  const authHeader = { Authorization: `Bearer ${apiKey}` };
 
-  const res = await fetch(OPENAI_STT_URL, {
+  // ── Step 1: submit job ──
+  const config = JSON.stringify({
+    type: 'transcription',
+    transcription_config: { language: effectiveLang },
+  });
+  const submitForm = new FormData();
+  submitForm.append('data_file', new Blob([audioBytes], { type: mime }), `audio.${extForMime(mime)}`);
+  submitForm.append('config', config);
+
+  const submitRes = await fetch(SPEECHMATICS_JOBS_URL, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}` },
-    body: form,
+    headers: authHeader,
+    body: submitForm,
   });
 
-  if (!res.ok) {
-    const { quotaMessage } = await readErrorBody(res);
-
+  if (!submitRes.ok) {
+    const { quotaMessage } = await readErrorBody(submitRes);
     const hint =
-      quotaMessage ? `OpenAI ${quotaMessage}` :
-      res.status === 401 ? 'invalid or missing OPENAI_API_KEY' :
-      res.status === 429 ? 'OpenAI quota exceeded' :
-      `HTTP ${res.status}`;
-    const err = new Error(`OpenAI STT: ${hint}`);
-    err.httpStatus = res.status;
+      quotaMessage ? `Speechmatics ${quotaMessage}` :
+      submitRes.status === 401 ? 'invalid or missing SPEECHMATICS_API_KEY' :
+      submitRes.status === 400 ? 'unsupported/unreadable audio for Speechmatics' :
+      submitRes.status === 403 ? 'Speechmatics quota or plan restriction' :
+      `HTTP ${submitRes.status}`;
+    const err = new Error(`Speechmatics STT (submit): ${hint}`);
+    err.httpStatus = submitRes.status;
     err.category = hint;
     throw err;
   }
 
-  const payload = await res.json();
-  return typeof payload.text === 'string' ? payload.text : '';
+  const submitPayload = await submitRes.json();
+  const jobId = submitPayload?.id || submitPayload?.job?.id;
+  if (!jobId) {
+    const err = new Error('Speechmatics STT: submit response had no job id');
+    err.httpStatus = 'network';
+    err.category = 'malformed submit response';
+    throw err;
+  }
+
+  // ── Step 2: poll until done ──
+  let jobStatus = 'running';
+  for (let attempt = 0; attempt < SPEECHMATICS_POLL_MAX_ATTEMPTS; attempt++) {
+    await sleep(SPEECHMATICS_POLL_INTERVAL_MS);
+
+    const pollRes = await fetch(`${SPEECHMATICS_JOBS_URL}${jobId}`, { headers: authHeader });
+    if (!pollRes.ok) {
+      const { quotaMessage } = await readErrorBody(pollRes);
+      const hint = quotaMessage ? `Speechmatics ${quotaMessage}` : `HTTP ${pollRes.status}`;
+      const err = new Error(`Speechmatics STT (poll): ${hint}`);
+      err.httpStatus = pollRes.status;
+      err.category = hint;
+      throw err;
+    }
+
+    const pollPayload = await pollRes.json();
+    jobStatus = pollPayload?.job?.status || 'running';
+
+    if (jobStatus === 'done') break;
+    if (jobStatus === 'rejected' || jobStatus === 'deleted') {
+      const err = new Error(`Speechmatics STT: job ended with status "${jobStatus}"`);
+      err.httpStatus = 'network';
+      err.category = `job ${jobStatus}`;
+      throw err;
+    }
+    // else 'running' -- loop again
+  }
+
+  if (jobStatus !== 'done') {
+    const err = new Error('Speechmatics STT: job did not finish within poll budget');
+    err.httpStatus = 'network';
+    err.category = 'poll timeout';
+    throw err;
+  }
+
+  // ── Step 3: fetch transcript as plain text ──
+  const transcriptRes = await fetch(`${SPEECHMATICS_JOBS_URL}${jobId}/transcript?format=txt`, {
+    headers: authHeader,
+  });
+  if (!transcriptRes.ok) {
+    const err = new Error(`Speechmatics STT (transcript): HTTP ${transcriptRes.status}`);
+    err.httpStatus = transcriptRes.status;
+    err.category = `HTTP ${transcriptRes.status}`;
+    throw err;
+  }
+
+  const text = await transcriptRes.text();
+  return typeof text === 'string' ? text.trim() : '';
 }
 
-// ── TIER 3 — Deepgram Nova-2 (new in v1.6, optional fallback) ─────────────
+// ── TIER 3 — Deepgram Nova-2 (optional fallback) ──────────────────────────
 /**
  * Deepgram's pre-recorded endpoint takes RAW audio bytes as the body (NOT
  * multipart/form-data) with Content-Type set to the audio's own mime type.
- * Language/model are passed as URL query params, not body fields.
  *
- * @param {Uint8Array} audioBytes
- * @param {string} mime
- * @param {string} lang   '' | 'ar' | 'en'
- * @param {string} apiKey Deepgram key
  * @returns {Promise<string>} transcript text (may be "")
  */
 async function fetchDeepgramSTT(audioBytes, mime, lang, apiKey) {
@@ -380,8 +432,6 @@ async function fetchDeepgramSTT(audioBytes, mime, lang, apiKey) {
   } else if (lang === 'en') {
     params.set('language', 'en-US');
   } else {
-    // No hint available -- must explicitly request detection, otherwise
-    // Deepgram defaults to English and would silently mis-transcribe Arabic.
     params.set('detect_language', 'true');
   }
 
@@ -436,7 +486,7 @@ export async function onRequestPost({ request, env }) {
     return jsonResponse(413, { error: 'Audio file too large.' }, request);
   }
   if (langRaw.length > 0 && !ALLOWED_LANGS.has(langRaw)) {
-    console.error(`[stt.js v1.6] Unrecognized lang "${langRaw}" -- using auto-detect.`);
+    console.error(`[stt.js v1.7] Unrecognized lang "${langRaw}" -- using auto-detect.`);
   }
   const lang = ALLOWED_LANGS.has(langRaw) ? langRaw : '';
 
@@ -450,16 +500,15 @@ export async function onRequestPost({ request, env }) {
     return jsonResponse(400, { error: 'Empty audio.' }, request);
   }
 
-  const elevenKeys  = getElevenKeyRing(env);
-  const openAiKey   = env?.OPENAI_API_KEY?.trim() || '';
-  const deepgramKey = env?.DEEPGRAM_API_KEY?.trim() || '';
+  const elevenKeys      = getElevenKeyRing(env);
+  const speechmaticsKey = env?.SPEECHMATICS_API_KEY?.trim() || '';
+  const deepgramKey     = env?.DEEPGRAM_API_KEY?.trim() || '';
 
   let tier1Err = null;
   let tier2Err = null;
   let tier3Err = null;
 
-  // TIER 1 — ElevenLabs Scribe v2, round-robin + quota-failover across
-  // the full key ring.
+  // TIER 1 — ElevenLabs Scribe v2, round-robin + quota-failover ring
   if (elevenKeys.length > 0) {
     try {
       const { text, keyIndex, keysTried } =
@@ -470,29 +519,29 @@ export async function onRequestPost({ request, env }) {
         'X-STT-Eleven-KeysTried': String(keysTried),
       });
     } catch (elErr) {
-      console.error('[stt.js v1.6] ElevenLabs key ring exhausted, trying Tier 2.', elErr.message);
+      console.error('[stt.js v1.7] ElevenLabs key ring exhausted, trying Tier 2.', elErr.message);
       tier1Err = elErr;
     }
   }
 
-  // TIER 2 — OpenAI Whisper (only if configured)
-  if (openAiKey) {
+  // TIER 2 — Speechmatics (v1.7, replaces OpenAI Whisper)
+  if (speechmaticsKey) {
     try {
-      const text = await fetchOpenAiSTT(audioBytes, mime, lang, openAiKey);
-      return jsonResponse(200, { text }, request, { 'X-STT-Engine': 'whisper' });
-    } catch (oaErr) {
-      console.error('[stt.js v1.6] OpenAI Whisper failed, trying Tier 3.', oaErr.message);
-      tier2Err = oaErr;
+      const text = await fetchSpeechmaticsSTT(audioBytes, mime, lang, speechmaticsKey);
+      return jsonResponse(200, { text }, request, { 'X-STT-Engine': 'speechmatics' });
+    } catch (smErr) {
+      console.error('[stt.js v1.7] Speechmatics failed, trying Tier 3.', smErr.message);
+      tier2Err = smErr;
     }
   }
 
-  // TIER 3 — Deepgram Nova-2 (only if configured) -- v1.6
+  // TIER 3 — Deepgram Nova-2
   if (deepgramKey) {
     try {
       const text = await fetchDeepgramSTT(audioBytes, mime, lang, deepgramKey);
       return jsonResponse(200, { text }, request, { 'X-STT-Engine': 'deepgram' });
     } catch (dgErr) {
-      console.error('[stt.js v1.6] Deepgram also failed.', dgErr.message);
+      console.error('[stt.js v1.7] Deepgram also failed.', dgErr.message);
       tier3Err = dgErr;
     }
   }
@@ -511,7 +560,7 @@ export async function onRequestPost({ request, env }) {
     diagHeaders['X-STT-Tier3-Reason'] = tier3Err.category || tier3Err.message;
   }
 
-  if (elevenKeys.length === 0 && !openAiKey && !deepgramKey) {
+  if (elevenKeys.length === 0 && !speechmaticsKey && !deepgramKey) {
     return jsonResponse(502, { error: 'STT provider not configured on the server.' }, request);
   }
   return jsonResponse(503, { error: 'STT provider unavailable. Retry shortly.' }, request, diagHeaders);
