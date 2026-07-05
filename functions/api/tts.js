@@ -1,67 +1,89 @@
 /**
- * functions/api/tts.js  —  v3  (2026-06-27)
+ * functions/api/tts.js  —  v5  (2026-07-04)
  * ──────────────────────────────────────────────────────────────────────────
  * Cloudflare Pages Function — TTS Proxy
  * Route:  GET /api/tts?text=...&lang=ar-EG[&voice=female|male]
  *
- * ── UPGRADE v2 → v3: Azure replaced by ElevenLabs ────────────────────────
+ * ── v4 → v5: added Deepgram Aura as a language-gated Tier 2 ───────────────
  *
- * WHY ELEVENLABS INSTEAD OF AZURE:
- *   Both provide neural Arabic voices of identical quality.
- *   ElevenLabs advantages:
- *     • Sign-up at elevenlabs.io — no credit card, no portal complexity.
- *     • 10,000 characters/month free (personal use). For an engineering
- *       chatbot serving repeated queries, Cloudflare's 1-hour edge cache
- *       means the effective unique-char count is a fraction of real traffic.
- *     • Single global HTTP endpoint — no region configuration.
- *     • xi-api-key header auth — one env var, no subscription management.
+ * Research before building this (not assumed) turned up two facts that
+ * shape the architecture:
+ *
+ *   1. Deepgram Aura (their TTS product) draws from the SAME $200 signup
+ *      credit already shared with Deepgram STT (confirmed on Deepgram's
+ *      own pricing page: the credit "can be used for any Deepgram
+ *      service: Speech-to-Text, Text-to-Speech, Voice Agent API..."). The
+ *      Deepgram key ring already built for stt.js works here unchanged --
+ *      genuinely zero new cost, consistent with every other tier in this
+ *      project.
+ *   2. Speechmatics' TTS product, by contrast, now carries REAL per-
+ *      character pricing ($0.011/1,000 chars) on their own product page --
+ *      it launched as a free preview but that preview-to-billing
+ *      transition (announced for Oct 2025) has evidently completed. Unlike
+ *      every other provider wired into this project, enabling it would be
+ *      the first genuine per-request cost. It is intentionally NOT wired
+ *      in by default -- see fetchSpeechmaticsTTS() below, present but
+ *      unused unless ENABLE_SPEECHMATICS_TTS=true is explicitly set.
+ *
+ *   Neither Deepgram Aura nor Speechmatics TTS support Arabic (Aura:
+ *   English/Spanish/Dutch/French/German/Italian/Japanese; Speechmatics:
+ *   English US/UK only) -- confirmed from each vendor's own docs. So this
+ *   is NOT a blind copy of stt.js's 3-tier structure. Tiers are
+ *   LANGUAGE-GATED: Deepgram Aura is only ever attempted for English
+ *   requests. For Arabic, the cascade is unchanged from v4: ElevenLabs
+ *   ring -> Google Translate TTS. Calling an English-only engine with
+ *   Arabic text would be a guaranteed, pointless failure -- gating it out
+ *   entirely is both faster and more correct than "try everything".
  *
  * ── ARCHITECTURE ──────────────────────────────────────────────────────────
  *
- *   TIER 1  ElevenLabs — eleven_multilingual_v2 neural voice
+ *   TIER 1  ElevenLabs — eleven_multilingual_v2, key-pool ring, ALL langs
  *   ─────────────────────────────────────────────────────────
  *   Endpoint : POST https://api.elevenlabs.io/v1/text-to-speech/{voice_id}
- *   Auth     : xi-api-key header (free account key from elevenlabs.io)
- *   Model    : eleven_multilingual_v2 — best quality for Arabic narration
- *   Output   : mp3_44100_128 (128 kbps, 44.1 kHz — near-transparent quality)
- *   Voices   : Bella (female) / Adam (male) — stable pre-made multilingual
- *              voices available on every plan including free.
- *              Override anytime via ELEVEN_VOICE_ID_F / ELEVEN_VOICE_ID_M.
+ *   Voice settings tuned for Arabic engineering narration (see
+ *   fetchElevenTTS for the stability/similarity_boost/style rationale).
  *
- *   Voice settings tuned for Arabic engineering content:
- *     stability=0.75        → consistent pronunciation, no random variation
- *     similarity_boost=0.85 → stays close to voice character
- *     style=0               → no emotional exaggeration (professional tone)
- *     use_speaker_boost     → applies ElevenLabs post-processing for clarity
+ *   TIER 2  Deepgram Aura-2 — key-pool ring, ENGLISH ONLY (v5, new)
+ *   ─────────────────────────────────────────────────────────
+ *   Endpoint : POST https://api.deepgram.com/v1/speak
+ *   Auth     : Authorization: Token <key> -- rotated across the SAME
+ *              Deepgram key ring already configured for stt.js.
+ *   Model    : aura-2 (default voice: asteria, English)
+ *   Only attempted when the resolved language is English -- see
+ *   isEnglish() gate in onRequestGet.
  *
- *   TIER 2  Google Translate TTS — zero-setup fallback
- *   ───────────────────────────────────────────────────
- *   Identical to v2. Activated when ELEVEN_API_KEY is absent or Tier 1 fails.
- *   Text preprocessing (digit normalisation, whitespace) still applied.
+ *   TIER 3  Google Translate TTS — zero-setup fallback, ALL langs
+ *   ─────────────────────────────────────────────────────────
+ *   Unchanged from v3/v4. Public, unauthenticated, no quota concept.
  *
- * ── SETUP (5 minutes, no credit card) ────────────────────────────────────
- *   1. Go to  elevenlabs.io  →  sign up with email + password
- *   2. Profile → API Keys → Generate API Key → copy it
- *   3. Cloudflare Pages → your project → Settings → Environment variables
- *      Add:  ELEVEN_API_KEY = <paste key>   (mark as Secret)
- *   Done. X-TTS-Engine: elevenlabs in the response confirms Tier 1 is live.
+ *   NOT WIRED IN BY DEFAULT: Speechmatics TTS (real per-character cost --
+ *   see fetchSpeechmaticsTTS() and ENABLE_SPEECHMATICS_TTS below).
  *
- *   Optional voice override (browse voices at elevenlabs.io/voice-library):
- *      ELEVEN_VOICE_ID_F = <voice_id>   (female voice, default: Bella)
- *      ELEVEN_VOICE_ID_M = <voice_id>   (male voice,   default: Adam)
+ * ── SETUP ─────────────────────────────────────────────────────────────────
+ *   Uses the SAME Cloudflare secrets already added for stt.js -- nothing
+ *   new to add for Tier 1 or Tier 2. Discovery is case-insensitive (any
+ *   casing any team member actually used):
+ *     ELEVEN_API_KEY(_1..12)     -- Tier 1, all languages
+ *     DEEPGRAM_API_KEY(_1..12)   -- Tier 2, English only
  *
- * ── NEW QUERY PARAMS ─────────────────────────────────────────────────────
- *   voice=female|male   Selects gender voice (Tier 1 only). Default: female.
+ *   Optional voice override:
+ *      ELEVEN_VOICE_ID_F / ELEVEN_VOICE_ID_M   (see resolveVoiceId)
+ *
+ *   OPTIONAL, OFF BY DEFAULT, REAL COST: to enable Speechmatics TTS as an
+ *   additional English-only tier between Deepgram and Google despite its
+ *   $0.011/1,000-char pricing, set:
+ *      ENABLE_SPEECHMATICS_TTS = "true"
+ *   using the SAME Speechmatics_API_KEY(_1..12) already configured for
+ *   stt.js. Left unset, this tier never activates and never bills.
  *
  * ── RESPONSE HEADERS ─────────────────────────────────────────────────────
- *   X-TTS-Engine  : 'elevenlabs' | 'gtts'
- *   X-TTS-Voice   : voice_id used (Tier 1 only)
- *   X-TTS-Lang    : resolved language code
- *
- * ── ENV VARS ─────────────────────────────────────────────────────────────
- *   ELEVEN_API_KEY     Required for Tier 1. Absent → silent Tier 2 fallback.
- *   ELEVEN_VOICE_ID_F  Optional. Female voice ID. Default: EXAVITQu4vr4xnSDxMaL
- *   ELEVEN_VOICE_ID_M  Optional. Male voice ID.   Default: pNInz6obpgDQGcFmaJgB
+ *   X-TTS-Engine                : 'elevenlabs' | 'deepgram' | 'speechmatics' | 'gtts'
+ *   X-TTS-Voice                 : voice_id used (ElevenLabs only)
+ *   X-TTS-Lang                  : resolved language code
+ *   X-TTS-KeyIndex/KeysTried    : ring stats for whichever tier answered
+ *   X-TTS-Eleven-KeysAvailable  : always present
+ *   X-TTS-Deepgram-KeysAvailable: always present
+ *   (cheapest way to confirm pool pickup: `curl -sI ".../api/tts?text=x"`)
  *
  * ── CSP NOTE ─────────────────────────────────────────────────────────────
  *   Audio is served from /api/tts (same origin). media-src 'self' is correct.
@@ -94,32 +116,35 @@ const ALLOWED_LANGS = new Set([
 
 const MAX_TEXT_LENGTH = 200;
 
+/** True for any resolved lang code starting with 'en' -- gates Tier 2/opt-in Speechmatics. */
+function isEnglish(lang) {
+  return lang.toLowerCase().startsWith('en');
+}
+
 // ── ElevenLabs constants ──────────────────────────────────────────────────
 const ELEVEN_API_URL    = 'https://api.elevenlabs.io/v1/text-to-speech';
 const ELEVEN_MODEL      = 'eleven_multilingual_v2';
-const ELEVEN_OUT_FORMAT = 'mp3_44100_128';           // 128 kbps, 44.1 kHz
+const ELEVEN_OUT_FORMAT = 'mp3_44100_128';
+const ELEVEN_DEFAULT_F  = 'EXAVITQu4vr4xnSDxMaL';   // Bella (female)
+const ELEVEN_DEFAULT_M  = 'pNInz6obpgDQGcFmaJgB';   // Adam  (male)
+const ELEVEN_BASE_NAME  = 'ELEVEN_API_KEY';
 
-// Default pre-made voices — available on free tier, stable multilingual.
-// Browse alternatives at elevenlabs.io/voice-library, then set env vars.
-const ELEVEN_DEFAULT_F = 'EXAVITQu4vr4xnSDxMaL';   // Bella (female)
-const ELEVEN_DEFAULT_M = 'pNInz6obpgDQGcFmaJgB';   // Adam  (male)
+// ── Deepgram constants (v5) ────────────────────────────────────────────────
+const DEEPGRAM_SPEAK_URL = 'https://api.deepgram.com/v1/speak';
+const DEEPGRAM_TTS_MODEL = 'aura-2'; // English default (asteria voice) -- do NOT send this to Arabic requests, unsupported
+const DEEPGRAM_BASE_NAME = 'DEEPGRAM_API_KEY'; // same ring already built for stt.js
+
+// ── Speechmatics constants (v5, OPT-IN ONLY -- see header note on cost) ───
+const SPEECHMATICS_TTS_URL_BASE = 'https://preview.tts.speechmatics.com/generate';
+const SPEECHMATICS_TTS_VOICE    = 'sarah'; // only voice name confirmed from Speechmatics' own docs at time of writing
+const SPEECHMATICS_BASE_NAME    = 'SPEECHMATICS_API_KEY'; // same ring already built for stt.js
 
 // ── Utilities ─────────────────────────────────────────────────────────────
 
 /**
- * Preprocess Arabic text before sending to any TTS engine.
- *
- * 1. Strip ASCII control chars (null, BEL, DEL…) — TTS engines silently
- *    abort or emit garbage audio on hidden control characters.
- * 2. Normalise Arabic-Indic numerals ٠١٢٣٤٥٦٧٨٩ → 0-9.
- *    Both ElevenLabs multilingual_v2 and Google TTS read Western Arabic
- *    numerals more reliably in Arabic context. Engineering output from
- *    the chatbot frequently contains values like "٣٠٠ كيلونيوتن".
- * 3. Normalise Extended Arabic-Indic / Persian digits ۰-۹ → 0-9.
- *    These appear in Farsi-influenced Arabic text and some technical PDFs.
- * 4. Collapse runs of whitespace → single space.
- *    Alignment padding and table formatting in engineering responses
- *    wastes the 200-char budget and disrupts TTS prosody models.
+ * Preprocess Arabic text before sending to any TTS engine. See v3 for full
+ * rationale per step (control-char stripping, Arabic-Indic and Extended
+ * Arabic-Indic digit normalisation, whitespace collapsing).
  */
 function preprocessText(text) {
   return text
@@ -138,35 +163,152 @@ function resolveVoiceId(genderKey, env) {
   return (env?.ELEVEN_VOICE_ID_F?.trim() || '') || ELEVEN_DEFAULT_F;
 }
 
-// ── TIER 1 — ElevenLabs neural TTS ───────────────────────────────────────
 /**
- * Calls ElevenLabs REST TTS API and returns the audio Response.
+ * Ported verbatim from stt.js v1.9: read a failed fetch Response body ONCE
+ * and pull out a quota/credit signal if present, before guessing from the
+ * HTTP status code alone.
  *
- * Model: eleven_multilingual_v2
- *   Selected over eleven_flash_v2_5 (lower-latency option) because:
- *   - Chatbot TTS is not real-time conversation; 1-2 s latency is fine.
- *   - multilingual_v2 has higher overall naturalness for Arabic narration.
- *   - Flash is recommended for streaming agent pipelines, not one-shot audio.
+ * @param {Response} res
+ * @returns {Promise<{ raw: any, quotaMessage: string|null }>}
+ */
+async function readErrorBody(res) {
+  let raw = null;
+  try {
+    raw = await res.json();
+  } catch (_e) {
+    return { raw: null, quotaMessage: null };
+  }
+
+  const detail = raw?.detail;
+  const code = detail?.code || detail?.status || raw?.error?.code ||
+               raw?.err_code || raw?.code || raw?.status || '';
+  const msg  = detail?.message || raw?.error?.message ||
+               (typeof raw?.error === 'string' ? raw.error : '') ||
+               raw?.err_msg || raw?.message || '';
+
+  const looksLikeQuota =
+    /quota_exceeded/i.test(String(code)) ||
+    /insufficient_quota/i.test(String(code)) ||
+    /insufficient/i.test(String(code)) ||
+    /quota/i.test(String(msg)) ||
+    /credits?\s+remaining/i.test(String(msg)) ||
+    /out of credit/i.test(String(msg)) ||
+    /usage remaining/i.test(String(msg));
+
+  if (looksLikeQuota) {
+    const creditsMatch = String(msg).match(/(\d+)\s+credits?\s+remaining/i);
+    const remaining = creditsMatch ? creditsMatch[1] : null;
+    return {
+      raw,
+      quotaMessage: remaining !== null
+        ? `quota exceeded (${remaining} credits remaining)`
+        : 'quota exceeded (0 credits remaining)',
+    };
+  }
+
+  return { raw, quotaMessage: null };
+}
+
+/**
+ * Ported verbatim from stt.js v1.9: discover every env var matching
+ * `<baseName>` or `<baseName>_<digits>`, CASE-INSENSITIVELY. See stt.js
+ * for the full rationale (13 different people, 13 possible casings).
  *
- * Voice settings rationale (for Arabic engineering narration):
- *   stability=0.75       Consistent articulation across engineering terms.
- *                        Lower values introduce prosodic variation that suits
- *                        storytelling but sounds inconsistent in factual TTS.
- *   similarity_boost=0.85 Keeps voice character without overfitting to the
- *                         reference, which can introduce artefacts on Arabic.
- *   style=0              Zero style exaggeration. Neutral professional tone
- *                        matching civil-engineering chatbot persona.
- *   use_speaker_boost    ElevenLabs post-processing filter — reduces noise
- *                        and improves high-frequency clarity. Always enable.
+ * @param {object} env
+ * @param {string} baseName
+ * @returns {{ keys: string[], matchedNames: string[] }}
+ */
+function buildKeyRing(env, baseName) {
+  const pattern = new RegExp(`^${baseName}(?:_(\\d+))?$`, 'i');
+  const found = [];
+
+  for (const name of Object.keys(env || {})) {
+    const m = pattern.exec(name);
+    if (!m) continue;
+    const value = env[name]?.trim?.();
+    if (!value) continue;
+    const suffix = m[1] !== undefined ? parseInt(m[1], 10) : -1;
+    found.push({ name, suffix, value });
+  }
+
+  found.sort((a, b) => a.suffix - b.suffix);
+
+  const keys = [];
+  const matchedNames = [];
+  const seenValues = new Set();
+  for (const f of found) {
+    if (seenValues.has(f.value)) continue;
+    seenValues.add(f.value);
+    keys.push(f.value);
+    matchedNames.push(f.name);
+  }
+
+  return { keys, matchedNames };
+}
+
+// Module-scoped ring pointers -- one per tier, independent of stt.js's own
+// pointers (separate files/module instances). Best-effort load spreading
+// across requests within a reused isolate; not relied on for correctness.
+const ringPointers = {
+  eleven  : { i: 0 },
+  deepgram: { i: 0 },
+};
+
+/**
+ * Generic round-robin + quota-failover walk over ANY provider's key ring.
+ * `singleFetchFn` takes just the key (text/voice/etc are pre-bound by the
+ * caller via closure) and returns a Promise<Response>.
  *
- * output_format=mp3_44100_128:
- *   128 kbps at 44.1 kHz is perceptually transparent for speech. This is
- *   the highest quality format available on the free plan without streaming.
+ * @param {{i:number}} pointerState
+ * @param {string[]} keys
+ * @param {(key: string) => Promise<Response>} singleFetchFn
+ * @param {string} providerLabel  used only in error messages
+ * @returns {Promise<{ response: Response, keyIndex: number, keysTried: number }>}
+ */
+async function rotateAndFetchTTS(pointerState, keys, singleFetchFn, providerLabel) {
+  if (keys.length === 0) {
+    const err = new Error(`${providerLabel} TTS: no keys configured`);
+    err.category = 'no keys configured';
+    err.httpStatus = 'network';
+    throw err;
+  }
+
+  const startIdx = pointerState.i % keys.length;
+  pointerState.i = (pointerState.i + 1) % keys.length;
+
+  const attemptErrors = [];
+  for (let step = 0; step < keys.length; step++) {
+    const idx = (startIdx + step) % keys.length;
+    try {
+      const response = await singleFetchFn(keys[idx]);
+      return { response, keyIndex: idx, keysTried: step + 1 };
+    } catch (err) {
+      attemptErrors.push({ idx, category: err.category || err.message, httpStatus: err.httpStatus });
+
+      const isKeySpecific =
+        /quota exceeded/i.test(err.category || '') ||
+        err.httpStatus === 401;
+      if (!isKeySpecific) break; // non-key-specific failure -- every key would fail identically
+    }
+  }
+
+  const summary = attemptErrors.map(e => `key#${e.idx}:${e.category}`).join(', ');
+  const last = attemptErrors[attemptErrors.length - 1];
+  const err = new Error(`${providerLabel} TTS: ${attemptErrors.length} key(s) tried, all failed [${summary}]`);
+  err.category = attemptErrors.length > 1
+    ? `${attemptErrors.length} keys exhausted (last: ${last?.category})`
+    : (last?.category || 'unknown');
+  err.httpStatus = last?.httpStatus ?? 'network';
+  throw err;
+}
+
+// ── TIER 1 — ElevenLabs neural TTS (single-key call, used by the ring) ───
+/**
+ * Model: eleven_multilingual_v2 (see v3 for why over eleven_flash_v2_5).
+ * Voice settings tuned for Arabic engineering narration:
+ *   stability=0.75, similarity_boost=0.85, style=0, use_speaker_boost=true.
  *
- * @param {string} text     Pre-processed Arabic text (≤200 chars)
- * @param {string} apiKey   ElevenLabs API key (xi-api-key)
- * @param {string} voiceId  ElevenLabs voice ID
- * @returns {Promise<Response>} Audio response with Content-Type audio/mpeg
+ * @returns {Promise<Response>} Audio response, Content-Type audio/mpeg
  */
 async function fetchElevenTTS(text, apiKey, voiceId) {
   const url = `${ELEVEN_API_URL}/${voiceId}?output_format=${ELEVEN_OUT_FORMAT}`;
@@ -191,35 +333,109 @@ async function fetchElevenTTS(text, apiKey, voiceId) {
   });
 
   if (!elRes.ok) {
-    // Map ElevenLabs status codes to operator-useful log messages.
-    // Never forward the raw ElevenLabs error body to the client (may leak key context).
+    const { quotaMessage } = await readErrorBody(elRes);
     const hint =
-      elRes.status === 401 ? 'invalid or missing ELEVEN_API_KEY'   :
+      quotaMessage ? `ElevenLabs ${quotaMessage}` :
+      elRes.status === 401 ? 'invalid or missing key' :
       elRes.status === 422 ? 'invalid voice_id — check ELEVEN_VOICE_ID_F/M' :
-      elRes.status === 429 ? 'monthly quota exceeded (10k chars free tier)' :
+      elRes.status === 429 ? 'ElevenLabs quota exceeded' :
       `HTTP ${elRes.status}`;
-    throw new Error(`ElevenLabs TTS: ${hint}`);
+    const err = new Error(`ElevenLabs TTS: ${hint}`);
+    err.httpStatus = elRes.status;
+    err.category = hint;
+    throw err;
   }
 
-  return elRes;   // caller streams .body directly to client
+  return elRes;
 }
 
-// ── TIER 2 — Google Translate TTS (fallback) ──────────────────────────────
+// ── TIER 2 — Deepgram Aura-2 (v5, new; single-key call, used by the ring) ─
 /**
- * Unchanged stable endpoint from v1/v2.
+ * Deepgram's TTS REST endpoint (confirmed from Deepgram's own blog post
+ * announcing Aura-2's multi-language expansion): POST /v1/speak, JSON
+ * body of { model, text } (optionally "language" for the 6 non-English
+ * Aura-2 languages -- NOT used here since this tier is English-only).
+ * Auth: Authorization: Token <key> (same header style as Deepgram STT).
  *
- * client=tw-ob: Standard Google Translate widget client — verified stable
- * since 2010, used by the gTTS library (github.com/pndurette/gTTS).
- * ttsspeed=1: Official values are 0 (slow) or 1 (normal). Intermediate float
- * values are undocumented and unreliable across regions; do not change.
+ * ENGLISH ONLY -- caller (onRequestGet) must not invoke this for Arabic;
+ * Aura-2 has no Arabic model and would simply error.
  *
- * Cache: identical text+lang pairs are served from Cloudflare's edge for
- * 1 hour (cf.cacheEverything + cacheTtl). Repeated engineering phrases
- * (formulas, definitions) do not hit Google at all after the first request.
+ * @returns {Promise<Response>} Audio response, Content-Type audio/mpeg
+ */
+async function fetchDeepgramTTS(text, apiKey) {
+  const res = await fetch(DEEPGRAM_SPEAK_URL, {
+    method : 'POST',
+    headers: {
+      'Authorization': `Token ${apiKey}`,
+      'Content-Type' : 'application/json',
+    },
+    body: JSON.stringify({ model: DEEPGRAM_TTS_MODEL, text }),
+  });
+
+  if (!res.ok) {
+    const { quotaMessage } = await readErrorBody(res);
+    const hint =
+      quotaMessage ? `Deepgram ${quotaMessage}` :
+      res.status === 401 ? 'invalid or missing key' :
+      res.status === 400 ? 'unsupported text/model for Aura-2' :
+      res.status === 429 ? 'Deepgram rate limit exceeded' :
+      `HTTP ${res.status}`;
+    const err = new Error(`Deepgram TTS: ${hint}`);
+    err.httpStatus = res.status;
+    err.category = hint;
+    throw err;
+  }
+
+  return res;
+}
+
+// ── OPT-IN ONLY — Speechmatics TTS (v5, real per-character cost) ─────────
+/**
+ * NOT called anywhere unless env.ENABLE_SPEECHMATICS_TTS === 'true'.
+ * Confirmed endpoint from Speechmatics' own quickstart docs:
+ *   POST https://preview.tts.speechmatics.com/generate/{voice}
+ *   Authorization: Bearer <key>,  body: { "text": "..." },  raw WAV response.
+ * Only the "sarah" voice name is confirmed from Speechmatics' own example
+ * at time of writing -- used for both genders here since no second voice
+ * name could be confirmed; check the Speechmatics portal for additional
+ * voices and update SPEECHMATICS_TTS_VOICE (or add gender branching) if
+ * you actually enable this tier.
+ * ENGLISH ONLY -- same constraint as Deepgram Aura, for the same reason.
  *
- * @param {string} text  Pre-processed text
- * @param {string} lang  Safe language code (from ALLOWED_LANGS)
- * @returns {Promise<Response>}
+ * @returns {Promise<Response>} Audio response, Content-Type audio/wav
+ */
+async function fetchSpeechmaticsTTS(text, apiKey) {
+  const url = `${SPEECHMATICS_TTS_URL_BASE}/${SPEECHMATICS_TTS_VOICE}`;
+
+  const res = await fetch(url, {
+    method : 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type' : 'application/json',
+    },
+    body: JSON.stringify({ text }),
+  });
+
+  if (!res.ok) {
+    const { quotaMessage } = await readErrorBody(res);
+    const hint =
+      quotaMessage ? `Speechmatics ${quotaMessage}` :
+      res.status === 401 ? 'invalid or missing key' :
+      res.status === 400 ? 'unsupported text for Speechmatics TTS' :
+      `HTTP ${res.status}`;
+    const err = new Error(`Speechmatics TTS: ${hint}`);
+    err.httpStatus = res.status;
+    err.category = hint;
+    throw err;
+  }
+
+  return res;
+}
+
+// ── FINAL FALLBACK — Google Translate TTS (unchanged, not pooled) ────────
+/**
+ * Public, unauthenticated, no per-account quota concept -- key rotation
+ * does not apply here. See v3 for the client=tw-ob / ttsspeed rationale.
  */
 async function fetchGoogleTTS(text, lang) {
   const url = new URL('https://translate.google.com/translate_tts');
@@ -251,7 +467,6 @@ export async function onRequestGet(context) {
   const langParam        = (url.searchParams.get('lang')  || 'ar-EG').trim();
   const voiceParam       = (url.searchParams.get('voice') || 'female').toLowerCase().trim();
 
-  // 1. Pre-process + validate
   const text = preprocessText(rawText);
   if (!text) {
     return new Response(
@@ -266,17 +481,28 @@ export async function onRequestGet(context) {
     );
   }
 
-  // 2. Resolve safe lang + voice
-  const safeLang   = ALLOWED_LANGS.has(langParam) ? langParam : 'ar-EG';
-  const genderKey  = voiceParam === 'male' ? 'male' : 'female';
-  const voiceId    = resolveVoiceId(genderKey, env);
-  const elevenKey  = env?.ELEVEN_API_KEY?.trim() || '';
+  const safeLang     = ALLOWED_LANGS.has(langParam) ? langParam : 'ar-EG';
+  const genderKey    = voiceParam === 'male' ? 'male' : 'female';
+  const voiceId      = resolveVoiceId(genderKey, env);
+  const englishOnly  = isEnglish(safeLang);
 
-  // 3. TIER 1 — ElevenLabs (only when key is configured)
-  if (elevenKey) {
+  const eleven   = buildKeyRing(env, ELEVEN_BASE_NAME);
+  const deepgram = buildKeyRing(env, DEEPGRAM_BASE_NAME);
+  const speechmaticsEnabled = (env?.ENABLE_SPEECHMATICS_TTS || '').trim().toLowerCase() === 'true';
+  const speechmatics = speechmaticsEnabled ? buildKeyRing(env, SPEECHMATICS_BASE_NAME) : { keys: [] };
+
+  const keyCountHeaders = {
+    'X-TTS-Eleven-KeysAvailable'  : String(eleven.keys.length),
+    'X-TTS-Deepgram-KeysAvailable': String(deepgram.keys.length),
+  };
+
+  // TIER 1 — ElevenLabs ring (all languages)
+  if (eleven.keys.length > 0) {
     try {
-      const elRes = await fetchElevenTTS(text, elevenKey, voiceId);
-      return new Response(elRes.body, {
+      const { response, keyIndex, keysTried } = await rotateAndFetchTTS(
+        ringPointers.eleven, eleven.keys, (key) => fetchElevenTTS(text, key, voiceId), 'ElevenLabs',
+      );
+      return new Response(response.body, {
         status : 200,
         headers: {
           'Content-Type' : 'audio/mpeg',
@@ -284,24 +510,74 @@ export async function onRequestGet(context) {
           'X-TTS-Engine' : 'elevenlabs',
           'X-TTS-Voice'  : voiceId,
           'X-TTS-Lang'   : safeLang,
+          'X-TTS-KeyIndex' : String(keyIndex),
+          'X-TTS-KeysTried': String(keysTried),
+          ...keyCountHeaders,
           ...getCorsHeaders(request),
         },
       });
     } catch (elErr) {
-      // Log for operator; never expose key or ElevenLabs detail to client.
-      console.error('[tts.js v3] ElevenLabs failed, falling back to gTTS.', elErr.message);
+      console.error('[tts.js v5] ElevenLabs ring exhausted, trying Tier 2 (if applicable).', elErr.message);
     }
   }
 
-  // 4. TIER 2 — Google Translate TTS (zero-setup fallback)
+  // TIER 2 — Deepgram Aura-2 ring, ENGLISH ONLY (v5)
+  if (englishOnly && deepgram.keys.length > 0) {
+    try {
+      const { response, keyIndex, keysTried } = await rotateAndFetchTTS(
+        ringPointers.deepgram, deepgram.keys, (key) => fetchDeepgramTTS(text, key), 'Deepgram',
+      );
+      return new Response(response.body, {
+        status : 200,
+        headers: {
+          'Content-Type' : 'audio/mpeg',
+          'Cache-Control': 'public, max-age=3600',
+          'X-TTS-Engine' : 'deepgram',
+          'X-TTS-Lang'   : safeLang,
+          'X-TTS-KeyIndex' : String(keyIndex),
+          'X-TTS-KeysTried': String(keysTried),
+          ...keyCountHeaders,
+          ...getCorsHeaders(request),
+        },
+      });
+    } catch (dgErr) {
+      console.error('[tts.js v5] Deepgram Aura ring exhausted, trying next tier.', dgErr.message);
+    }
+  }
+
+  // OPT-IN TIER — Speechmatics TTS, ENGLISH ONLY, only if explicitly enabled (v5)
+  if (englishOnly && speechmaticsEnabled && speechmatics.keys.length > 0) {
+    try {
+      const { response, keyIndex, keysTried } = await rotateAndFetchTTS(
+        { i: 0 }, speechmatics.keys, (key) => fetchSpeechmaticsTTS(text, key), 'Speechmatics',
+      );
+      return new Response(response.body, {
+        status : 200,
+        headers: {
+          'Content-Type' : 'audio/wav',
+          'Cache-Control': 'public, max-age=3600',
+          'X-TTS-Engine' : 'speechmatics',
+          'X-TTS-Lang'   : safeLang,
+          'X-TTS-KeyIndex' : String(keyIndex),
+          'X-TTS-KeysTried': String(keysTried),
+          ...keyCountHeaders,
+          ...getCorsHeaders(request),
+        },
+      });
+    } catch (smErr) {
+      console.error('[tts.js v5] Speechmatics TTS also failed, falling back to gTTS.', smErr.message);
+    }
+  }
+
+  // TIER 3 — Google Translate TTS (zero-setup fallback, all languages, not pooled)
   let gttsRes;
   try {
     gttsRes = await fetchGoogleTTS(text, safeLang);
   } catch (gttsErr) {
-    console.error('[tts.js v3] gTTS also failed:', gttsErr.message);
+    console.error('[tts.js v5] gTTS also failed:', gttsErr.message);
     return new Response(
       JSON.stringify({ error: 'TTS service unreachable.' }),
-      { status: 502, headers: { 'Content-Type': 'application/json', ...getCorsHeaders(request) } },
+      { status: 502, headers: { 'Content-Type': 'application/json', ...keyCountHeaders, ...getCorsHeaders(request) } },
     );
   }
 
@@ -312,6 +588,7 @@ export async function onRequestGet(context) {
       'Cache-Control': 'public, max-age=3600',
       'X-TTS-Engine' : 'gtts',
       'X-TTS-Lang'   : safeLang,
+      ...keyCountHeaders,
       ...getCorsHeaders(request),
     },
   });
