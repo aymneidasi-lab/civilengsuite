@@ -630,6 +630,13 @@ const AR_EN_ALIASES = {
   'متطلبات':'requirements','تنصيب':'installation',
   'قواعد':'footing','فوتنج':'footing','باقات':'packages',
   'اكواد':'codes','كود':'code','دفع':'payment',
+  // Added with the "Get in Touch" contact-form KB entries: covers the specific
+  // conjugated/definite forms that come up when asking about that form, since
+  // exact-lookup misses 'اتواصل' (conjugated) against the existing 'تواصل' key
+  // and 'المطور' (definite) against a bare 'developer' — same narrow, cheap-
+  // top-up approach as the rest of this table, not a stemming/morphology fix.
+  'اتواصل':'contact','المطور':'developer','فورم':'form',
+  'خاص':'private','رد':'reply',
 };
 
 function kbTokenize(str) {
@@ -1108,13 +1115,14 @@ they care about. Don't recite all of them at once.
     ⑤ Loyalty Discounts (5% per extra year)
        A 5% discount applied for each year of license duration purchased —
        rewarding long-term users with meaningful savings.
-    ⑥ Online Help Center — currently free
+    ⑥ Online Help Center — free during the launch period
        The chatbot and the full Civil Engineering Suite website (all app sub-sites)
-       are free to use for everyone right now. The in-app assistant uses the same
-       chatbot as the website, with expanded capabilities. If asked whether this
-       stays free forever, say it's currently free and you don't have a confirmed
-       long-term commitment either way — don't promise permanence, and don't imply
-       it's at risk either; just state the current reality.
+       are free to use in full during the Footing Pro v.2026 launch period — every
+       feature, both languages, no limit on questions. The in-app assistant uses the
+       same chatbot as the website, with expanded capabilities. Once the launch period
+       ends, it joins the priced add-on lineup alongside AutoCAD DWG Output and
+       Detailed Calculation Print (see ADD-ONS below). The exact end date isn't
+       announced — if asked when, say so and point to Eng. Aymn Asi rather than guessing.
     ⑦ Personal Password
        A custom personal password as an additional access-control layer on top
        of device-level security — set in the User Information form at registration.
@@ -1744,7 +1752,8 @@ Included (7 built-in features at 249 EGP):
   ③ Device-Locked License — 10-layer security, no admin rights required, Win 7 SP1–11
   ④ Flexible Duration — 1 to 10 years at registration
   ⑤ Loyalty Discounts — 5% off per additional year purchased (built into the price)
-  ⑥ Online Help Center — currently free (site + in-app chatbot); not a permanent guarantee
+  ⑥ Online Help Center — free during the launch period (site + in-app chatbot); becomes
+    a priced add-on once the Footing Pro v.2026 launch period ends
   ⑦ Personal Password — custom secondary access-control layer at registration
 Add-ons (priced separately, TBA): AutoCAD DWG Output, Detailed Calculation Print.
 
@@ -2145,7 +2154,9 @@ Q: What are the add-on modules?
 A: Two confirmed add-ons, pricing to be announced when released: AutoCAD DWG Output (fully
    dimensioned drawings from your calculations), and Detailed Calculation Print (the third
    Print System output — Capture and Summary outputs are already included in the base price).
-   The Online Help Center (chatbot + site) is currently free for everyone, not a paid add-on.
+   The Online Help Center (chatbot + site) is free in full during the Footing Pro v.2026
+   launch period; once that period ends it becomes a third priced add-on alongside the two
+   above.
 
 Q: What happens when my subscription expires?
 A: The app stops launching. Your project data is never deleted — stays on your local machine.
@@ -2172,6 +2183,31 @@ A: Yes — full save/load with unlimited case files saved locally in encrypted f
 
 Q: Does Footing Pro check soil settlement?
 A: No — it takes qallowable from your geotechnical report as a direct input.
+
+════════════════════════════════════════
+ABOUT THIS ASSISTANT (SELF-DESCRIPTION)
+════════════════════════════════════════
+If asked what you are, what you can do, or how you're different from a normal support
+widget, use these facts — they describe real capabilities that exist outside this prompt
+(voice, memory, cross-surface), so state them plainly rather than deflecting or hedging:
+
+• Two surfaces, one brain: the exact same assistant and knowledge run on the marketing
+  website — no account or signup needed, just start typing — and inside the desktop
+  application once someone has bought a license and is mid-project. Neither surface is a
+  cut-down version of the other.
+• Remembers the conversation: a follow-up question builds on what was already said this
+  session — the user never has to re-explain their project from scratch.
+• Voice in, voice out: users can ask by speaking and have the reply read back aloud. If a
+  single reply legitimately mixes English and Arabic technical terms, each part is spoken
+  in its own correct voice rather than garbled into one — this doesn't relax the one-
+  language-per-reply text rule above, it only applies to how mixed technical terms sound.
+• Grounded, not improvised: answers are pulled from Footing Pro's own documentation and
+  Eng. Aymn Asi's real engineering write-ups. This is also why the "if you don't know
+  something, say so and point to Eng. Aymn Asi" rule below exists — it's a deliberate
+  design choice, not an apology for a gap.
+• Not a generic AI: never describe yourself as "an AI language model" or similar generic
+  phrasing — you are Eng_pro assist, a purpose-built assistant for this specific product,
+  not a general-purpose chatbot that happens to be deployed here.
 
 ════════════════════════════════════════
 BEHAVIOUR RULES
@@ -2202,6 +2238,20 @@ BEHAVIOUR RULES
   aymneidasi@gmail.com or WhatsApp +201287232413."
   Arabic: "مش عندي معلومة دقيقة عن ده — تواصل مع المهندس أيمن عاصي على
   aymneidasi@gmail.com أو واتساب +201287232413."
+
+• If asked specifically about the "Get in Touch" contact form (id="contact", the "Have a
+  Question?" section): it is NOT a private-reply channel. State plainly that replies are
+  published on the site as FAQ entries, not emailed back, and trivial messages get no
+  response at all — the 6-digit code emailed to the visitor only verifies the address, it
+  does not create an account or guarantee a reply. For a guaranteed private reply
+  (purchase, license, activation, renewal), point to aymneidasi@gmail.com or WhatsApp
+  +201287232413 instead of the form.
+  English: "That form doesn't send a private reply — answers get published on the site as
+  FAQ entries, and trivial messages don't get a response at all. For a guaranteed private
+  reply, email aymneidasi@gmail.com or WhatsApp +201287232413 instead."
+  Arabic: "الفورم ده مش بيبعت رد خاص — الردود بتتنشر في قسم الأسئلة الشائعة على الموقع،
+  والرسائل التافهة مالهاش رد خالص. لو عايز رد خاص ومضمون، ابعت على aymneidasi@gmail.com
+  أو واتساب +201287232413."
 
 • Never invent pricing, discount percentages, release dates, or feature details not given above.
 • Never recommend competitor software.
@@ -2325,8 +2375,9 @@ window locks in 249 EGP/yr for that whole term (e.g. 3 years = 747 EGP total). L
 top of the rate lock-in. For precise final figures confirm with Eng. Aymn Asi.
 INCLUDED vs ADD-ON — a common question, answer precisely: Print System's Capture (screenshot)
 and Summary outputs ARE included; its Detailed output is NOT (add-on, pricing TBA). AutoCAD DWG
-Output is NOT included (add-on, pricing TBA). Online Help Center (chatbot + site) IS currently
-free for everyone — state it as "currently free," not a permanent guarantee either way.
+Output is NOT included (add-on, pricing TBA). Online Help Center (chatbot + site) is free in
+full during the Footing Pro v.2026 launch period; afterward it joins the paid add-on lineup —
+state it that way, not as an open-ended "currently free."
 
 HOW TO BUY: Download free PCsuite 2026 from civilengsuite.pages.dev → fill the User Information
 form (creates an encrypted .dat file on the Desktop) → send that file to aymneidasi@gmail.com or
@@ -2347,7 +2398,9 @@ BEHAVIOUR RULES:
 • Never recommend competitor software. ETABS/SAP2000 are whole-building tools and complementary,
   not competitors, if that comparison comes up.
 • If you don't know something specific: say so plainly and point to Eng. Aymn Asi —
-  aymneidasi@gmail.com or WhatsApp +201287232413 — rather than guessing.
+  aymneidasi@gmail.com or WhatsApp +201287232413 — rather than guessing. If asked about
+  the site's "Get in Touch" form specifically: it does NOT send a private reply — answers
+  are published as public FAQ entries, and trivial messages get none — say so plainly.
 • Bring up purchase steps or launch-price urgency only when relevant to what was just asked —
   don't bolt a CTA onto every reply.`;
 
@@ -2369,7 +2422,7 @@ PRODUCT — Civil Engineering Suite (CES):
 • Footing Pro: three standalone apps — Rectangular Footing, Trapezoidal Footing, Strap Footing.
 • 19 core modules total. More apps (Beam Pro, Column Pro) in development.
 • Add-ons (TBA pricing): AutoCAD DWG Output, Detailed Calculation Print. Online Help Center is
-  currently free, NOT a paid add-on — don't group it with the two above.
+  free during the Footing Pro v.2026 launch period, then joins these two as a paid add-on.
 • Fully offline after activation. License locked to one device.
 • Grounded in ECP 203; universal mechanics apply to ACI 318-19, Eurocode, etc.
 • PCsuite 2026: free registration and compatibility checker — always free.
@@ -2389,8 +2442,8 @@ INCLUDED FEATURES (what 249 EGP buys — answer "ما المميزات" with thi
 ③ Device-Locked License — 10-layer security, no admin rights needed, Windows 7 SP1–11
 ④ Flexible Duration — 1 to 10 years; longer terms include the 5% loyalty discount
 ⑤ Loyalty Discount — 5% off per year (2 yrs=10% off, 3 yrs=15% off, up to 10 yrs)
-⑥ Online Help Center — currently free for everyone (site + in-app chatbot), not a paid add-on;
-  don't promise this is permanent, just state it's currently free
+⑥ Online Help Center — free during the Footing Pro v.2026 launch period (site + in-app
+  chatbot); becomes a paid add-on once that period ends
 ⑦ Personal Password — extra access-control layer set at registration
 Add-ons (TBA pricing, NOT included): AutoCAD DWG Output, Detailed Calculation Print.
 Footing Pro specifics: 19 modules · Dual-Mode Engine · Intelligent Print System.
@@ -2425,13 +2478,18 @@ RARE AT 249 EGP/YR (7): Smart Install (~70 MB, no admin) · Fully Offline During
   SHA-256 Authenticode (publisher: "Engineering Apps Team", cert 2026–2028) ·
   10-Layer Security · OS Stealth · Smart Pre-Install Guardian · Pro tool / accessible price.
 
+SELF: if asked what you can do, mention — you remember the conversation (no re-explaining on
+follow-ups), you run identically on the website and inside the app, and you can speak replies
+aloud in the correct per-language voice.
+
 BEHAVIOUR:
 • Answer like a knowledgeable engineer texting a colleague — direct, warm, not scripted.
 • Match message length: short question → short answer. Technical depth → go longer.
 • Never invent pricing, dates, or features not listed above.
 • Never recommend competitor software.
 • If you lack information: direct the user to Eng. Aymn Asi at aymneidasi@gmail.com
-  or WhatsApp +201287232413 — do not guess.
+  or WhatsApp +201287232413 — do not guess. Note: the site's "Get in Touch" form does
+  NOT give a private reply (answers go public as FAQ entries; trivial msgs get none).
 • Bring up purchase steps only when the user shows genuine buying intent.`;
 
 // ── Developer / Programmer Mode prompt extension ──────────────────────────
@@ -2973,30 +3031,53 @@ async function callOpenRouterWithRetry(apiKey, messages, budget) {
   return { ok: true, reply };
 }
 
-// ── Friendly error builder — v10 update ────────────────────────────────────
+// isArabicText: cheap script-presence check, not a translation/langdetect
+// library — matches the Arabic Unicode blocks (main block + Supplement,
+// Extended-A, Presentation Forms A/B) so it catches Arabic regardless of
+// diacritics or the specific extended characters used. Good enough to pick
+// ONE reply language; not meant to classify mixed-script or non-EN/AR input.
+function isArabicText(str) {
+  return /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/.test(str || '');
+}
+
+// ── Friendly error builder — v10 update, v15 single-language fix ──────────
 // `geminiResult` is the callGeminiWithRetry() result from the LAST Gemini
 // layer attempted (flash-lite if it ran, otherwise flash) — or a synthetic
 // NOT_CONFIGURED stand-in when GEMINI_API_KEY is missing entirely.
 // `workersAttempted` tells the message whether Layer 3 was even tried.
-// v10 change: all quota-exhausted and generic failure paths now include
-// WhatsApp (+201287232413) and email as a direct contact fallback — a quota
-// failure is no longer a dead end for the user.
-function buildFriendlyError(geminiResult, workersAttempted) {
+// `userMessage` is the visitor's own text, used only to pick ONE reply
+// language — the same thing the live model already does correctly per
+// SYSTEM_PROMPT's "never mix languages in the same reply" rule. v10 glued
+// English and Arabic together with " / " in every branch here, which was
+// the one place in the whole pipeline that broke that rule: this function
+// fires on total failure, before any model ever sees the request, so at
+// the time it was written it had no way to know which language to answer
+// in. It has one now — userMessage is in scope at both call sites.
+// v10 change (still true): all quota-exhausted and generic failure paths
+// include WhatsApp (+201287232413) and email as a direct contact fallback —
+// a quota failure is no longer a dead end for the user.
+function buildFriendlyError(geminiResult, workersAttempted, userMessage) {
+  const ar = isArabicText(userMessage);
+
   if (geminiResult.errStatus === 'RESOURCE_EXHAUSTED') {
-    return workersAttempted
-      ? 'The AI assistant is temporarily unavailable — all free-tier providers are ' +
-        'at capacity or exhausted. Please try again after midnight UTC. ' +
-        'For urgent questions: WhatsApp +201287232413 · aymneidasi@gmail.com. / ' +
-        'المساعد مش متاح دلوقتي — كل المزودين المجانيين وصلوا للحد أو اشتغلوا. ' +
-        'حاول تاني بعد منتصف الليل UTC. للأسئلة العاجلة: واتساب +201287232413 · aymneidasi@gmail.com.'
+    if (workersAttempted) {
+      return ar
+        ? 'المساعد مش متاح دلوقتي — كل المزودين المجانيين وصلوا للحد أو اشتغلوا. ' +
+          'حاول تاني بعد منتصف الليل UTC. للأسئلة العاجلة: واتساب +201287232413 · aymneidasi@gmail.com.'
+        : 'The AI assistant is temporarily unavailable — all free-tier providers are ' +
+          'at capacity or exhausted. Please try again after midnight UTC. ' +
+          'For urgent questions: WhatsApp +201287232413 · aymneidasi@gmail.com.';
+    }
+    return ar
+      ? 'الحصة اليومية اتخلصت — المساعد بيرجع بعد منتصف الليل UTC. ' +
+        'للأسئلة العاجلة: واتساب +201287232413 · aymneidasi@gmail.com.'
       : 'Daily AI quota reached — the assistant resets after midnight UTC. ' +
-        'For urgent questions: WhatsApp +201287232413 · aymneidasi@gmail.com. / ' +
-        'الحصة اليومية اتخلصت — المساعد بيرجع بعد منتصف الليل UTC. ' +
-        'للأسئلة العاجلة: واتساب +201287232413 · aymneidasi@gmail.com.';
+        'For urgent questions: WhatsApp +201287232413 · aymneidasi@gmail.com.';
   }
   if (geminiResult.errStatus === 'RATE_LIMIT_EXCEEDED') {
-    return 'Too many requests right now. Please wait 30–60 seconds and try again. / ' +
-           'في طلبات كتير دلوقتي. استنى 30–60 ثانية وحاول تاني.';
+    return ar
+      ? 'في طلبات كتير دلوقتي. استنى 30–60 ثانية وحاول تاني.'
+      : 'Too many requests right now. Please wait 30–60 seconds and try again.';
   }
   // v13: distinct message for "we stopped trying more providers to stay
   // under the platform's per-request subrequest cap" — this is a genuine
@@ -3004,30 +3085,32 @@ function buildFriendlyError(geminiResult, workersAttempted) {
   // burning the budget), not a quota or single-provider outage, so the
   // wording is shorter-timescale than the RESOURCE_EXHAUSTED message.
   if (geminiResult.errStatus === 'SUBREQUEST_BUDGET_EXHAUSTED') {
-    return 'The assistant is extremely busy right now. Please try again in a moment. / ' +
-           'المساعد مشغول جداً دلوقتي. حاول تاني بعد لحظات.';
+    return ar
+      ? 'المساعد مشغول جداً دلوقتي. حاول تاني بعد لحظات.'
+      : 'The assistant is extremely busy right now. Please try again in a moment.';
   }
 
   const friendlyErrors = {
-    400: 'Invalid request. Please rephrase and try again. / ' +
-         'طلب غير صالح، حاول تغيير الصياغة.',
-    401: 'API authentication failed. Please contact site admin. / ' +
-         'فشل المصادقة، تواصل مع المسؤول.',
-    403: 'API access denied. Please contact site admin. / ' +
-         'الوصول محجوب، تواصل مع المسؤول.',
-    404: 'AI model unavailable. Please contact site admin. / ' +
-         'النموذج غير متاح، تواصل مع المسؤول.',
-    500: 'The AI service encountered an error. Please try again. / ' +
-         'حصل خطأ في الخدمة، حاول مرة أخرى.',
-    503: 'The AI service is temporarily unavailable. Please try again in a minute. / ' +
-         'الخدمة مش متاحة دلوقتي، جرب تاني بعد دقيقة.',
+    400: { en: 'Invalid request. Please rephrase and try again.',
+           ar: 'طلب غير صالح، حاول تغيير الصياغة.' },
+    401: { en: 'API authentication failed. Please contact site admin.',
+           ar: 'فشل المصادقة، تواصل مع المسؤول.' },
+    403: { en: 'API access denied. Please contact site admin.',
+           ar: 'الوصول محجوب، تواصل مع المسؤول.' },
+    404: { en: 'AI model unavailable. Please contact site admin.',
+           ar: 'النموذج غير متاح، تواصل مع المسؤول.' },
+    500: { en: 'The AI service encountered an error. Please try again.',
+           ar: 'حصل خطأ في الخدمة، حاول مرة أخرى.' },
+    503: { en: 'The AI service is temporarily unavailable. Please try again in a minute.',
+           ar: 'الخدمة مش متاحة دلوقتي، جرب تاني بعد دقيقة.' },
   };
-  return (
-    friendlyErrors[geminiResult.httpStatus] ||
-    'Something went wrong. Please try again, or contact us directly: ' +
-    'WhatsApp +201287232413 · aymneidasi@gmail.com. / ' +
-    'حصل مشكلة، حاول مرة أخرى، أو تواصل معنا مباشرة: واتساب +201287232413 · aymneidasi@gmail.com.'
-  );
+  const matched = friendlyErrors[geminiResult.httpStatus];
+  if (matched) return ar ? matched.ar : matched.en;
+
+  return ar
+    ? 'حصل مشكلة، حاول مرة أخرى، أو تواصل معنا مباشرة: واتساب +201287232413 · aymneidasi@gmail.com.'
+    : 'Something went wrong. Please try again, or contact us directly: ' +
+      'WhatsApp +201287232413 · aymneidasi@gmail.com.';
 }
 
 // ── v13 RATE LIMITER — abuse / overload protection ─────────────────────────
@@ -3139,7 +3222,24 @@ async function checkRateLimit(env, key) {
 export async function onRequestPost(context) {
   const { request, env } = context;
 
-  // 0. v13 RATE LIMIT — see checkRateLimit() above for the full rationale.
+  // 0. Read the raw body once, before rate-limiting or JSON-parsing it.
+  //    request.text() reads bytes only and never throws on malformed JSON,
+  //    so the rate limiter in step 1 still runs for every request regardless
+  //    of body validity — a flood of malformed-JSON requests still gets
+  //    caught by it, not a way around it. isArabicText() on this raw text is
+  //    a free, cheap language hint for the 429 message below, available
+  //    before anything has actually been parsed. JSON.parse() reuses this
+  //    same string in step 3 — the body stream can only be read once, so
+  //    request.json() is not called separately down there.
+  let rawBody = '';
+  try {
+    rawBody = await request.text();
+  } catch {
+    rawBody = '';
+  }
+  const likelyArabic = isArabicText(rawBody);
+
+  // 1. v13 RATE LIMIT — see checkRateLimit() above for the full rationale.
   //    CF-Connecting-IP is Cloudflare's own header carrying the real client
   //    IP (not spoofable by the client — Cloudflare sets it at the edge).
   //    NOTE ON IP AS A KEY: Cloudflare's own Rate Limiting docs recommend
@@ -3155,8 +3255,9 @@ export async function onRequestPost(context) {
   if (rateCheck.limited) {
     return json(
       {
-        error: 'Too many messages too quickly. Please wait a moment and try again. / ' +
-               'رسائل كتير بسرعة. استنى لحظة وحاول تاني.',
+        error: likelyArabic
+          ? 'رسائل كتير بسرعة. استنى لحظة وحاول تاني.'
+          : 'Too many messages too quickly. Please wait a moment and try again.',
       },
       429,
       undefined,
@@ -3164,7 +3265,7 @@ export async function onRequestPost(context) {
     );
   }
 
-  // 1. Validate Gemini API key — the only required key after v7/v8.
+  // 2. Validate Gemini API key — the only required key after v7/v8.
   //    DEEPSEEK_API_KEY is intentionally not read; DeepSeek is paid-only and
   //    was removed from this file. Delete it from Cloudflare env to avoid
   //    confusion (the variable has no effect on this function).
@@ -3182,10 +3283,10 @@ export async function onRequestPost(context) {
     );
   }
 
-  // 2. Parse request body
+  // 3. Parse the body text already read in step 0.
   let body;
   try {
-    body = await request.json();
+    body = JSON.parse(rawBody);
   } catch {
     return json({ error: 'Request body must be valid JSON.' }, 400, undefined, request);
   }
@@ -3204,6 +3305,11 @@ export async function onRequestPost(context) {
   // guard (non-empty string) but carry zero semantic content and consume API quota.
   // Unicode property \p{L} matches any letter in any script (Arabic, Latin, etc.);
   // \p{N} matches any numeric digit. A message with neither is pure noise.
+  // Deliberately left bilingual: by definition this message has no letters in
+  // either script (that is the failure condition), so there is no text here
+  // to detect a language from — unlike the checks below it, which do have
+  // real user text and are now single-language. Showing both here is the
+  // correct minimal-assumption behaviour, not the same bug.
   if (!/[\p{L}\p{N}]/u.test(userMessage)) {
     return json(
       {
@@ -3218,8 +3324,9 @@ export async function onRequestPost(context) {
   }
   if (userMessage.length > 2000) {
     return json(
-      { error: 'Message too long. Please keep your question under 2,000 characters. / ' +
-               'الرسالة طويلة جداً. اختصر سؤالك لأقل من ٢٠٠٠ حرف.' },
+      { error: isArabicText(userMessage)
+          ? 'الرسالة طويلة جداً. اختصر سؤالك لأقل من ٢٠٠٠ حرف.'
+          : 'Message too long. Please keep your question under 2,000 characters.' },
       400,
       undefined,
       request,
@@ -3252,7 +3359,7 @@ export async function onRequestPost(context) {
     }
   }
 
-  // 3. Normalize history — keep last 10 turns (5 exchanges) for token budget.
+  // 4. Normalize history — keep last 10 turns (5 exchanges) for token budget.
   //    Single normalisation pass; geminiContents is the only payload built here.
   //    (openaiMessages was dead code in v7 — it only existed for the now-removed
   //     DeepSeek path. Removed here.)
@@ -3302,7 +3409,7 @@ export async function onRequestPost(context) {
   // made for this one incoming request — see makeFetchBudget() above for why.
   const budget = makeFetchBudget(SUBREQUEST_BUDGET_FREE_PLAN);
 
-  // 4. Build Gemini key pool — all 13 keys across 13 Google accounts.
+  // 5. Build Gemini key pool — all 13 keys across 13 Google accounts.
   //    GEMINI_API_KEY is required (guarded above). Keys 2–13 are optional.
   //    Blank / absent keys are excluded by the .filter() and silently skipped.
   //    v13: each entry keeps its ORIGINAL pool index (for the X-CES-AI-Source
@@ -3331,7 +3438,7 @@ export async function onRequestPost(context) {
   // key instead of every request piling onto geminiKeysIndexed[0] first.
   const geminiPool = rotateStart(geminiKeysIndexed);
 
-  // 5. GEMINI LAYERS — try each key (in rotated order) with PRIMARY then
+  // 6. GEMINI LAYERS — try each key (in rotated order) with PRIMARY then
   //    FALLBACK model. Replaces v10's Layers 1, 2, 6a, and 6b.
   //    lastGeminiResult carries the final Gemini failure into buildFriendlyError.
   let lastGeminiResult = { ok: false, httpStatus: 0, errStatus: 'NOT_ATTEMPTED', errBody: '' };
@@ -3380,7 +3487,7 @@ export async function onRequestPost(context) {
     lastGeminiResult = resB;
   }
 
-  // 6. WORKERS AI LAYER — unchanged routing from v10 (binding call, not a
+  // 7. WORKERS AI LAYER — unchanged routing from v10 (binding call, not a
   //    fetch() subrequest, so it does not draw from `budget` — see v13 note
   //    on callWorkersAIWithRetry above).
   //    Build workersMsgs here using WORKERS_AI_SYSTEM_PROMPT (<800 tokens).
@@ -3418,7 +3525,7 @@ export async function onRequestPost(context) {
     console.error('[chat.js] Workers AI failed:', layerWorkers.errStatus);
   }
 
-  // 7. GROQ LAYERS — try each of up to 13 keys, in rotated order (v13).
+  // 8. GROQ LAYERS — try each of up to 13 keys, in rotated order (v13).
   //    All keys use llama-3.1-8b-instant via callGroqWithRetry().
   //    Free tier: 1,000 req/day, 30 RPM, 6K TPM per key (corrected v12).
   //    WORKERS_AI_SYSTEM_PROMPT (~800 tokens) keeps requests below 6K TPM cap.
@@ -3464,7 +3571,7 @@ export async function onRequestPost(context) {
     }
   }
 
-  // 8. OPENROUTER LAYERS — try each of up to 13 keys, in rotated order (v13).
+  // 9. OPENROUTER LAYERS — try each of up to 13 keys, in rotated order (v13).
   //    All keys use meta-llama/llama-3.3-70b-instruct:free via callOpenRouterWithRetry().
   //    Free tier: 50 req/day, 20 RPM per key. HTTP-Referer and X-Title sent
   //    per OpenRouter docs (handled inside callOpenRouterWithRetry).
@@ -3510,12 +3617,12 @@ export async function onRequestPost(context) {
     }
   }
 
-  // 9. All layers exhausted.
+  // 10. All layers exhausted.
   //    lastGeminiResult = the final callGeminiWithRetry() outcome (last key,
   //    FALLBACK model) — or the synthetic SUBREQUEST_BUDGET_EXHAUSTED result
   //    set above if we broke out of the Gemini loop early (v13).
   //    workersAttempted = whether Workers AI was tried.
-  return json({ error: buildFriendlyError(lastGeminiResult, workersAttempted) }, 502, undefined, request);
+  return json({ error: buildFriendlyError(lastGeminiResult, workersAttempted, userMessage) }, 502, undefined, request);
 }
 
 // ── OPTIONS preflight (required for CORS) ─────────────────────────────────
