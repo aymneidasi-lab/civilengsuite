@@ -47,7 +47,7 @@
  * every failure just advances to the next pair.
  */
 
-import { WorkerMailer } from 'worker-mailer';
+import { WorkerMailer } from '../_lib/worker-mailer.mjs';
 
 /* ── Allowed origins — add your custom domain here if you have one ── */
 const ALLOWED_ORIGINS = [
