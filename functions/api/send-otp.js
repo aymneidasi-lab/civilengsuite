@@ -63,9 +63,67 @@ const ALLOWED_ORIGINS = [
    step in a from-scratch SMTP/TLS client; Gmail supports both. */
 const GMAIL_HOST    = 'smtp.gmail.com';
 const GMAIL_PORT    = 465;
-const SENDER_NAME   = 'Civil Engineering Suite';
 const ADDRESS_BASE  = 'GMAIL_ADDRESS';
 const PASSWORD_BASE = 'GMAIL_APP_PASSWORD';
+
+/**
+ * [SPAM-FOLDER-FIX] Diagnosis: SPF/DKIM/DMARC all pass cleanly on these
+ * messages — Gmail's own MTA is the actual relay, so the envelope sender,
+ * DKIM d= domain, and From: domain are already aligned. The spam-folder
+ * placement is a reputation/content classification, not an auth failure,
+ * and the dominant signal was this line:
+ *
+ *   from: { name: 'Civil Engineering Suite', email: 'aymneidasi@gmail.com' }
+ *
+ * A brand/company display-name paired with a personal @gmail.com address
+ * is the single most common shape of phishing/brand-impersonation mail —
+ * it is what a fake "verification code" scam looks like, structurally,
+ * regardless of what the message actually says. Gmail's classifier
+ * weighs this even for mail a Gmail account sends to itself (confirmed
+ * by the user: the sending account's own copy also landed in spam).
+ *
+ * Two independent constants now exist where one did before:
+ *   BRAND_NAME         — cosmetic, used inside the HTML/text body only.
+ *   SENDER_PERSON_NAME  — the RFC5322 From display-name. A personal name
+ *                         next to a personal @gmail.com address is the
+ *                         congruent, low-suspicion pairing; a company
+ *                         name next to it is not.
+ * This, the removed leading emoji in the H1 (that emoji was literally
+ * the first characters of the inbox preview snippet the user
+ * screenshotted), and a brand-led subject line are the three content
+ * changes in this revision. They reduce risk; they do not zero it out.
+ *
+ * What this fix deliberately does NOT attempt, and why:
+ *   - A domain-verified ESP (Resend, already wired as this project's
+ *     documented fallback path) is the structurally correct long-term
+ *     fix — it lets a receiving server trust THIS sender specifically
+ *     instead of borrowing Gmail's consumer reputation. It requires DNS
+ *     control over an owned domain. This repo currently serves only
+ *     from *.pages.dev (confirmed via REPO_STRUCTURE.txt and this
+ *     file's own ALLOWED_ORIGINS list) — there is no domain to verify
+ *     records against yet, and buying one would violate the $0
+ *     constraint. Revisit this the moment a domain is owned for any
+ *     other reason.
+ *   - Google's Feb-2024 bulk-sender rules (mandatory SPF+DKIM+DMARC +
+ *     one-click unsubscribe) apply at 5,000+ msgs/day to Gmail
+ *     recipients; irrelevant at this project's volume and not the
+ *     mechanism here. Not adding a List-Unsubscribe header to a 6-digit
+ *     OTP email — it doesn't apply to transactional mail at this scale
+ *     and would be cargo-culted, not load-bearing.
+ *   - Personal Gmail's real SMTP-specific ceiling is tighter than the
+ *     commonly quoted 500/day (multiple independent 2026 sources put
+ *     automated SMTP sends around ~100/day before throttling, with
+ *     behavioral blocks observed well below that on bursty patterns —
+ *     see this response's Implementation Analysis). Only one
+ *     GMAIL_ADDRESS/GMAIL_APP_PASSWORD pair is currently populated
+ *     despite buildGmailRing() already supporting GMAIL_ADDRESS_1,
+ *     _2, ... — populating 2-3 more from other Gmail accounts you
+ *     already own is a genuine $0 lever this code already supports;
+ *     it is a config/secrets change, not a code change, so it is not
+ *     in this diff.
+ */
+const BRAND_NAME        = 'Civil Engineering Suite';
+const SENDER_PERSON_NAME = 'Eng. Aymn Asi';
 
 /* ── Rate limit: max requests per IP per 10-minute window ── */
 const RATE_LIMIT = 5;
@@ -205,7 +263,7 @@ async function sendViaGmailRing(pairs, emailOptions) {
     try {
       await mailer.send({
         ...emailOptions,
-        from: { name: SENDER_NAME, email: address }, // must match the authenticating account
+        from: { name: SENDER_PERSON_NAME, email: address }, // must match the authenticating account — see [SPAM-FOLDER-FIX] above for why this is a person's name, not the brand
       });
       return { ok: true, keyIndex: i, keysTried: i + 1 };
     } catch (err) {
@@ -284,7 +342,7 @@ export async function onRequestPost(context) {
         <tr>
           <td style="background:linear-gradient(135deg,#0A1A2E,#1A3A5C);padding:28px 36px;">
             <h1 style="margin:0;color:#F5D88A;font-size:1.1rem;font-weight:700;letter-spacing:0.04em;">
-              🏗️ Civil Engineering Suite
+              ${BRAND_NAME}
             </h1>
           </td>
         </tr>
@@ -313,7 +371,7 @@ export async function onRequestPost(context) {
             </p>
             <hr style="border:none;border-top:1px solid #dde3ea;margin:0 0 20px;">
             <p style="margin:0;color:#9aa5b1;font-size:0.8rem;">
-              — Civil Engineering Suite · Eng. Aymn Asi
+              — ${BRAND_NAME} · ${SENDER_PERSON_NAME}
             </p>
           </td>
         </tr>
@@ -337,12 +395,12 @@ This code expires in 10 minutes.
 
 If you did not request this, you can safely ignore this email.
 
-— Civil Engineering Suite · Eng. Aymn Asi`;
+— ${BRAND_NAME} · ${SENDER_PERSON_NAME}`;
 
   /* Send via Gmail SMTP, rotating the ring on any failure */
   const result = await sendViaGmailRing(gmailPairs, {
     to     : { name: safeName, email: to_email },
-    subject: 'Your verification code — Civil Engineering Suite',
+    subject: `${BRAND_NAME}: your verification code`,
     html   : emailHtml,
     text   : emailText,
   });
