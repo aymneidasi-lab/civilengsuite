@@ -323,11 +323,28 @@ export async function onRequestPost(context) {
 </body>
 </html>`;
 
+  /* Plain-text alternative — same content as emailHtml, no markup.
+     Kept in sync by hand since the HTML is hand-written, not templated
+     from a shared content object; update both if the copy changes.
+     Absence of a text/plain part on an otherwise HTML-only message is a
+     cited spam-filter signal, independent of authentication correctness. */
+  const emailText =
+`Hi ${safeName},
+
+Your email verification code for the contact form is: ${otp_code}
+
+This code expires in 10 minutes.
+
+If you did not request this, you can safely ignore this email.
+
+— Civil Engineering Suite · Eng. Aymn Asi`;
+
   /* Send via Gmail SMTP, rotating the ring on any failure */
   const result = await sendViaGmailRing(gmailPairs, {
     to     : { name: safeName, email: to_email },
     subject: 'Your verification code — Civil Engineering Suite',
     html   : emailHtml,
+    text   : emailText,
   });
 
   if (!result.ok) {
