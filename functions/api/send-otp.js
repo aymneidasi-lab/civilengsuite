@@ -2,43 +2,58 @@
  * Cloudflare Pages Function — /api/send-otp
  * File location in your CF Pages project: functions/api/send-otp.js
  *
- * SENDS VIA GMAIL SMTP -- not Resend. No domain verification needed;
- * Gmail's own sending domain is already trusted by every mail provider.
+ * Setup:
+ *  1. Create free account at resend.com
+ *  2. Go to API Keys → Create API Key → copy it
+ *  3. In Cloudflare Pages dashboard → your project → Settings →
+ *     Environment Variables → Add: RESEND_API_KEY = re_XXXXXXXXXXXXXXXX
+ *     Optional standby key(s): RESEND_API_KEY_1, RESEND_API_KEY_2, ...
+ *  4. REQUIRED before this can email anyone but yourself: verify a domain
+ *     at resend.com/domains, then change RESEND_FROM below to an address
+ *     on that domain. See [V3-DOMAIN] below — this is not optional polish.
  *
- * WHY THIS EXISTS: the Resend version (see git history / previous
- * delivery) requires verifying a domain you own before it can email
- * anyone but your own account. That's free but requires owning a
- * domain. This version is free with zero domain requirement, at the
- * cost of sending from a @gmail.com address instead of a branded one,
- * and needing one new dependency (worker-mailer) that talks raw SMTP
- * over Cloudflare Workers' TCP sockets API.
+ * [V3-DOMAIN] RESEND_FROM is currently 'onboarding@resend.dev', Resend's
+ * sandbox address. Per Resend's own docs
+ * (resend.com/docs/knowledge-base/403-error-resend-dev-domain), that
+ * address "can only send emails to the email address associated with
+ * your Resend account" — every other recipient gets a 403. That includes
+ * every real visitor filling out the contact form. This is true for ANY
+ * key on ANY account using this address, so it is NOT fixed by adding
+ * more keys, more standby slots, or more accounts to the ring below —
+ * only by verifying a real sending domain and updating RESEND_FROM to
+ * use it. Until that happens, this endpoint only works for sending OTPs
+ * to whichever single address owns the account behind whichever key
+ * happens to be tried. classifyResendFailure() below detects this
+ * specific 403 by message content and fails fast with a distinct log
+ * line rather than burning the rest of the ring on a guaranteed repeat.
  *
- * ── SETUP ────────────────────────────────────────────────────────────
- *  1. On the Gmail account you want to send FROM: turn on 2-Step
- *     Verification at myaccount.google.com/security (required -- Gmail
- *     will not issue an App Password without it).
- *  2. Generate an App Password at myaccount.google.com/apppasswords
- *     -> App name: anything (e.g. "Civil Engineering Suite OTP") ->
- *     copy the 16-character code it shows you. This is NOT your normal
- *     Gmail password and won't be shown again.
- *  3. Cloudflare Pages -> your project -> Settings -> Environment
- *     Variables -> add:
- *       GMAIL_ADDRESS = youraccount@gmail.com
- *       GMAIL_APP_PASSWORD = the 16-character code (spaces are fine,
- *                             this code strips them automatically)
- *  4. Add "worker-mailer" as a dependency (see package.json) so
- *     Cloudflare's build installs it before bundling this function.
- *  5. Redeploy.
+ * [V2-KEYRING] Resend's rate limit (10 req/s) and email quota (Free plan:
+ * 100/day, 3000/mo) are enforced per TEAM/account, shared across every
+ * API key that account owns (resend.com/docs/api-reference/rate-limit:
+ * "This limit applies across all API keys associated with your team").
+ * Unlike ELEVEN_API_KEY_N / GROQ_API_KEY_N in stt.js/tts.js/chat.js,
+ * adding RESEND_API_KEY_1..N from the SAME account adds zero capacity.
+ * The ring below exists so a revoked/rotated-out primary key doesn't
+ * cause an outage — it advances to the next key ONLY on a confirmed
+ * dead-key response, never on 429 or a [V3-DOMAIN]-type 403, since those
+ * repeat identically across every key sharing the same cause.
  *
- *  Optional, for extra capacity/resilience later: add a second account
- *  as GMAIL_ADDRESS_1 + GMAIL_APP_PASSWORD_1 (matched by the same
- *  numeric suffix -- an address without its matching password, or vice
- *  versa, is skipped and logged, not fatal). Not required to start --
- *  a free Gmail account's own daily send limit is far more than a
- *  contact-form OTP flow will use.
+ * On a ring built from SEVERAL DIFFERENT people's own separate Resend
+ * accounts (as opposed to several keys within one account): each
+ * account's quota genuinely is independent, so this is not the "zero
+ * benefit" case described above. It is, however, still very likely
+ * exactly the pattern Resend's Acceptable Use Policy is written to
+ * prevent — pooling several accounts' quotas behind one shared
+ * application to exceed what any single account is meant to have
+ * (resend.com/legal/acceptable-use: "Users are expressly forbidden from
+ * creating or using an account or multiple accounts with the aim of
+ * circumventing any quotas or limits"), regardless of whether one person
+ * or thirteen people hold the individual accounts. This file will use
+ * however many keys are configured without judging where they came
+ * from, but that judgment call — and the [V3-DOMAIN] verification,
+ * which every one of those accounts needs independently unless they all
+ * verify the SAME domain — is left to you, not assumed here.
  */
-
-import { WorkerMailer } from 'worker-mailer';
 
 /* ── Allowed origins — add your custom domain here if you have one ── */
 const ALLOWED_ORIGINS = [
@@ -48,11 +63,21 @@ const ALLOWED_ORIGINS = [
   'http://localhost:5500',   /* local dev */
 ];
 
+/* ── Sender address — change once you verify a domain on resend.com ── */
+const RESEND_FROM = 'Civil Engineering Suite <onboarding@resend.dev>';
+const RESEND_BASE_NAME = 'RESEND_API_KEY';
+
 /* ── Rate limit: max requests per IP per 10-minute window ── */
 const RATE_LIMIT   = 5;
 const WINDOW_MS    = 10 * 60 * 1000; /* 10 minutes */
 
-/* In-memory rate limit store (resets per isolate/cold-start — good enough) */
+/* In-memory rate limit store (resets per isolate/cold-start — good enough).
+   Resource note: entries are never explicitly evicted, only their count/
+   window fields are reset in place once their window elapses. Release
+   mechanism is isolate recycling, not a TTL sweep — unchanged from the
+   original file; flagged here, not fixed, since it's outside this
+   change's scope (see Resource Lifecycle Verification in the response
+   this file shipped with). */
 const _rateMap = new Map();
 
 function isRateLimited(ip) {
@@ -79,142 +104,139 @@ function corsHeaders(origin) {
   };
 }
 
-function json(body, status, origin) {
+function json(body, status, origin, extraHeaders) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { 'Content-Type': 'application/json', ...corsHeaders(origin) },
+    headers: { 'Content-Type': 'application/json', ...corsHeaders(origin), ...(extraHeaders || {}) },
   });
 }
 
-/* ═══════════════════════════════════════ GMAIL ACCOUNT RING ══════════
-   Same discovery contract as buildKeyRing() used for the other providers
-   in this project (any _N suffix, case-insensitive) but for a PAIRED
-   credential: GMAIL_ADDRESS_N needs a matching GMAIL_APP_PASSWORD_N with
-   the same suffix, or that slot is skipped (logged, not fatal) rather
-   than sent with a missing half of the pair. ═══════════════════════ */
-
-function buildGmailAccountRing(env) {
-  const addrPattern = /^GMAIL_ADDRESS(?:_(\d+))?$/i;
-  const passPattern = /^GMAIL_APP_PASSWORD(?:_(\d+))?$/i;
-
-  const addrsBySuffix = new Map();
-  const passBySuffix  = new Map();
+/**
+ * buildKeyRing — identical matching convention to buildKeyRing() in
+ * stt.js/tts.js: case-insensitive `^BASE(?:_(\d+))?$`, de-duplicated by
+ * value, sorted base-name-first then ascending numeric suffix.
+ *
+ * @param {object} env
+ * @param {string} baseName  e.g. 'RESEND_API_KEY' (case is irrelevant)
+ * @returns {{ keys: string[], matchedNames: string[] }}
+ */
+function buildKeyRing(env, baseName) {
+  const pattern = new RegExp(`^${baseName}(?:_(\\d+))?$`, 'i');
+  const found = []; // { name, suffix: number|-1 (for base), value }
 
   for (const name of Object.keys(env || {})) {
-    const am = addrPattern.exec(name);
-    if (am) {
-      const value = env[name]?.trim?.();
-      if (value) addrsBySuffix.set(am[1] !== undefined ? parseInt(am[1], 10) : -1, value);
-      continue;
-    }
-    const pm = passPattern.exec(name);
-    if (pm) {
-      const value = env[name]?.trim?.();
-      if (value) passBySuffix.set(pm[1] !== undefined ? parseInt(pm[1], 10) : -1, value);
-    }
+    const m = pattern.exec(name);
+    if (!m) continue;
+    const value = env[name]?.trim?.();
+    if (!value) continue;
+    const suffix = m[1] !== undefined ? parseInt(m[1], 10) : -1;
+    found.push({ name, suffix, value });
   }
 
-  const suffixes = [...addrsBySuffix.keys()].sort((a, b) => a - b);
-  const accounts = [];
-  const skipped = [];
-  for (const suffix of suffixes) {
-    const address  = addrsBySuffix.get(suffix);
-    const password = passBySuffix.get(suffix);
-    const label = suffix === -1 ? 'GMAIL_ADDRESS' : `GMAIL_ADDRESS_${suffix}`;
-    if (!password) { skipped.push(label); continue; }
-    // App Passwords are displayed by Google with spaces, e.g.
-    // "abcd efgh ijkl mnop" -- accepted with or without them, strip to
-    // be safe regardless of how it was pasted into the env var.
-    accounts.push({ address, password: password.replace(/\s+/g, ''), suffix, label });
+  found.sort((a, b) => a.suffix - b.suffix);
+
+  const keys = [];
+  const matchedNames = [];
+  const seenValues = new Set();
+  for (const f of found) {
+    if (seenValues.has(f.value)) continue; // same key pasted into two slots
+    seenValues.add(f.value);
+    keys.push(f.value);
+    matchedNames.push(f.name);
   }
 
-  return { accounts, skipped };
-}
-
-// Module-scoped ring pointer — best-effort spreading across requests
-// within a reused isolate, not relied on for correctness (same pattern
-// as the other rotation points in this project).
-const ringPointer = { i: 0 };
-
-/**
- * Round-robin + selective failover walk over the Gmail account ring.
- * Only 'auth_failed' (bad app password / 2FA not enabled on that
- * specific account) and 'rate_limited' (that account's own daily send
- * cap) are treated as account-specific and advance the ring; anything
- * else (malformed message, DNS/network failure reaching smtp.gmail.com)
- * would fail identically for every account, so it breaks immediately.
- */
-async function rotateAndSendGmail(pointerState, accounts, sendOneFn) {
-  if (accounts.length === 0) {
-    const err = new Error('Gmail: no complete GMAIL_ADDRESS/GMAIL_APP_PASSWORD pair configured');
-    err.category = 'no_accounts_configured';
-    throw err;
-  }
-
-  const startIdx = pointerState.i % accounts.length;
-  pointerState.i = (pointerState.i + 1) % accounts.length;
-
-  const attemptErrors = [];
-  for (let step = 0; step < accounts.length; step++) {
-    const idx = (startIdx + step) % accounts.length;
-    try {
-      await sendOneFn(accounts[idx]);
-      return { accountIndex: idx, accountsTried: step + 1 };
-    } catch (err) {
-      attemptErrors.push({ idx, category: err.category || 'other', message: err.message });
-      const isAccountSpecific = err.category === 'auth_failed' || err.category === 'rate_limited';
-      if (!isAccountSpecific) break;
-    }
-  }
-
-  const summary = attemptErrors.map(e => `account#${e.idx}:${e.category}`).join(', ');
-  const err = new Error(`Gmail: ${attemptErrors.length} account(s) tried, all failed [${summary}]`);
-  err.category = 'exhausted';
-  throw err;
+  return { keys, matchedNames };
 }
 
 /**
- * One send attempt through a specific Gmail account via SMTP (port 465,
- * implicit TLS -- avoids the extra STARTTLS upgrade round-trip that
- * port 587 needs). Throws a categorized Error on failure so
- * rotateAndSendGmail can decide whether to try the next account.
+ * Classifies a failed Resend /emails response.
+ * keySpecific=true  -> this credential is the problem, try the next one.
+ * keySpecific=false -> every key on this account fails identically
+ *                       (rate limit, quota, validation, domain, 5xx) —
+ *                       stop rotating and surface the error.
  *
- * Error classification is message-text matching, not structured codes --
- * confirmed against worker-mailer v1.2.1's actual source, which throws
- * plain Error objects (e.g. "Invalid login: " + <server response>) with
- * no separate error-code field to branch on. Patterns below match both
- * the library's own wrapper text and Gmail's standard SMTP enhanced
- * status codes (534-5.7.9 app password required, 535-5.7.8 bad
- * credentials, 421-4.7.0 / 454-4.7.0 temporary throttle).
+ * 403 is NOT a single case. Resend returns 403 for two unrelated reasons
+ * (resend.com/docs/api-reference/errors,
+ *  resend.com/docs/knowledge-base/403-error-resend-dev-domain):
+ *   - invalid_api_key ("API key is invalid...")            -> key-specific
+ *   - sandbox domain restriction ("You can only send testing
+ *     emails to your own email address... verify a domain...") when
+ *     RESEND_FROM is still onboarding@resend.dev            -> NOT key-specific
+ * The second case fires identically for every key in the ring that
+ * hasn't verified a sending domain — rotating through the rest of the
+ * ring would just burn every remaining key on the same guaranteed 403.
+ * Differentiated by message content, not status code alone.
  */
-async function singleSendGmail({ address, password }, { toEmail, subject, html }) {
+async function classifyResendFailure(res) {
+  let rawText = '';
+  let bodyJson = null;
   try {
-    await WorkerMailer.send(
-      {
-        host: 'smtp.gmail.com',
-        port: 465,
-        secure: true,
-        credentials: { username: address, password },
-      },
-      {
-        from: { name: 'Civil Engineering Suite', email: address },
-        to: toEmail,
-        subject,
-        html,
-      },
-    );
-  } catch (sendErr) {
-    const msg = String(sendErr?.message || sendErr);
-    const err = new Error(`Gmail send failed (${address}): ${msg}`);
-    if (/invalid login|no supported auth|authentication|credential|5\.7\.(0|8|9|14)/i.test(msg)) {
-      err.category = 'auth_failed';
-    } else if (/rate|too many|try again later|4\.7\.|4\.5\.3|421|454/i.test(msg)) {
-      err.category = 'rate_limited';
-    } else {
-      err.category = 'other';
-    }
-    throw err;
+    rawText = await res.text();
+    bodyJson = rawText ? JSON.parse(rawText) : null;
+  } catch { /* non-JSON error body — rawText still used below */ }
+
+  const message = bodyJson?.message || bodyJson?.error || rawText.slice(0, 300) || `HTTP ${res.status}`;
+  const label   = bodyJson?.name || bodyJson?.type || bodyJson?.code || '';
+
+  const isSandboxDomainRestriction = res.status === 403
+    && /only send.{0,20}(testing )?emails? to your own|verify a domain/i.test(message);
+  const isInvalidKey = res.status === 403
+    && (label === 'invalid_api_key' || /api key is invalid/i.test(message));
+
+  let keySpecific;
+  if (res.status === 403) {
+    // Unrecognized 403 message defaults to NOT key-specific: safer to fail
+    // fast and surface it than to burn the whole ring on an unknown cause.
+    keySpecific = isInvalidKey && !isSandboxDomainRestriction;
+  } else {
+    keySpecific = res.status === 401;
   }
+
+  return { status: res.status, label, message, keySpecific, isSandboxDomainRestriction };
+}
+
+/**
+ * Tries each ring key in FIXED order (index 0 first) — no round-robin
+ * start offset. Round-robin spreads load across INDEPENDENT quota pools
+ * (ElevenLabs/Groq/etc.); Resend's quota is pooled per-account across
+ * every key (see [V2-KEYRING] header note), so there is nothing to
+ * spread — index 0 is always the first attempt, later slots are pure
+ * failover for a dead primary key.
+ */
+async function sendViaResendRing(keys, payload) {
+  const attempts = [];
+
+  for (let i = 0; i < keys.length; i++) {
+    let res;
+    try {
+      res = await fetch('https://api.resend.com/emails', {
+        method : 'POST',
+        headers: {
+          'Authorization': `Bearer ${keys[i]}`,
+          'Content-Type' : 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+    } catch (err) {
+      // Network-layer failure is independent of which key is used —
+      // burning the rest of the ring on it would not help.
+      attempts.push({ index: i, network: true, message: String((err && err.message) || err) });
+      break;
+    }
+
+    if (res.ok) {
+      let data = null;
+      try { data = await res.json(); } catch { /* Resend returns JSON on 2xx; ignore parse edge case */ }
+      return { ok: true, keyIndex: i, keysTried: i + 1, data };
+    }
+
+    const failure = await classifyResendFailure(res);
+    attempts.push({ index: i, ...failure });
+
+    if (!failure.keySpecific) break; // account-wide failure — every remaining key would repeat it
+  }
+
+  return { ok: false, keysTried: attempts.length, attempts };
 }
 
 /* ═══════════════════════════════════════════════════════════ HANDLER */
@@ -245,19 +267,16 @@ export async function onRequestPost(context) {
     return json({ error: 'Invalid OTP format.' }, 400, origin);
   }
 
-  /* Build the Gmail account ring from CF environment */
-  const { accounts, skipped } = buildGmailAccountRing(context.env);
-  if (skipped.length) {
-    console.warn(`[send-otp] Incomplete Gmail credential pair(s), skipped: ${skipped.join(', ')}`);
-  }
-  if (accounts.length === 0) {
-    console.error('[send-otp] No complete GMAIL_ADDRESS/GMAIL_APP_PASSWORD pair is set.');
+  /* Get API key ring from CF environment */
+  const { keys: resendKeys, matchedNames } = buildKeyRing(context.env, RESEND_BASE_NAME);
+  if (resendKeys.length === 0) {
+    console.error('[send-otp] No RESEND_API_KEY* environment variable is set.');
     return json({ error: 'Server configuration error.' }, 500, origin);
   }
 
   const safeName = (to_name || 'there').replace(/[<>&"]/g, '');
 
-  /* Build email HTML — identical template, unchanged */
+  /* Build email HTML */
   const emailHtml = `<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -310,26 +329,49 @@ export async function onRequestPost(context) {
 </body>
 </html>`;
 
-  /* Send via Gmail SMTP, walking the account ring on account-specific failures */
-  try {
-    const { accountIndex, accountsTried } = await rotateAndSendGmail(
-      ringPointer,
-      accounts,
-      (account) => singleSendGmail(account, {
-        toEmail: to_email,
-        subject: 'Your verification code — Civil Engineering Suite',
-        html: emailHtml,
-      }),
-    );
-    if (accountsTried > 1) {
-      console.warn(`[send-otp] Gmail succeeded on ${accounts[accountIndex].label} after ${accountsTried - 1} failed attempt(s).`);
+  /* Send via Resend, rotating the ring only on a confirmed-dead key */
+  const result = await sendViaResendRing(resendKeys, {
+    from   : RESEND_FROM,
+    to     : [to_email],
+    subject: 'Your verification code — Civil Engineering Suite',
+    html   : emailHtml,
+  });
+
+  if (!result.ok) {
+    const last = result.attempts[result.attempts.length - 1];
+
+    if (last && last.isSandboxDomainRestriction) {
+      // This will fire for EVERY real site visitor as long as RESEND_FROM
+      // is still onboarding@resend.dev — it is not a per-request fluke.
+      // Loud, distinct log line on purpose: this is a one-time setup gap,
+      // not a runtime condition worth quietly retrying.
+      console.error('[send-otp] BLOCKED: RESEND_FROM is still the onboarding@resend.dev sandbox '
+        + 'address, which can only deliver to the sending account\'s own email. Verify a domain at '
+        + 'resend.com/domains and update RESEND_FROM before this endpoint can reach real recipients. '
+        + JSON.stringify({ keysConfigured: resendKeys.length, matchedNames }));
+      return json({ error: 'Email sending is not fully configured yet — contact the site owner.' }, 500, origin);
     }
-  } catch (err) {
-    console.error(`[send-otp] Gmail send failed: ${err.message}`);
-    return json({ error: 'Failed to send verification email.' }, 502, origin);
+
+    console.error('[send-otp] Resend ring exhausted:', JSON.stringify({
+      keysConfigured: resendKeys.length,
+      matchedNames,
+      attempts: result.attempts,
+    }));
+    const status = last && last.status === 429 ? 429 : 502;
+    const clientMsg = status === 429
+      ? 'Email provider is rate-limited — try again shortly.'
+      : 'Email provider rejected the request.';
+    return json({ error: clientMsg }, status, origin);
   }
 
-  return json({ success: true }, 200, origin);
+  console.log('[send-otp] sent', JSON.stringify({
+    emailId : result.data?.id,
+    keyIndex: result.keyIndex,
+    keysTried: result.keysTried,
+    keyName : matchedNames[result.keyIndex],
+  }));
+
+  return json({ success: true }, 200, origin, { 'X-OTP-KeyIndex': String(result.keyIndex) });
 }
 
 /* ── Preflight ── */
