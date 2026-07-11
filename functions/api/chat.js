@@ -1,6 +1,76 @@
 /**
- * functions/api/chat.js  —  v15  (2026-06-28)
+ * functions/api/chat.js  —  v20  (2026-07-12)
  * ──────────────────────────────────────────────────────────────────────────
+ * ════════════════════════════════════════
+ * CHANGELOG v20 — PERSISTENT DEVELOPER SESSIONS (KV SAVE/LOAD)
+ * ════════════════════════════════════════
+ *
+ * PROBLEM: every conversation is stateless — closing the chat widget (or a
+ *   Worker isolate recycling) loses the full transcript. There was no way
+ *   for the developer to persist a conversation and resume it later.
+ *
+ * CHANGE 1 (NEW KV BINDING — env.CES_SESSIONS, NOT env.CES_CHAT_KV):
+ *   A second, DEDICATED KV namespace is used for this feature, separate
+ *   from env.CES_CHAT_KV (which already holds short-lived, TTL'd rate-limit
+ *   counters — see checkRateLimit() above). Session data is meant to live
+ *   indefinitely (no expirationTtl is set on these writes); mixing
+ *   long-lived session blobs into the same namespace as 60s-window rate
+ *   counters is avoidable risk for zero benefit. Binding required:
+ *   Cloudflare Pages → civilengsuite → Settings → Functions → KV namespace
+ *   bindings → Variable name `CES_SESSIONS` → KV namespace `CES_SESSIONS`.
+ *   Dashboard-only, no wrangler config needed (same as CES_CHAT_KV).
+ *
+ * CHANGE 2 (COMMAND PARSER — BODY FIELDS, NOT HEADERS): the client sends
+ *   `devCommand: "save"|"load"` and `sessionKey: "<string>"` as JSON BODY
+ *   fields, not custom HTTP headers. Reason: getCorsHeaders() below returns
+ *   a hardcoded 'Access-Control-Allow-Headers' allow-list (currently
+ *   'Content-Type, X-Client-Date'); any browser fetch() sending a header
+ *   not on that list fails its CORS preflight before the POST is even
+ *   issued. This endpoint serves both the browser-based website widget
+ *   (CORS-bound) and the VBA desktop client (not CORS-bound at all, since
+ *   it isn't a browser) — body fields work identically for both without
+ *   touching the CORS allow-list. If headers are ever preferred instead,
+ *   X-Dev-Command / X-Dev-Session-Key must be added to that allow-list
+ *   FIRST or the website widget's requests will fail silently at preflight.
+ *
+ * CHANGE 3 (KV KEY = sessionKey, NOT devPassword): the original spec named
+ *   the KV key `dev_chat:{password}`. DEVELOPER_PASSWORD is a single global
+ *   secret gating dev mode as a whole (isDeveloperMode below) — reusing it
+ *   as the KV key would collapse every save onto ONE key account-wide,
+ *   overwriting the previous save every time (DEVELOPER_PASSWORD has one
+ *   value; it cannot address more than one stored conversation). A separate
+ *   `sessionKey` field is the per-conversation identifier instead; the KV
+ *   key format `dev_chat:{sessionKey}` is unchanged from the spec. Both
+ *   devPassword AND a non-empty sessionKey are required for save/load — see
+ *   Change 4.
+ *
+ * CHANGE 4 (ISOLATION / STATELESSNESS): the command-parser block below only
+ *   executes when body.devCommand is present. If absent, execution falls
+ *   straight through to the pre-existing chat pipeline, unchanged — zero
+ *   CES_SESSIONS calls, same as before this change existed. If devCommand
+ *   IS present but isDeveloperMode is false (wrong/missing devPassword),
+ *   the request is rejected (403) before any KV call — an unauthenticated
+ *   client cannot read or write CES_SESSIONS by sending arbitrary
+ *   sessionKey values, regardless of what devCommand claims.
+ *
+ * CHANGE 5 (STRUCTURAL MOVE, NO LOGIC CHANGE): isDeveloperMode's computation
+ *   (previously step "2b", positioned AFTER userMessage validation) is
+ *   moved to run immediately after body parsing, BEFORE userMessage
+ *   validation — the internal HMAC-compare logic is byte-for-byte
+ *   unchanged. This is required so save/load requests (which carry no
+ *   `message` field at all) don't get rejected by the "Message must not be
+ *   empty" check below, which exists for chat turns, not session commands.
+ *   userMessage validation itself is unchanged and still runs in full for
+ *   every request that isn't a devCommand.
+ *
+ * NOT CHANGED: the Gemini-key presence check (step 2) still runs BEFORE
+ *   body parsing, as it always has. In the narrow case where GEMINI_API_KEY
+ *   is entirely unset on a live deployment, save/load commands will also
+ *   receive the existing "No AI provider configured" 500 rather than being
+ *   processed — an already-broken deployment state (this key is described
+ *   above as the only required key), not reordered here to avoid touching
+ *   unrelated control flow for a case that shouldn't occur in production.
+ * ════════════════════════════════════════
  * ════════════════════════════════════════
  * CHANGELOG v15 — DEVELOPER MODE: HONEST GREETING, NO GATE CHANGE
  * ════════════════════════════════════════
@@ -3188,6 +3258,88 @@ async function checkRateLimit(env, key) {
   return { limited: false, mechanism: 'none' };
 }
 
+// ── Persistent Developer Sessions (v20) — save/load via KV ─────────────────
+// See CHANGELOG v20 at the top of this file for the full design rationale
+// (binding choice, body-vs-headers, sessionKey-vs-devPassword, ordering).
+const DEV_SESSION_KV_PREFIX      = 'dev_chat:';
+const DEV_SESSION_KEY_MAX_LEN    = 128;        // sessionKey length cap
+const DEV_SESSION_MAX_SERIALIZED = 1_000_000;  // ~1MB guard on stored JSON size
+
+// saveConversation() — writes { history, savedAt, messageCount } to
+// `${DEV_SESSION_KV_PREFIX}${sessionKey}` in the given KV binding. No
+// expirationTtl is set: unlike checkRateLimit()'s counters, session data is
+// meant to persist until explicitly overwritten by a later save under the
+// same sessionKey. `kv` is env.CES_SESSIONS, injected by the caller (never
+// read from `env` directly in here — keeps this testable with a mock KV).
+async function saveConversation(kv, sessionKey, history) {
+  const payload = {
+    history,
+    savedAt: new Date().toISOString(),
+    messageCount: history.length,
+  };
+  let serialized;
+  try {
+    serialized = JSON.stringify(payload);
+  } catch (err) {
+    console.error('[chat.js] saveConversation JSON.stringify error:', err.message);
+    return { ok: false, error: 'Conversation history could not be serialized.', code: 'SERIALIZE_ERROR' };
+  }
+  if (serialized.length > DEV_SESSION_MAX_SERIALIZED) {
+    return {
+      ok: false,
+      error: `Conversation too large to save (${serialized.length} chars, limit ${DEV_SESSION_MAX_SERIALIZED}).`,
+      code: 'SESSION_TOO_LARGE',
+    };
+  }
+  try {
+    await kv.put(DEV_SESSION_KV_PREFIX + sessionKey, serialized);
+    return { ok: true, savedAt: payload.savedAt, messageCount: payload.messageCount };
+  } catch (err) {
+    console.error('[chat.js] saveConversation KV put error:', err.message);
+    return { ok: false, error: 'Failed to save conversation to storage.', code: 'KV_WRITE_ERROR' };
+  }
+}
+
+// loadConversation() — reads `${DEV_SESSION_KV_PREFIX}${sessionKey}` back
+// from the given KV binding and returns the stored history array. Three
+// distinct failure modes are reported with distinct `code` values so the
+// client can render each correctly (missing vs corrupted vs KV outage):
+//   SESSION_NOT_FOUND — kv.get() returned null (key never saved, or a typo
+//     in sessionKey — Cloudflare KV has no "did you mean" for this).
+//   SESSION_CORRUPTED — a value exists but isn't valid JSON, or doesn't
+//     contain a `history` array (should only happen from external tampering
+//     with the KV namespace directly, since saveConversation() above is the
+//     only writer and always writes valid, matching JSON).
+//   KV_READ_ERROR — the kv.get() call itself threw (KV outage/binding issue).
+async function loadConversation(kv, sessionKey) {
+  let raw;
+  try {
+    raw = await kv.get(DEV_SESSION_KV_PREFIX + sessionKey);
+  } catch (err) {
+    console.error('[chat.js] loadConversation KV get error:', err.message);
+    return { ok: false, error: 'Failed to read conversation from storage.', code: 'KV_READ_ERROR' };
+  }
+  if (raw === null) {
+    return { ok: false, error: 'No saved session found for this key.', code: 'SESSION_NOT_FOUND' };
+  }
+  let payload;
+  try {
+    payload = JSON.parse(raw);
+  } catch (err) {
+    console.error('[chat.js] loadConversation JSON.parse error (corrupted KV value):', err.message);
+    return { ok: false, error: 'Saved session data is corrupted.', code: 'SESSION_CORRUPTED' };
+  }
+  if (!payload || !Array.isArray(payload.history)) {
+    return { ok: false, error: 'Saved session data is corrupted.', code: 'SESSION_CORRUPTED' };
+  }
+  return {
+    ok: true,
+    history: payload.history,
+    savedAt: typeof payload.savedAt === 'string' ? payload.savedAt : null,
+    messageCount: typeof payload.messageCount === 'number' ? payload.messageCount : payload.history.length,
+  };
+}
+
 // ── POST handler ───────────────────────────────────────────────────────────
 // v8 FIX — ROOT-CAUSE ANALYSIS OF ALL BUGS IN v7's onRequestPost:
 //
@@ -3291,6 +3443,147 @@ export async function onRequestPost(context) {
     return json({ error: 'Request body must be valid JSON.' }, 400, undefined, request);
   }
 
+  // 3a. Developer mode authentication. [v20: MOVED UP from the old "2b"
+  //     position, which ran AFTER userMessage validation below — moved so
+  //     save/load commands (step 3b) can be authenticated before any
+  //     userMessage-specific check runs. Internal logic is byte-for-byte
+  //     unchanged — see CHANGELOG v20, Change 5.]
+  //     Client sends { message, history, devPassword: "secret" } when the user
+  //     has activated dev mode via the /dev command in the chat widget.
+  //     Validated server-side only — the password never reaches the AI model.
+  //     DEVELOPER_PASSWORD must be set as a Secret in Cloudflare Pages dashboard.
+  //     [v14] Uses hmacTimingSafeEqual() — see the helper above for full rationale.
+  const incomingDevPw   = typeof body.devPassword === 'string' ? body.devPassword : '';
+  const configuredDevPw = typeof env.DEVELOPER_PASSWORD === 'string' ? env.DEVELOPER_PASSWORD : '';
+  let isDeveloperMode = false;
+  if (incomingDevPw && configuredDevPw) {
+    try {
+      isDeveloperMode = await hmacTimingSafeEqual(incomingDevPw, configuredDevPw);
+    } catch (_) {
+      // hmacTimingSafeEqual failed (crypto.subtle unavailable — should never
+      // happen on Cloudflare Workers). Fall back to direct compare: functionally
+      // correct, not timing-safe, but rate limiting above throttles brute-force
+      // attempts that would exploit a timing side-channel.
+      isDeveloperMode = (incomingDevPw === configuredDevPw);
+    }
+    if (isDeveloperMode) {
+      console.info('[chat.js] Developer mode authenticated for request from', clientIp);
+    } else {
+      console.warn('[chat.js] Developer mode: wrong password attempt from', clientIp);
+    }
+  }
+
+  // 3b. Developer session commands — save/load. [NEW, v20]
+  //     Only reachable with isDeveloperMode === true. Entirely separate from
+  //     the chat pipeline below: no userMessage is required, no AI provider
+  //     is called, and the request returns here — it never reaches step 4.
+  //     kv.get()/kv.put() are binding RPCs, not fetch() subrequests, so this
+  //     does not consume the fetch budget built in step 5 below (same
+  //     distinction already noted for the env.AI binding at the Workers AI
+  //     layer further down). See CHANGELOG v20 for the full rationale behind
+  //     every decision in this block (KV binding name, body vs. headers,
+  //     sessionKey vs. devPassword).
+  const rawDevCommand = typeof body.devCommand === 'string' ? body.devCommand.trim().toLowerCase() : '';
+  if (rawDevCommand) {
+    if (!isDeveloperMode) {
+      console.warn('[chat.js] Dev session command attempted without valid devPassword from', clientIp);
+      return json(
+        { error: 'Developer authentication required for session commands.', code: 'DEV_AUTH_REQUIRED' },
+        403,
+        undefined,
+        request,
+      );
+    }
+
+    const sessionKey = typeof body.sessionKey === 'string' ? body.sessionKey.trim() : '';
+    if (!sessionKey) {
+      return json(
+        { error: 'sessionKey is required for save/load commands.', code: 'SESSION_KEY_REQUIRED' },
+        400,
+        undefined,
+        request,
+      );
+    }
+    if (sessionKey.length > DEV_SESSION_KEY_MAX_LEN) {
+      return json(
+        { error: `sessionKey must be ${DEV_SESSION_KEY_MAX_LEN} characters or fewer.`, code: 'SESSION_KEY_TOO_LONG' },
+        400,
+        undefined,
+        request,
+      );
+    }
+    if (!env.CES_SESSIONS) {
+      console.error('[chat.js] CES_SESSIONS KV binding missing — cannot process dev session command.');
+      return json(
+        {
+          error: 'Session storage is not configured on the server. Bind a KV namespace as ' +
+                 'CES_SESSIONS in the Cloudflare Pages dashboard (Settings \u2192 Functions \u2192 ' +
+                 'KV namespace bindings).',
+          code: 'KV_NOT_CONFIGURED',
+        },
+        500,
+        undefined,
+        request,
+      );
+    }
+
+    if (rawDevCommand === 'save') {
+      const historyToSave = Array.isArray(body.history) ? body.history : null;
+      if (!historyToSave) {
+        return json(
+          { error: 'A history array is required to save a session.', code: 'HISTORY_REQUIRED' },
+          400,
+          undefined,
+          request,
+        );
+      }
+      const result = await saveConversation(env.CES_SESSIONS, sessionKey, historyToSave);
+      if (!result.ok) {
+        return json(
+          { error: result.error, code: result.code },
+          result.code === 'SESSION_TOO_LARGE' ? 413 : 500,
+          undefined,
+          request,
+        );
+      }
+      console.info('[chat.js] Dev session saved:', sessionKey, '-', result.messageCount, 'turns, from', clientIp);
+      return json(
+        { ok: true, sessionKey, savedAt: result.savedAt, messageCount: result.messageCount },
+        200,
+        undefined,
+        request,
+      );
+    }
+
+    if (rawDevCommand === 'load') {
+      const result = await loadConversation(env.CES_SESSIONS, sessionKey);
+      if (!result.ok) {
+        return json(
+          { error: result.error, code: result.code },
+          result.code === 'SESSION_NOT_FOUND' ? 404 : 500,
+          undefined,
+          request,
+        );
+      }
+      console.info('[chat.js] Dev session loaded:', sessionKey, '-', result.messageCount, 'turns, for', clientIp);
+      return json(
+        { ok: true, sessionKey, history: result.history, savedAt: result.savedAt, messageCount: result.messageCount },
+        200,
+        undefined,
+        request,
+      );
+    }
+
+    return json(
+      { error: `Unknown devCommand "${rawDevCommand}". Expected "save" or "load".`, code: 'UNKNOWN_DEV_COMMAND' },
+      400,
+      undefined,
+      request,
+    );
+  }
+
+  // 3c. userMessage extraction + validation. [v20: unchanged logic, now runs
+  //     after 3a/3b instead of immediately after step 3 — see Change 5.]
   const userMessage = typeof body.message === 'string' ? body.message.trim() : '';
   const rawHistory  = Array.isArray(body.history) ? body.history : [];
 
@@ -3331,32 +3624,6 @@ export async function onRequestPost(context) {
       undefined,
       request,
     );
-  }
-
-  // 2b. Developer mode authentication.
-  //     Client sends { message, history, devPassword: "secret" } when the user
-  //     has activated dev mode via the /dev command in the chat widget.
-  //     Validated server-side only — the password never reaches the AI model.
-  //     DEVELOPER_PASSWORD must be set as a Secret in Cloudflare Pages dashboard.
-  //     [v14] Uses hmacTimingSafeEqual() — see the helper above for full rationale.
-  const incomingDevPw   = typeof body.devPassword === 'string' ? body.devPassword : '';
-  const configuredDevPw = typeof env.DEVELOPER_PASSWORD === 'string' ? env.DEVELOPER_PASSWORD : '';
-  let isDeveloperMode = false;
-  if (incomingDevPw && configuredDevPw) {
-    try {
-      isDeveloperMode = await hmacTimingSafeEqual(incomingDevPw, configuredDevPw);
-    } catch (_) {
-      // hmacTimingSafeEqual failed (crypto.subtle unavailable — should never
-      // happen on Cloudflare Workers). Fall back to direct compare: functionally
-      // correct, not timing-safe, but rate limiting above throttles brute-force
-      // attempts that would exploit a timing side-channel.
-      isDeveloperMode = (incomingDevPw === configuredDevPw);
-    }
-    if (isDeveloperMode) {
-      console.info('[chat.js] Developer mode authenticated for request from', clientIp);
-    } else {
-      console.warn('[chat.js] Developer mode: wrong password attempt from', clientIp);
-    }
   }
 
   // 4. Normalize history — keep last 10 turns (5 exchanges) for token budget.
