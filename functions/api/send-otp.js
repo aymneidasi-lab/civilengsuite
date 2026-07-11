@@ -125,6 +125,30 @@ const PASSWORD_BASE = 'GMAIL_APP_PASSWORD';
 const BRAND_NAME        = 'Civil Engineering Suite';
 const SENDER_PERSON_NAME = 'Eng. Aymn Asi';
 
+/**
+ * [ICON] Verified two independent ways against this repo's own
+ * REPO_STRUCTURE.txt and the live HTML, not assumed:
+ *   1. Tree depth: the `images/` folder holding PCsuite-icon.png sits at
+ *      the exact same indentation depth as the sibling `-pro/` product
+ *      folders directly under `public/` (not nested inside any of
+ *      them) — confirmed by comparing leading-pipe column position, not
+ *      raw space count (the tree uses box-drawing characters, so space
+ *      count alone is misleading).
+ *   2. pc_suite_v20.html's own <link rel="icon" href="images/favicon.ico">
+ *      is DOCUMENT-relative with no leading slash. That page deploys to
+ *      the site root, so the relative path only resolves correctly if
+ *      `public/` is served as the site root — which independently
+ *      confirms reading #1.
+ * PNG, not the sibling .webp/.avif — webp/avif support in Gmail and
+ * Outlook is partial-to-nonexistent as of 2026 (Outlook desktop doesn't
+ * render webp at all; Gmail transcodes it server-side, breaking
+ * transparency); PNG is the only one of the three guaranteed to render
+ * in every major mail client. If PCsuite-icon.png turns out not to be
+ * the intended mark, apple-touch-icon.png lives in the same folder —
+ * swap the filename below, nothing else changes.
+ */
+const ICON_URL = 'https://civilengsuite.pages.dev/images/PCsuite-icon.png';
+
 /* ── Rate limit: max requests per IP per 10-minute window ── */
 const RATE_LIMIT = 5;
 const WINDOW_MS  = 10 * 60 * 1000; /* 10 minutes */
@@ -340,10 +364,20 @@ export async function onRequestPost(context) {
              border:1px solid #dde3ea;overflow:hidden;max-width:480px;">
         <!-- Header -->
         <tr>
-          <td style="background:linear-gradient(135deg,#0A1A2E,#1A3A5C);padding:28px 36px;">
-            <h1 style="margin:0;color:#F5D88A;font-size:1.1rem;font-weight:700;letter-spacing:0.04em;">
-              ${BRAND_NAME}
-            </h1>
+          <td style="background:linear-gradient(135deg,#0A1A2E,#1A3A5C);padding:24px 36px;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td style="vertical-align:middle;padding-right:12px;">
+                  <img src="${ICON_URL}" alt="${BRAND_NAME}" width="36" height="36"
+                       style="display:block;width:36px;height:36px;border-radius:8px;border:0;outline:none;">
+                </td>
+                <td style="vertical-align:middle;">
+                  <h1 style="margin:0;color:#F5D88A;font-size:1.1rem;font-weight:700;letter-spacing:0.04em;">
+                    ${BRAND_NAME}
+                  </h1>
+                </td>
+              </tr>
+            </table>
           </td>
         </tr>
         <!-- Body -->
