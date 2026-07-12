@@ -1,6 +1,77 @@
 /**
- * functions/api/chat.js  —  v20  (2026-07-12)
+ * functions/api/chat.js  —  v21  (2026-07-12)
  * ──────────────────────────────────────────────────────────────────────────
+ * ════════════════════════════════════════
+ * CHANGELOG v21 — NATURAL-LANGUAGE SAVE-SESSION TRIGGER (NO SLASH-COMMAND)
+ * ════════════════════════════════════════
+ *
+ * PROBLEM: v20's /save and /load are slash-commands recognized only inside
+ *   pc_suite_v20.html's sendMessage() — the VBA desktop client (frmCESChat)
+ *   doesn't have that interception and wasn't touched in v20. A request for
+ *   a naming trigger phrased as plain text ("save session with name X" /
+ *   "احفظ السيشن باسم X") works from ANY client that sends `message`
+ *   verbatim — including frmCESChat — with zero frontend changes anywhere.
+ *
+ * CHANGE 1 (TRIGGER = MESSAGE CONTENT, NOT A COMMAND FIELD): checked against
+ *   body.message directly (step 3b-2, below step 3b), not a devCommand/
+ *   sessionKey pair. This is why no HTML/frontend file needed touching for
+ *   this specific path, unlike v20's slash-commands.
+ *
+ * CHANGE 2 (currentSessionId / env.ces_chat_kv — NOT USED, DIDN'T EXIST):
+ *   the original ask specified reading `env.ces_chat_kv` (lowercase) and
+ *   keying on a `currentSessionId`. Neither exists anywhere in chat.js or
+ *   pc_suite_v20.html (verified by full-text search before writing this) —
+ *   the real, already-deployed binding is env.CES_CHAT_KV (capitalized,
+ *   holds ONLY rate-limit counters — see checkRateLimit()), and no session-
+ *   ID concept is generated or sent by either client today. Using either
+ *   literally would either crash (undefined binding) or silently collide
+ *   every anonymous save onto one key (undefined sessionId). This reuses
+ *   v20's env.CES_SESSIONS + sessionKey instead: the extracted name IS the
+ *   sessionKey, exactly as /save NAME already works — no new KV namespace,
+ *   no invented identifier, no dependency on a file that wasn't provided.
+ *   If a real per-visitor session ID already exists in track.js (listed in
+ *   the repo structure but not in this change's inputs), wiring THIS
+ *   trigger to key off that instead is a follow-up, not a guess made here.
+ *
+ * CHANGE 3 (GATED BEHIND isDeveloperMode, NOT PUBLIC): the request didn't
+ *   mention an auth check. Kept dev-mode-gated anyway, for two reasons: (a)
+ *   the thread's founding constraint (v20) was "only Developer Mode" for
+ *   every session feature; nothing here rescinds that. (b) the fixed reply
+ *   string addresses the caller as "Engineer" — matching the EXISTING dev-
+ *   mode welcome banner's own voice ("Eng. Aymn Asi authenticated") a few
+ *   hundred lines below — not a generic public-visitor string. An
+ *   unauthenticated visitor typing this phrase gets a normal LLM reply,
+ *   same as any other message (Continuation, as specified).
+ *
+ * CHANGE 4 (RESPONSE SHAPE = { reply, devMode }, NOT { ok, sessionKey }):
+ *   the spec explicitly required compatibility with "the current response
+ *   structure" — pc_suite_v20.html's sendMessage() only ever reads
+ *   data.reply for display and data.devMode to keep local state in sync;
+ *   it has no branch for v20's { ok, sessionKey, savedAt, ... } shape. This
+ *   trigger's response uses the NORMAL chat-turn shape instead, so the
+ *   existing, unmodified frontend renders "Done, Engineer, the session is
+ *   now named X!" as an ordinary bot bubble — zero frontend changes.
+ *   Side effect of this (inherent to "no frontend changes", not a bug):
+ *   the trigger phrase itself IS visible in the live chat and IS pushed
+ *   into the client's own `history` for the next turn — the frontend has
+ *   no special case to suppress it, unlike the /save slash-command (which
+ *   IS intercepted client-side and never becomes a visible bubble).
+ *
+ * CHANGE 5 ("SESSION NOT FOUND" ERROR HANDLING — APPLIES TO LOAD, NOT THIS):
+ *   this trigger performs a full save (creates-or-overwrites), same as
+ *   /save — there is no pre-existing record this could fail to find, since
+ *   nothing auto-creates a session before a save happens. "Not found" as a
+ *   failure mode already exists on the /load path (v20, SESSION_NOT_FOUND);
+ *   this path's error handling covers what can actually go wrong for a
+ *   save (oversized payload, missing KV binding, KV outage) via the same
+ *   saveConversation() used by /save.
+ *
+ * CHANGE 6 (saveConversation/loadConversation EXTENDED WITH title): added
+ *   an optional 4th arg to saveConversation() (title, defaults to null) and
+ *   a matching field on loadConversation()'s return. Backward compatible —
+ *   v20's existing 3-arg call site (devCommand === 'save') is untouched and
+ *   keeps writing title: null. Re-verified against both existing test
+ *   suites plus new cases for this trigger — see test files.
  * ════════════════════════════════════════
  * CHANGELOG v20 — PERSISTENT DEVELOPER SESSIONS (KV SAVE/LOAD)
  * ════════════════════════════════════════
@@ -3265,15 +3336,18 @@ const DEV_SESSION_KV_PREFIX      = 'dev_chat:';
 const DEV_SESSION_KEY_MAX_LEN    = 128;        // sessionKey length cap
 const DEV_SESSION_MAX_SERIALIZED = 1_000_000;  // ~1MB guard on stored JSON size
 
-// saveConversation() — writes { history, savedAt, messageCount } to
+// saveConversation() — writes { history, title, savedAt, messageCount } to
 // `${DEV_SESSION_KV_PREFIX}${sessionKey}` in the given KV binding. No
 // expirationTtl is set: unlike checkRateLimit()'s counters, session data is
 // meant to persist until explicitly overwritten by a later save under the
 // same sessionKey. `kv` is env.CES_SESSIONS, injected by the caller (never
 // read from `env` directly in here — keeps this testable with a mock KV).
-async function saveConversation(kv, sessionKey, history) {
+// `title` is optional (v21) — omit it or pass ''/null/undefined and the
+// stored record gets title: null; existing 3-arg call sites are unaffected.
+async function saveConversation(kv, sessionKey, history, title) {
   const payload = {
     history,
+    title: (typeof title === 'string' && title) ? title : null,
     savedAt: new Date().toISOString(),
     messageCount: history.length,
   };
@@ -3335,6 +3409,7 @@ async function loadConversation(kv, sessionKey) {
   return {
     ok: true,
     history: payload.history,
+    title: typeof payload.title === 'string' ? payload.title : null,
     savedAt: typeof payload.savedAt === 'string' ? payload.savedAt : null,
     messageCount: typeof payload.messageCount === 'number' ? payload.messageCount : payload.history.length,
   };
@@ -3580,6 +3655,57 @@ export async function onRequestPost(context) {
       undefined,
       request,
     );
+  }
+
+  // 3b-2. Natural-language "save session" trigger. [NEW, v21]
+  //     Syntax: "احفظ السيشن باسم <name>" or "save session with name <name>"
+  //     — message must START with the phrase (checked against the raw,
+  //     untrimmed-by-step-3c body.message directly, since this runs before
+  //     step 3c defines `userMessage`). Intercepted here, BEFORE any
+  //     provider fetch() — this never reaches the Gemini/Groq/OpenRouter
+  //     call layers below, so no LLM token or AI time is spent on it.
+  //     Dev-mode gated (isDeveloperMode, from step 3a) — consistent with
+  //     every other session feature in this file (see CHANGELOG v20); an
+  //     unauthenticated visitor typing this exact phrase just falls through
+  //     to a normal LLM reply at step 4 onward, same as any other message.
+  //     RESPONSE SHAPE: { reply, devMode } — the SAME shape a normal chat
+  //     turn returns, deliberately NOT { ok, sessionKey, ... } like the
+  //     devCommand branch above. pc_suite_v20.html's sendMessage() only
+  //     renders data.reply; using any other shape here would show nothing
+  //     to the user without a frontend change, which this feature must not
+  //     require (per the constraint it was built against).
+  //     SAVED CONTENT: uses body.history (the conversation BEFORE this
+  //     message, same convention the devCommand='save' branch above uses)
+  //     — not body.message itself, since the trigger phrase is a control
+  //     message, not conversation content worth persisting into the saved
+  //     record. It still ends up in the LIVE chat's own visible history
+  //     and gets resent on the client's next turn regardless — the frontend
+  //     has no special-case for this phrase (again, no frontend changes),
+  //     so it cannot suppress that the way the /save slash-command does.
+  const rawMessageForSaveTrigger = typeof body.message === 'string' ? body.message.trim() : '';
+  const saveNameMatch = isDeveloperMode
+    ? rawMessageForSaveTrigger.match(/^(?:احفظ\s+السيشن\s+باسم|save\s+session\s+with\s+name)\s+(.+)$/i)
+    : null;
+  if (saveNameMatch) {
+    const extractedName = saveNameMatch[1].trim();
+    if (!extractedName) {
+      return json({ reply: 'Please provide a name after the save-session command, Engineer.', devMode: true }, 200, undefined, request);
+    }
+    if (extractedName.length > DEV_SESSION_KEY_MAX_LEN) {
+      return json({ reply: `Session name must be ${DEV_SESSION_KEY_MAX_LEN} characters or fewer, Engineer.`, devMode: true }, 200, undefined, request);
+    }
+    if (!env.CES_SESSIONS) {
+      console.error('[chat.js] CES_SESSIONS KV binding missing — cannot process save-session trigger.');
+      return json({ reply: 'Session storage is not configured on the server yet, Engineer.', devMode: true }, 200, undefined, request);
+    }
+    const historyToSaveViaTrigger = Array.isArray(body.history) ? body.history : [];
+    const triggerResult = await saveConversation(env.CES_SESSIONS, extractedName, historyToSaveViaTrigger, extractedName);
+    if (!triggerResult.ok) {
+      console.error('[chat.js] save-session trigger failed:', triggerResult.code, triggerResult.error);
+      return json({ reply: `Save failed, Engineer: ${triggerResult.error}`, devMode: true }, 200, undefined, request);
+    }
+    console.info('[chat.js] Session saved via natural-language trigger:', extractedName, '-', triggerResult.messageCount, 'turns, from', clientIp);
+    return json({ reply: `Done, Engineer, the session is now named ${extractedName}!`, devMode: true }, 200, undefined, request);
   }
 
   // 3c. userMessage extraction + validation. [v20: unchanged logic, now runs
