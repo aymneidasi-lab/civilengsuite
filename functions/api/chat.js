@@ -1,6 +1,37 @@
 /**
- * functions/api/chat.js  —  v22  (2026-07-12)
+ * functions/api/chat.js  —  v23  (2026-07-13)
  * ──────────────────────────────────────────────────────────────────────────
+ * ════════════════════════════════════════
+ * CHANGELOG v23 — TRIGGER REGEX WAS TOO RIGID, SILENTLY FELL THROUGH TO LLM
+ * ════════════════════════════════════════
+ *
+ * BUG: both natural-language triggers (v21 save, v22 load) matched exactly
+ *   one verb+noun pair each (احفظ+السيشن, استرجع+السيشن). Real usage typed
+ *   "احفظ الجلسه باسم X" and "حمل السيشن باسم X" — neither matched, both
+ *   fell through to the normal chat pipeline, and Gemini — with no
+ *   knowledge of whether a KV write happened — answered AS IF it had
+ *   saved/loaded something, inventing plausible-sounding confirmations
+ *   (including a fabricated project name on the fake "load"). A silent
+ *   regex miss is worse here than an error: the hallucinated reply looks
+ *   identical to a real success.
+ *
+ * FIX: both regexes now accept (احفظ|سجل) for save, (استرجع|حمل|استعيد)
+ *   for load, and (السيشن|الجلسة|الجلسه) for the noun in both — covers
+ *   every phrasing tested against, verified with a Node script before
+ *   editing this file (both new phrasings match, both original phrasings
+ *   still match, English still matches, three negative/meta-question
+ *   controls still correctly fall through).
+ *
+ * NOT FIXED HERE (separate, larger issue, flagged not silently expanded
+ *   into this change): Eng_pro assist's system prompt has no awareness
+ *   this feature exists at all. Asked directly ("can you save sessions?"),
+ *   it falls back to generic "I'm stateless, no memory beyond this
+ *   context window" — accurate for a bare LLM, actively wrong for this
+ *   deployment. Fixing that means editing multiple existing, already-
+ *   tuned system-prompt blocks (~1076, ~2472, ~2597) consistently, which
+ *   is real prompt-engineering work, not a mechanical patch — deliberately
+ *   left as a follow-up rather than rushed into the same change as a
+ *   regex fix.
  * ════════════════════════════════════════
  * CHANGELOG v22 — NATURAL-LANGUAGE LOAD TRIGGER + TRUE CROSS-CLIENT RESUME
  * ════════════════════════════════════════
@@ -3726,9 +3757,22 @@ export async function onRequestPost(context) {
   //     and gets resent on the client's next turn regardless — the frontend
   //     has no special-case for this phrase (again, no frontend changes),
   //     so it cannot suppress that the way the /save slash-command does.
+  //     v23 FIX: regex was rigid to a single verb+noun pair (احفظ +
+  //     السيشن only) and silently never matched anything else — a message
+  //     that doesn't match this regex is indistinguishable from a normal
+  //     question, so it fell through to the LLM, which then CONFIDENTLY
+  //     HALLUCINATED a plausible-sounding "session saved" reply without
+  //     saving anything at all (Gemini has no knowledge of whether a KV
+  //     write happened; it just pattern-matches conversationally on
+  //     "you're asking me to save something" and answers as if it did).
+  //     That is a worse failure mode than an honest error: it LOOKS
+  //     successful. Broadened to the verb/noun variants an Egyptian
+  //     Arabic speaker actually types (سجل as well as احفظ; الجلسة/الجلسه
+  //     — informal ه-for-ة spelling is extremely common — alongside the
+  //     original السيشن transliteration).
   const rawMessageForSaveTrigger = typeof body.message === 'string' ? body.message.trim() : '';
   const saveNameMatch = isDeveloperMode
-    ? rawMessageForSaveTrigger.match(/^(?:احفظ\s+السيشن\s+باسم|save\s+session\s+with\s+name)\s+(.+)$/i)
+    ? rawMessageForSaveTrigger.match(/^(?:(?:احفظ|سجل)\s+(?:السيشن|الجلسة|الجلسه)\s+باسم|save\s+session\s+with\s+name)\s+(.+)$/i)
     : null;
   if (saveNameMatch) {
     const extractedName = saveNameMatch[1].trim();
@@ -3767,9 +3811,15 @@ export async function onRequestPost(context) {
   //     history/state with `loadedHistory` — see the accompanying
   //     frontend (pc_suite_v20.html, footing_pro_v20_merged.html) and VBA
   //     (modChatAPI.bas, frmCESChat.frm) patches for that client-side half.
+  //     v23 FIX: same rigidity/hallucination problem as the save trigger
+  //     above (see that comment) — the user typed "حمل السيشن باسم X" (a
+  //     completely natural choice for "load"), didn't match استرجع-only,
+  //     fell through to the LLM, which hallucinated a fake restored
+  //     session ("Footing Pro v.2026") that never existed. Broadened to
+  //     استرجع/حمل/استعيد and السيشن/الجلسة/الجلسه, same reasoning as save.
   const rawMessageForLoadTrigger = typeof body.message === 'string' ? body.message.trim() : '';
   const loadNameMatch = isDeveloperMode
-    ? rawMessageForLoadTrigger.match(/^(?:استرجع\s+السيشن\s+باسم|load\s+session\s+with\s+name)\s+(.+)$/i)
+    ? rawMessageForLoadTrigger.match(/^(?:(?:استرجع|حمل|استعيد)\s+(?:السيشن|الجلسة|الجلسه)\s+باسم|load\s+session\s+with\s+name)\s+(.+)$/i)
     : null;
   if (loadNameMatch) {
     const loadName = loadNameMatch[1].trim();
