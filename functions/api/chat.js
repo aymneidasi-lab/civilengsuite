@@ -1,6 +1,50 @@
 /**
- * functions/api/chat.js  —  v21  (2026-07-12)
+ * functions/api/chat.js  —  v22  (2026-07-12)
  * ──────────────────────────────────────────────────────────────────────────
+ * ════════════════════════════════════════
+ * CHANGELOG v22 — NATURAL-LANGUAGE LOAD TRIGGER + TRUE CROSS-CLIENT RESUME
+ * ════════════════════════════════════════
+ *
+ * PROBLEM: v21 added a natural-language SAVE trigger but no equivalent for
+ *   LOAD. A real "true resume" (not just a read-only preview) also requires
+ *   THREE independent clients to be updated — a fact discovered only by
+ *   reading the actual uploaded files for this change, not assumed:
+ *     1. pc_suite_v20.html         — website widget copy #1
+ *     2. footing_pro_v20_merged.html — website widget copy #2, an
+ *        INDEPENDENT duplicate of the same widget JS (own history/devMode/
+ *        sendMessage()), not the same file as #1 and never touched before
+ *     3. frmCESChat.frm / modChatAPI.bas — VBA desktop app, which has NO
+ *        developer-mode support at all today (no /dev, no devPassword
+ *        anywhere) — confirmed by full-text search before writing anything
+ *        here. Every session feature in this file is dev-mode-gated, so
+ *        none of it — save, load, either trigger style — was reachable
+ *        from the desktop app until this change adds that foundation.
+ *
+ * CHANGE 1 (LOAD TRIGGER MIRRORS SAVE, v21's OWN CONVENTION): step 3b-3,
+ *   directly below 3b-2. "استرجع السيشن باسم <name>" / "load session with
+ *   name <name>", dev-mode gated, same placement (before any provider
+ *   fetch()) and same reasoning as the save trigger — see CHANGELOG v21.
+ *
+ * CHANGE 2 (RESPONSE ADDS loadedHistory/loadedTitle, ADDITIVELY): success
+ *   response is { reply, devMode, loadedHistory, loadedTitle } — reply/
+ *   devMode are the same shape every other trigger in this file already
+ *   returns (so an unmodified client just shows the reply text and ignores
+ *   fields it doesn't recognize — this is what makes rolling the client
+ *   patches out one at a time safe: a client with no resume code degrades
+ *   to a text confirmation, not a broken response). loadedHistory/
+ *   loadedTitle are read ONLY by clients patched to look for them.
+ *
+ * CHANGE 3 (devCommand='load' — UNTOUCHED, DELIBERATELY): v20's slash-
+ *   command /load already works standalone on the website (its own fetch/
+ *   .then() chain reads data.ok/data.history directly, never touches the
+ *   normal reply/devMode path) — there was no need to touch or risk that
+ *   already-tested code for this change. The two load paths are additive,
+ *   not a replacement of one by the other.
+ *
+ * NOT IN THIS FILE: the three client-side patches themselves (pc_suite_v20
+ *   .html, footing_pro_v20_merged.html, modChatAPI.bas + frmCESChat.frm)
+ *   are separate deliverables alongside this one — this file only defines
+ *   the contract (loadedHistory/loadedTitle) they all consume.
  * ════════════════════════════════════════
  * CHANGELOG v21 — NATURAL-LANGUAGE SAVE-SESSION TRIGGER (NO SLASH-COMMAND)
  * ════════════════════════════════════════
@@ -3706,6 +3750,55 @@ export async function onRequestPost(context) {
     }
     console.info('[chat.js] Session saved via natural-language trigger:', extractedName, '-', triggerResult.messageCount, 'turns, from', clientIp);
     return json({ reply: `Done, Engineer, the session is now named ${extractedName}!`, devMode: true }, 200, undefined, request);
+  }
+
+  // 3b-3. Natural-language "load session" trigger. [NEW, v22]
+  //     Syntax: "استرجع السيشن باسم <name>" or "load session with name <name>"
+  //     — same gating/placement conventions as the save trigger (3b-2)
+  //     above; checked against the raw body.message, dev-mode gated.
+  //     RESPONSE SHAPE: { reply, devMode } — same as every other trigger in
+  //     this file — PLUS `loadedHistory` (array) and `loadedTitle`
+  //     (string|null) when a session was actually found. The extra fields
+  //     are additive, not a replacement: a client with no resume-handling
+  //     code just displays `reply` as a normal bot bubble and silently
+  //     ignores fields it doesn't recognize (e.g. an un-updated VBA build
+  //     would show "restored (N turns)" as plain text without actually
+  //     resuming). A client WITH resume-handling code replaces its local
+  //     history/state with `loadedHistory` — see the accompanying
+  //     frontend (pc_suite_v20.html, footing_pro_v20_merged.html) and VBA
+  //     (modChatAPI.bas, frmCESChat.frm) patches for that client-side half.
+  const rawMessageForLoadTrigger = typeof body.message === 'string' ? body.message.trim() : '';
+  const loadNameMatch = isDeveloperMode
+    ? rawMessageForLoadTrigger.match(/^(?:استرجع\s+السيشن\s+باسم|load\s+session\s+with\s+name)\s+(.+)$/i)
+    : null;
+  if (loadNameMatch) {
+    const loadName = loadNameMatch[1].trim();
+    if (!loadName) {
+      return json({ reply: 'Please provide a name after the load-session command, Engineer.', devMode: true }, 200, undefined, request);
+    }
+    if (!env.CES_SESSIONS) {
+      console.error('[chat.js] CES_SESSIONS KV binding missing — cannot process load-session trigger.');
+      return json({ reply: 'Session storage is not configured on the server yet, Engineer.', devMode: true }, 200, undefined, request);
+    }
+    const loadResult = await loadConversation(env.CES_SESSIONS, loadName);
+    if (!loadResult.ok) {
+      const friendlyLoadMsg = loadResult.code === 'SESSION_NOT_FOUND'
+        ? `No saved session found under the name "${loadName}", Engineer.`
+        : `Couldn't load the session, Engineer: ${loadResult.error}`;
+      return json({ reply: friendlyLoadMsg, devMode: true }, 200, undefined, request);
+    }
+    console.info('[chat.js] Session loaded via natural-language trigger:', loadName, '-', loadResult.messageCount, 'turns, for', clientIp);
+    return json(
+      {
+        reply: `Done, Engineer, session "${loadName}" restored (${loadResult.messageCount} turns).`,
+        devMode: true,
+        loadedHistory: loadResult.history,
+        loadedTitle: loadResult.title,
+      },
+      200,
+      undefined,
+      request,
+    );
   }
 
   // 3c. userMessage extraction + validation. [v20: unchanged logic, now runs
