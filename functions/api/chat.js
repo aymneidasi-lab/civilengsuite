@@ -61,11 +61,11 @@
  *   sessionKey pair. This is why no HTML/frontend file needed touching for
  *   this specific path, unlike v20's slash-commands.
  *
- * CHANGE 2 (currentSessionId / env.ces-chat-kv — NOT USED, DIDN'T EXIST):
- *   the original ask specified reading `env.ces-chat-kv` (lowercase) and
+ * CHANGE 2 (currentSessionId / env.ces_chat_kv — NOT USED, DIDN'T EXIST):
+ *   the original ask specified reading `env.ces_chat_kv` (lowercase) and
  *   keying on a `currentSessionId`. Neither exists anywhere in chat.js or
  *   pc_suite_v20.html (verified by full-text search before writing this) —
- *   the real, already-deployed binding is env.ces-chat-kv (capitalized,
+ *   the real, already-deployed binding is env.CES_CHAT_KV (capitalized,
  *   holds ONLY rate-limit counters — see checkRateLimit()), and no session-
  *   ID concept is generated or sent by either client today. Using either
  *   literally would either crash (undefined binding) or silently collide
@@ -124,16 +124,16 @@
  *   Worker isolate recycling) loses the full transcript. There was no way
  *   for the developer to persist a conversation and resume it later.
  *
- * CHANGE 1 (NEW KV BINDING — env.CES_SESSIONS, NOT env.ces-chat-kv):
+ * CHANGE 1 (NEW KV BINDING — env.CES_SESSIONS, NOT env.CES_CHAT_KV):
  *   A second, DEDICATED KV namespace is used for this feature, separate
- *   from env.ces-chat-kv (which already holds short-lived, TTL'd rate-limit
+ *   from env.CES_CHAT_KV (which already holds short-lived, TTL'd rate-limit
  *   counters — see checkRateLimit() above). Session data is meant to live
  *   indefinitely (no expirationTtl is set on these writes); mixing
  *   long-lived session blobs into the same namespace as 60s-window rate
  *   counters is avoidable risk for zero benefit. Binding required:
  *   Cloudflare Pages → civilengsuite → Settings → Functions → KV namespace
  *   bindings → Variable name `CES_SESSIONS` → KV namespace `CES_SESSIONS`.
- *   Dashboard-only, no wrangler config needed (same as ces-chat-kv).
+ *   Dashboard-only, no wrangler config needed (same as CES_CHAT_KV).
  *
  * CHANGE 2 (COMMAND PARSER — BODY FIELDS, NOT HEADERS): the client sends
  *   `devCommand: "save"|"load"` and `sessionKey: "<string>"` as JSON BODY
@@ -299,7 +299,7 @@
  *   every provider in well under a minute, zeroing out quota for every real
  *   visitor — and that risk scales with traffic. FIX: checkRateLimit() uses
  *   Cloudflare's native Rate Limiting binding (env.RATE_LIMITER) if present,
- *   falling back to a KV fixed-window counter (env.ces-chat-kv) if not, and
+ *   falling back to a KV fixed-window counter (env.CES_CHAT_KV) if not, and
  *   failing OPEN (no throttling) if neither is bound — logged at WARN so the
  *   gap is visible rather than silent. See the comment block above
  *   checkRateLimit() for the honest caveat on KV's Free-plan write quota.
@@ -3317,7 +3317,7 @@ function buildFriendlyError(geminiResult, workersAttempted, userMessage) {
 // configurable from the Pages dashboard alone.
 //
 // Fallback mechanism: if env.RATE_LIMITER is absent but a KV namespace is
-// bound as env.ces-chat-kv (dashboard-addable, no wrangler config needed,
+// bound as env.CES_CHAT_KV (dashboard-addable, no wrangler config needed,
 // works on the Free plan), a coarse fixed-window counter is used instead.
 // HONEST CAVEAT, left in the code on purpose: Workers KV's Free plan caps
 // writes at 1,000/day. A 60s window with one write per request hits that
@@ -3343,21 +3343,21 @@ async function checkRateLimit(env, key) {
     }
   }
 
-  if (env.ces-chat-kv) {
+  if (env.CES_CHAT_KV) {
     try {
       const WINDOW_SECONDS = 60;
       const MAX_PER_WINDOW = 8; // ~1 message every 7.5s sustained, generous for one real user
       const bucket = Math.floor(Date.now() / 1000 / WINDOW_SECONDS);
       const kvKey  = `rl:${key}:${bucket}`;
-      const current = parseInt((await env.ces-chat-kv.get(kvKey)) || '0', 10);
+      const current = parseInt((await env.CES_CHAT_KV.get(kvKey)) || '0', 10);
       if (current >= MAX_PER_WINDOW) {
         return { limited: true, mechanism: 'kv' };
       }
       // expirationTtl auto-cleans old buckets — no manual deletion needed.
-      await env.ces-chat-kv.put(kvKey, String(current + 1), { expirationTtl: WINDOW_SECONDS * 2 });
+      await env.CES_CHAT_KV.put(kvKey, String(current + 1), { expirationTtl: WINDOW_SECONDS * 2 });
       return { limited: false, mechanism: 'kv' };
     } catch (err) {
-      console.error('[chat.js] ces-chat-kv error (failing open):', err.message);
+      console.error('[chat.js] CES_CHAT_KV error (failing open):', err.message);
       return { limited: false, mechanism: 'kv-error' };
     }
   }
@@ -3368,7 +3368,7 @@ async function checkRateLimit(env, key) {
   // drowning out everything else during real traffic.
   if (!checkRateLimit._warned) {
     checkRateLimit._warned = true;
-    console.warn('[chat.js] No rate limiter bound (RATE_LIMITER or ces-chat-kv) — /api/chat is unthrottled.');
+    console.warn('[chat.js] No rate limiter bound (RATE_LIMITER or CES_CHAT_KV) — /api/chat is unthrottled.');
   }
   return { limited: false, mechanism: 'none' };
 }
