@@ -809,6 +809,20 @@
  */
 
 import { KB_CHUNKS } from './kb-data.js';
+// v_vision: extracted to functions/_lib/rotation.mjs so chat.js and
+// vision.js share one implementation instead of two hand-copies. Logic is
+// byte-identical to what was here before — see rotation.mjs for full
+// comments/rationale on each helper.
+import {
+  rotateStart,
+  withJitter,
+  makeFetchBudget,
+  SUBREQUEST_BUDGET_FREE_PLAN,
+  fetchWithTimeout,
+  checkRateLimit,
+  buildGeminiKeyPool,
+  keyTagFor,
+} from '../_lib/rotation.mjs';
 
 // ── Knowledge-base retrieval (Footing Pro + PC Suite, v16) ────────────────
 // Stopwords kept short and cheap on purpose — this runs on every request.
@@ -972,74 +986,15 @@ const OPENROUTER_MODEL   = 'meta-llama/llama-3.3-70b-instruct:free';
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
 // ── v13 CONCURRENCY HELPERS ────────────────────────────────────────────────
-// Added to address documented failure modes under simultaneous multi-user
-// load (see CHANGELOG v13 below). Three problems, three helpers:
-//
-// 1. SUBREQUEST_BUDGET — Cloudflare Workers Free plan caps a single
-//    invocation at 50 fetch() subrequests (Paid: 10,000). Worst case, this
-//    file's full Gemini→Workers AI→Groq→OpenRouter chain can issue well
-//    over 100 fetches if every key returns a retryable status. The provider
-//    try/catch already prevents that from crashing the isolate (fetch()
-//    rejects with a catchable error past the cap), but it still wastes the
-//    *first* ~50 attempts churning before degrading to a generic error.
-//    fetchBudget() is a simple mutable counter threaded through
-//    onRequestPost; every helper that issues a fetch() decrements it first
-//    and refuses to call out once it hits zero, so we fail over to the
-//    friendly-error response deterministically instead of relying on the
-//    platform to reject the 51st call.
-function makeFetchBudget(max) {
-  let remaining = max;
-  return {
-    take() { if (remaining <= 0) return false; remaining--; return true; },
-    remaining() { return remaining; },
-  };
-}
-// Free-plan ceiling is 50; stop two attempts short so the final friendly-
-// error response itself is never the thing that trips the platform limit.
-const SUBREQUEST_BUDGET_FREE_PLAN = 48;
-
-// 2. fetchWithTimeout — every provider call below previously had no upper
-//    bound on wall time. A stalled upstream connection held the invocation
-//    open indefinitely (no CPU billed, but the user-visible chat widget
-//    just hangs with no error — worse than a fast failure). 8s is generous
-//    for a sub-second-to-few-second LLM completion call and still leaves
-//    room for the per-layer retry/backoff budget below.
+// rotateStart, withJitter, makeFetchBudget, fetchWithTimeout, and
+// checkRateLimit (further below) now live in functions/_lib/rotation.mjs,
+// shared with vision.js — see that file for the full rationale that used
+// to live in this comment block. PROVIDER_TIMEOUT_MS stays here: it's
+// chat-specific (short, text-completion-shaped — vision.js reasons to a
+// different number for its own upload-shaped calls) and is now passed
+// explicitly at each fetchWithTimeout call site below, since the shared
+// helper no longer carries a text-shaped default.
 const PROVIDER_TIMEOUT_MS = 8000;
-async function fetchWithTimeout(url, init, timeoutMs = PROVIDER_TIMEOUT_MS) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...init, signal: controller.signal });
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-// 3. rotateStart — the Gemini/Groq/OpenRouter key pools are iterated as an
-//    ORDERED FAILOVER LIST: every request, from every concurrent user,
-//    starts at keys[0]. That is correct for surviving one key's daily quota
-//    exhaustion, but it means concurrent traffic never spreads across the
-//    other 12 keys until key 0 is already failing — effective concurrent
-//    throughput is bounded by ONE upstream account's per-minute limit, not
-//    by the pool. rotateStart() picks a random starting offset per request
-//    so simultaneous requests fan out across the whole pool from the first
-//    attempt. Order within the rotation is preserved (still tries every key
-//    exactly once), so daily-quota failover behaviour is unchanged — this
-//    only changes which key is tried *first* on any given request.
-function rotateStart(arr) {
-  if (arr.length <= 1) return arr.slice();
-  const offset = Math.floor(Math.random() * arr.length);
-  return arr.slice(offset).concat(arr.slice(0, offset));
-}
-
-// Adds ±20% jitter to a backoff delay so concurrent requests retrying the
-// same saturated key do not all wake up and retry in lockstep (thundering
-// herd). Applied to the one remaining retry case (500/503) — see v13
-// changelog for why 429 no longer retries with backoff at all.
-function withJitter(ms) {
-  const jitter = ms * 0.2 * (Math.random() * 2 - 1);
-  return Math.max(0, Math.round(ms + jitter));
-}
 
 // ── CORS — origin-restricted to the production domain and local dev ───────────
 const ALLOWED_ORIGINS = new Set(['https://civilengsuite.pages.dev']);
@@ -2936,7 +2891,7 @@ async function callGeminiWithRetry(apiKey, model, contents, systemPrompt, budget
       method : 'POST',
       headers: { 'Content-Type': 'application/json' },
       body   : payload,
-    });
+    }, PROVIDER_TIMEOUT_MS);
   }
 
   // v13: 2 retries (was 3), backoff with jitter, 500/503 only.
@@ -3107,7 +3062,7 @@ async function callGroqWithRetry(apiKey, messages, budget) {
         'Authorization': `Bearer ${apiKey}`,
       },
       body: payload,
-    });
+    }, PROVIDER_TIMEOUT_MS);
   }
 
   // v12 QUOTA FIX: do NOT retry on 429. Groq's free tier (verified June 2026,
@@ -3190,7 +3145,7 @@ async function callOpenRouterWithRetry(apiKey, messages, budget) {
         'X-Title'      : 'Civil Engineering Suite',
       },
       body: payload,
-    });
+    }, PROVIDER_TIMEOUT_MS);
   }
 
   // v12 QUOTA FIX: do NOT retry on 429. OpenRouter's free tier is 50 req/day,
@@ -3330,79 +3285,11 @@ function buildFriendlyError(geminiResult, workersAttempted, userMessage) {
 }
 
 // ── v13 RATE LIMITER — abuse / overload protection ─────────────────────────
-// This endpoint previously had NO request-level throttling at all. CORS
-// (getCorsHeaders) is a browser-enforced policy, not a server-side control —
-// any script can POST directly to /api/chat from outside a browser entirely,
-// bypassing it. Combined with the 13-key fallback pool, an unthrottled
-// client (bot, scraper, or just a buggy retry loop in someone's browser tab)
-// can burn through the ENTIRE shared free-tier quota pool — every account,
-// every provider — in well under a minute, leaving nothing for real users.
-// That risk scales with traffic: more visitors means more chances one of
-// them is abusive, and more legitimate concurrent load to compete with.
-//
-// Preferred mechanism: Cloudflare's native Workers Rate Limiting binding
-// (env.RATE_LIMITER) — in-isolate counters, no added latency, no extra
-// fetch/subrequest cost. It requires Workers PAID plan and a `ratelimits`
-// block in a wrangler.jsonc/toml deployed alongside this Pages project (see
-// the wrangler.jsonc snippet shipped alongside this file). It is NOT
-// configurable from the Pages dashboard alone.
-//
-// Fallback mechanism: if env.RATE_LIMITER is absent but a KV namespace is
-// bound as env.CES_CHAT_KV (dashboard-addable, no wrangler config needed,
-// works on the Free plan), a coarse fixed-window counter is used instead.
-// HONEST CAVEAT, left in the code on purpose: Workers KV's Free plan caps
-// writes at 1,000/day. A 60s window with one write per request hits that
-// ceiling at roughly 42 messages/HOUR sustained — i.e. a KV-only limiter can
-// itself start failing during the exact heavy-traffic conditions it exists
-// to guard against. checkRateLimit() fails OPEN (treats a KV error as "not
-// rate limited") specifically so a quota-exhausted limiter degrades to "no
-// protection" rather than "blocks everyone" — availability for real users
-// takes priority over strict enforcement for a sales chatbot. Track real
-// volume and move to the RATE_LIMITER binding (Workers Paid, $5/mo) once
-// traffic regularly approaches that ceiling.
-//
-// `key` is the caller-supplied identifier (IP via CF-Connecting-IP) — see
-// inline note in onRequestPost about IP-based keys vs NAT/shared-IP limits.
-async function checkRateLimit(env, key) {
-  if (env.RATE_LIMITER) {
-    try {
-      const { success } = await env.RATE_LIMITER.limit({ key });
-      return { limited: !success, mechanism: 'binding' };
-    } catch (err) {
-      console.error('[chat.js] RATE_LIMITER binding error (failing open):', err.message);
-      return { limited: false, mechanism: 'binding-error' };
-    }
-  }
-
-  if (env.CES_CHAT_KV) {
-    try {
-      const WINDOW_SECONDS = 60;
-      const MAX_PER_WINDOW = 8; // ~1 message every 7.5s sustained, generous for one real user
-      const bucket = Math.floor(Date.now() / 1000 / WINDOW_SECONDS);
-      const kvKey  = `rl:${key}:${bucket}`;
-      const current = parseInt((await env.CES_CHAT_KV.get(kvKey)) || '0', 10);
-      if (current >= MAX_PER_WINDOW) {
-        return { limited: true, mechanism: 'kv' };
-      }
-      // expirationTtl auto-cleans old buckets — no manual deletion needed.
-      await env.CES_CHAT_KV.put(kvKey, String(current + 1), { expirationTtl: WINDOW_SECONDS * 2 });
-      return { limited: false, mechanism: 'kv' };
-    } catch (err) {
-      console.error('[chat.js] CES_CHAT_KV error (failing open):', err.message);
-      return { limited: false, mechanism: 'kv-error' };
-    }
-  }
-
-  // Neither binding configured — no-op. Logged once per ISOLATE (not per
-  // request — a busy isolate could otherwise emit this on every single chat
-  // message) at WARN so the gap is visible in Cloudflare Logs without
-  // drowning out everything else during real traffic.
-  if (!checkRateLimit._warned) {
-    checkRateLimit._warned = true;
-    console.warn('[chat.js] No rate limiter bound (RATE_LIMITER or CES_CHAT_KV) — /api/chat is unthrottled.');
-  }
-  return { limited: false, mechanism: 'none' };
-}
+// checkRateLimit now lives in functions/_lib/rotation.mjs, shared with
+// vision.js — both endpoints draw from ONE combined per-visitor budget
+// (same CF-Connecting-IP key) instead of vision.js getting its own,
+// separate allowance. See rotation.mjs for the full rationale that used to
+// live in this comment block.
 
 // ── Persistent Developer Sessions (v20) — save/load via KV ─────────────────
 // See CHANGELOG v20 at the top of this file for the full design rationale
@@ -3947,31 +3834,20 @@ export async function onRequestPost(context) {
 
   // 5. Build Gemini key pool — all 13 keys across 13 Google accounts.
   //    GEMINI_API_KEY is required (guarded above). Keys 2–13 are optional.
-  //    Blank / absent keys are excluded by the .filter() and silently skipped.
+  //    Blank / absent keys are excluded and silently skipped.
   //    v13: each entry keeps its ORIGINAL pool index (for the X-CES-AI-Source
   //    header / log tag) separately from iteration order, because rotation
   //    (below) changes which key is tried first without changing its identity.
-  const geminiKeysIndexed = [
-    env.GEMINI_API_KEY    || '',
-    env.GEMINI_API_KEY_2  || '',
-    env.GEMINI_API_KEY_3  || '',
-    env.GEMINI_API_KEY_4  || '',
-    env.GEMINI_API_KEY_5  || '',
-    env.GEMINI_API_KEY_6  || '',
-    env.GEMINI_API_KEY_7  || '',
-    env.GEMINI_API_KEY_8  || '',
-    env.GEMINI_API_KEY_9  || '',
-    env.GEMINI_API_KEY_10 || '',
-    env.GEMINI_API_KEY_11 || '',
-    env.GEMINI_API_KEY_12 || '',
-    env.GEMINI_API_KEY_13 || '',
-  ]
-    .map((key, originalIndex) => ({ key, originalIndex }))
-    .filter(k => k.key);
+  //    v_vision: array literal + filter moved to rotation.mjs's
+  //    buildGeminiKeyPool() — vision.js needs the exact same 13 keys with
+  //    the exact same _1-skip numbering; one canonical copy now instead of
+  //    a second hand-maintained literal that could silently drift from
+  //    this one.
+  const geminiKeysIndexed = buildGeminiKeyPool(env);
 
-  // v13: rotateStart() — see the helper block above OPENROUTER_API_URL for
-  // the full rationale. Every concurrent request gets a different starting
-  // key instead of every request piling onto geminiKeysIndexed[0] first.
+  // v13: rotateStart() — see rotation.mjs for the full rationale. Every
+  // concurrent request gets a different starting key instead of every
+  // request piling onto geminiKeysIndexed[0] first.
   const geminiPool = rotateStart(geminiKeysIndexed);
 
   // 6. GEMINI LAYERS — try each key (in rotated order) with PRIMARY then
@@ -3985,7 +3861,7 @@ export async function onRequestPost(context) {
       lastGeminiResult = { ok: false, httpStatus: 0, errStatus: 'SUBREQUEST_BUDGET_EXHAUSTED', errBody: '' };
       break;
     }
-    const keyTag = originalIndex === 0 ? '' : `key${originalIndex + 1}-`;
+    const keyTag = keyTagFor(originalIndex);
 
     const resA = await callGeminiWithRetry(gKey, GEMINI_MODEL_PRIMARY, geminiContents, geminiSystemPrompt, budget);
     if (resA.ok) {
