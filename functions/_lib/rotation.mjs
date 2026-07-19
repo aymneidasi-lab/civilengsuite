@@ -3,8 +3,9 @@
 // Shared concurrency / traffic-safety helpers — extracted from chat.js's own
 // "v13 CONCURRENCY HELPERS" (rotateStart, makeFetchBudget, fetchWithTimeout)
 // and "v13 RATE LIMITER" (checkRateLimit) sections, byte-identical logic.
-// Imported by chat.js and functions/api/vision.js. Do not re-implement any
-// of this in a calling file — import from here.
+// Imported by chat.js, functions/api/vision.js, and (as of tts.js v6)
+// functions/api/tts.js. Do not re-implement any of this in a calling file —
+// import from here.
 //
 // File name stays "rotation.mjs" (matching the original deliverable name),
 // even though it now covers the whole v13 concurrency/rate-limit group, not
