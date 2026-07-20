@@ -1,6 +1,61 @@
 /**
- * functions/api/chat.js  —  v23  (2026-07-13)
+ * functions/api/chat.js  —  v24  (2026-07-20)
  * ──────────────────────────────────────────────────────────────────────────
+ * ════════════════════════════════════════
+ * CHANGELOG v24 — TEXT FILE ATTACHMENTS SILENTLY DROPPED (Insert Text File)
+ * ════════════════════════════════════════
+ *
+ * BUG: pc_suite_v33.html's "Insert Text File" feature (pendingTextFiles,
+ *   MAX_PENDING_TEXT_FILES=3) reads the attached file(s) client-side via
+ *   FileReader.readAsText() and sends them correctly as
+ *   body.files: [{name, content}, ...] to this endpoint — confirmed by
+ *   reading the actual re-uploaded pc_suite_v33.html, not assumed. This
+ *   file never read body.files anywhere: the 3c userMessage-extraction
+ *   block destructured only message/history/devPassword/devCommand/
+ *   sessionKey. Attached text content reached the server and was then
+ *   discarded before the model ever saw it — the model had no idea a file
+ *   existed, which is why it told the user (correctly detecting Arabic,
+ *   just with nothing to answer from) that it couldn't read the attachment
+ *   and asked them to paste the content directly instead. The client's own
+ *   comment at the reqBody.files assignment already named the expected
+ *   fix — "server-side counterpart is chat.js's extractTextFiles()/
+ *   buildTextFilesBlock() (v24)" — neither function existed anywhere in
+ *   this file before this version.
+ *
+ * FIX: new step 3d, after the userMessage length/content checks (those
+ *   validate ONLY what the person typed) and before turns/geminiContents
+ *   are built. extractTextFiles(body, isArabicText(userMessage)) validates
+ *   body.files server-side (MAX_TEXT_FILES=3, MAX_CHARS_PER_TEXT_FILE=6000,
+ *   MAX_TOTAL_TEXT_FILE_CHARS=12000 — mirrors pc_suite_v33.html's
+ *   MAX_PENDING_TEXT_FILES/MAX_TEXT_FILE_CHARS_PER_FILE/
+ *   MAX_TOTAL_TEXT_FILE_CHARS; client caps are UX only, a direct POST
+ *   bypasses them entirely, same threat model as vision.js's
+ *   MAX_IMAGES_PER_REQUEST re-validation) and rejects binary-looking
+ *   content (looksLikeBinaryContent() — a renamed .docx/.pdf/.exe read via
+ *   readAsText() decodes as mojibake). buildTextFilesBlock() formats the
+ *   validated files into a block appended ONLY at the turns.push() call
+ *   below (turns.push({ role: 'user', text: userMessage + textFilesBlock
+ *   })) — userMessage itself is left untouched, so kbQueryGemini (v16,
+ *   ~line 3816) still scores KB relevance against the person's own typed
+ *   question, not a file dump, and the 2,000-char cap above still applies
+ *   only to what they typed. A single injection point is sufficient: both
+ *   geminiContents (step 4, turns.map()) and workersMsgs (step 7, shared
+ *   by the Workers AI/Groq/OpenRouter layers) are derived FROM `turns` —
+ *   confirmed by reading both construction sites directly, not assumed —
+ *   so every provider layer sees the attached file content identically,
+ *   with no second place that reconstructs a message from userMessage
+ *   independently.
+ *
+ * NOT FIXED HERE: body.history only ever carries buildFileShareLabel()'s
+ *   label text for a past turn's attachment (pc_suite_v33.html, confirmed),
+ *   never the file content itself — a follow-up question in a later turn
+ *   can't have the model re-read a file attached earlier. This matches the
+ *   existing 2,000-char-per-history-turn cap (step 4 below) and reads as
+ *   deliberate (files are a per-turn attachment, not part of the running
+ *   context) rather than a second instance of this bug — flagged for
+ *   confirmation rather than silently changed, since widening it would mean
+ *   re-sending file content on every subsequent turn against that same
+ *   per-turn cap.
  * ════════════════════════════════════════
  * CHANGELOG v23 — TRIGGER REGEX WAS TOO RIGID, SILENTLY FELL THROUGH TO LLM
  * ════════════════════════════════════════
@@ -995,6 +1050,123 @@ const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 // explicitly at each fetchWithTimeout call site below, since the shared
 // helper no longer carries a text-shaped default.
 const PROVIDER_TIMEOUT_MS = 8000;
+
+// ── Text file attachments ("Insert Text File") — NEW v24 ───────────────────
+// Server-side counterpart to pc_suite_v33.html's pendingTextFiles feature.
+// Keep MAX_TEXT_FILES / MAX_CHARS_PER_TEXT_FILE / MAX_TOTAL_TEXT_FILE_CHARS
+// in sync with pc_suite_v33.html's MAX_PENDING_TEXT_FILES /
+// MAX_TEXT_FILE_CHARS_PER_FILE / MAX_TOTAL_TEXT_FILE_CHARS and with
+// vision.js's identical copy of these same three constants — same
+// no-shared-constant caveat as every other hand-copied literal in this repo
+// (PROVIDER_TIMEOUT_MS above, MAX_IMAGES_PER_REQUEST in vision.js). These
+// are the server-side AUTHORITY: client caps are UX only, a direct POST to
+// this endpoint bypasses them entirely — same threat model vision.js
+// documents for MAX_IMAGES_PER_REQUEST.
+const MAX_TEXT_FILES            = 3;
+const MAX_CHARS_PER_TEXT_FILE   = 6000;
+const MAX_TOTAL_TEXT_FILE_CHARS = 12000;
+
+// Cheap heuristic, not a MIME sniff — body.files[].content always arrives as
+// an already-decoded JS string (JSON.parse output), never raw bytes, so
+// there is no header/magic-number to check here. A renamed .docx/.pdf/.exe
+// read client-side via FileReader.readAsText() decodes as mojibake: a high
+// density of U+FFFD replacement characters and C0 control codes outside
+// whitespace. Threshold kept loose (15%) to avoid false positives on
+// legitimate content with heavy non-ASCII (Arabic diacritics, math symbols,
+// box-drawing characters in a pasted table).
+function looksLikeBinaryContent(str) {
+  if (!str) return false;
+  const len = str.length;
+  let suspicious = 0;
+  for (let i = 0; i < len; i++) {
+    const code = str.charCodeAt(i);
+    if (code === 0xFFFD || (code < 32 && code !== 9 && code !== 10 && code !== 13)) {
+      suspicious++;
+    }
+  }
+  return len > 0 && (suspicious / len) > 0.15;
+}
+
+// Validates + normalizes body.files into a clean {name, content, truncated}[]
+// array, enforcing the three caps above server-side. Returns
+// { ok:true, files } or { ok:false, error } — error is the bilingual string
+// ready to drop straight into a 400 json({error}) response, matching this
+// file's existing validation-error style (see the 2,000-char check above
+// onRequestPost). Count violations reject outright (mirrors vision.js's
+// MAX_IMAGES_PER_REQUEST handling — a caller sending more than the UI
+// allows is a caller bypassing the UI, worth a loud error); per-file/total
+// character overflows truncate instead of rejecting (mirrors vision.js's
+// own MESSAGE_MAX_LEN silent-truncate default, not this file's own
+// userMessage-length hard-reject) and are flagged inline by
+// buildTextFilesBlock() below so the model never treats truncated content
+// as complete.
+function extractTextFiles(body, likelyArabicMsg) {
+  if (!Array.isArray(body?.files) || body.files.length === 0) {
+    return { ok: true, files: [] };
+  }
+  if (body.files.length > MAX_TEXT_FILES) {
+    return {
+      ok: false,
+      error: likelyArabicMsg
+        ? `الحد الأقصى ${MAX_TEXT_FILES} ملفات في الرسالة الواحدة.`
+        : `Maximum ${MAX_TEXT_FILES} files per message.`,
+    };
+  }
+  const files = [];
+  let totalChars = 0;
+  for (const raw of body.files) {
+    const name = typeof raw?.name === 'string' && raw.name.trim()
+      ? raw.name.trim().slice(0, 200)
+      : 'attachment.txt';
+    let content = typeof raw?.content === 'string' ? raw.content : '';
+    if (!content.trim()) continue; // empty file — skip, not a rejection reason
+    let truncated = false;
+    if (content.length > MAX_CHARS_PER_TEXT_FILE) {
+      content = content.slice(0, MAX_CHARS_PER_TEXT_FILE);
+      truncated = true;
+    }
+    const roomLeft = MAX_TOTAL_TEXT_FILE_CHARS - totalChars;
+    if (roomLeft <= 0) break; // combined cap already reached — drop remaining files silently
+    if (content.length > roomLeft) {
+      content = content.slice(0, roomLeft);
+      truncated = true;
+    }
+    if (!content) continue;
+    // Binary-check runs AFTER both truncation steps, never on raw
+    // pre-truncation content — bounds the scan to at most
+    // MAX_CHARS_PER_TEXT_FILE chars regardless of how large the caller's
+    // raw content string is. Matters more here than it would elsewhere:
+    // this file has no MAX_BODY_BYTES-style overall request-size cap
+    // (confirmed absent — grep for MAX_BODY_BYTES/readBodyWithCap/
+    // Content-Length returns nothing in this file), so this ordering is
+    // the only bound on this loop's CPU work per file.
+    if (looksLikeBinaryContent(content)) {
+      return {
+        ok: false,
+        error: likelyArabicMsg
+          ? `الملف "${name}" لا يبدو ملف نصي صالح.`
+          : `"${name}" doesn't look like a valid text file.`,
+      };
+    }
+    totalChars += content.length;
+    files.push({ name, content, truncated });
+  }
+  return { ok: true, files };
+}
+
+// Formats validated files into the block appended ONLY to the model-bound
+// copy of the message — never to userMessage itself. userMessage stays the
+// bare typed caption everywhere else it's used (kbQueryGemini's KB
+// relevance scoring, the 2,000-char cap, save/load trigger matching) so
+// none of that logic sees file content it was never designed to handle.
+function buildTextFilesBlock(files) {
+  if (!files || files.length === 0) return '';
+  return files.map(f =>
+    `\n\n--- Attached file: ${f.name}${f.truncated ? ' (truncated)' : ''} ---\n${f.content}` +
+    (f.truncated ? '\n[... file truncated at the server-side size limit ...]' : '') +
+    `\n--- End of ${f.name} ---`
+  ).join('');
+}
 
 // ── CORS — origin-restricted to the production domain and local dev ───────────
 const ALLOWED_ORIGINS = new Set(['https://civilengsuite.pages.dev']);
@@ -3782,6 +3954,20 @@ export async function onRequestPost(context) {
     );
   }
 
+  // 3d. Text file attachments ("Insert Text File") — NEW v24. Runs after the
+  //     userMessage checks above (those validate ONLY what the person
+  //     typed) and before turns/geminiContents/workersMsgs are built below.
+  //     geminiContents (step 4) and workersMsgs (step 7, shared by Workers
+  //     AI/Groq/OpenRouter) are both derived FROM `turns` — a single
+  //     injection into the turns.push() call below is sufficient; there is
+  //     no second place downstream that reconstructs a message from
+  //     userMessage independently.
+  const textFilesResult = extractTextFiles(body, isArabicText(userMessage));
+  if (!textFilesResult.ok) {
+    return json({ error: textFilesResult.error }, 400, undefined, request);
+  }
+  const textFilesBlock = buildTextFilesBlock(textFilesResult.files);
+
   // 4. Normalize history — keep last 10 turns (5 exchanges) for token budget.
   //    Single normalisation pass; geminiContents is the only payload built here.
   //    (openaiMessages was dead code in v7 — it only existed for the now-removed
@@ -3793,7 +3979,7 @@ export async function onRequestPost(context) {
     const text = typeof turn.text === 'string' ? turn.text.trim().slice(0, 2000) : '';
     if (text) turns.push({ role, text });
   }
-  turns.push({ role: 'user', text: userMessage });
+  turns.push({ role: 'user', text: userMessage + textFilesBlock });
 
   const geminiContents = turns.map(t => ({ role: t.role, parts: [{ text: t.text }] }));
 

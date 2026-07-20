@@ -1,5 +1,5 @@
 /**
- * functions/api/vision.js — v2.3 (advisor-reviewed & corrected, 2026-07-16)
+ * functions/api/vision.js — v3.0 (text file attachments, 2026-07-20)
  * ─────────────────────────────────────────────────────────────────────────
  * Cloudflare Pages Function — "Insert Image" backend for Civil Engineering
  * Suite chat (web + VBA desktop). Route: POST /api/vision.
@@ -303,6 +303,37 @@
  *      the implementation quality of the truncation UX is sound either
  *      way if the bulk picker is in fact wanted now.
  * ─────────────────────────────────────────────────────────────────────────
+ *
+ * ── v3.0 (text file attachments, 2026-07-20): banner corrected from v2.3 to
+ *    v3.0 as part of this change — the header above already documented
+ *    v2.4/v2.5/v2.6 reconciliation passes (mediaResolution table fix,
+ *    wantsHighDetail() risk-direction and regex fixes, multi-image
+ *    confirmation) that the top-of-file version line was never bumped to
+ *    reflect; confirmed by reading this file directly rather than trusting
+ *    line 2. This version's actual change:
+ *
+ *    BUG: pc_suite_v33.html sends body.files: [{name, content}, ...]
+ *    alongside images whenever text files are attached to the same send
+ *    (its own comment names this file's expected counterpart directly:
+ *    "vision.js v3.0's extractTextFiles()/buildTextFilesBlock()"). This
+ *    file never read body.files — confirmed against the real field-
+ *    extraction block (step 5/5b), which only ever read message/prompt/
+ *    lang/images/image/mimeType/mime/detail. Attached text content was
+ *    silently dropped on any combined image+file send.
+ *
+ *    FIX: same MAX_TEXT_FILES/MAX_CHARS_PER_TEXT_FILE/
+ *    MAX_TOTAL_TEXT_FILE_CHARS caps, looksLikeBinaryContent(),
+ *    extractTextFiles(), and buildTextFilesBlock() as chat.js v24 —
+ *    duplicated locally rather than added to rotation.mjs (that file isn't
+ *    visible from here; this follows the same
+ *    copied-locally-rather-than-assumed-shared convention already used for
+ *    getCorsHeaders() above). New step 5d runs AFTER detailReq (5c) is
+ *    computed — wantsHighDetail() must see only the person's own words,
+ *    never file content that could accidentally contain a matching
+ *    keyword — and merges into a new modelMessageText variable used only
+ *    at the parts-array construction below; userMessage itself is
+ *    unchanged (its last real read is wantsHighDetail() above this point).
+ * ─────────────────────────────────────────────────────────────────────────
  */
 
 import {
@@ -375,6 +406,122 @@ const OVERALL_DEADLINE_MS    = 40_000;
 // Worst case: 13 keys x 2 models = 26 — comfortably under the Free plan's
 // 50-external-subrequest ceiling (verified 2026-07) with no shaving needed.
 const SUBREQUEST_BUDGET_VISION = 26;
+
+// ── Text file attachments ("Insert Text File") — NEW v3.0 ──────────────────
+// Same three caps, same two helpers, as chat.js v24's identical block —
+// duplicated locally rather than added to functions/_lib/rotation.mjs
+// (not visible from this file; follows the same copied-locally-rather-
+// than-assumed-shared convention already used for getCorsHeaders() below,
+// and for buildGeminiKeyPool()/keyTagFor() before those were confirmed
+// real exports and actually imported — see v2.3 above). Keep these three
+// values in sync with pc_suite_v33.html's MAX_PENDING_TEXT_FILES /
+// MAX_TEXT_FILE_CHARS_PER_FILE / MAX_TOTAL_TEXT_FILE_CHARS and with
+// chat.js's identical copy — client caps are UX only, a direct POST to
+// this endpoint bypasses them entirely, same threat model as
+// MAX_IMAGES_PER_REQUEST above.
+const MAX_TEXT_FILES            = 3;
+const MAX_CHARS_PER_TEXT_FILE   = 6000;
+const MAX_TOTAL_TEXT_FILE_CHARS = 12000;
+
+// Cheap heuristic, not a MIME sniff — body.files[].content always arrives as
+// an already-decoded JS string (JSON.parse output), never raw bytes, so
+// there is no header/magic-number to check here. A renamed .docx/.pdf/.exe
+// read client-side via FileReader.readAsText() decodes as mojibake: a high
+// density of U+FFFD replacement characters and C0 control codes outside
+// whitespace. Threshold kept loose (15%) to avoid false positives on
+// legitimate content with heavy non-ASCII (Arabic diacritics, math symbols,
+// box-drawing characters in a pasted table).
+function looksLikeBinaryContent(str) {
+  if (!str) return false;
+  const len = str.length;
+  let suspicious = 0;
+  for (let i = 0; i < len; i++) {
+    const code = str.charCodeAt(i);
+    if (code === 0xFFFD || (code < 32 && code !== 9 && code !== 10 && code !== 13)) {
+      suspicious++;
+    }
+  }
+  return len > 0 && (suspicious / len) > 0.15;
+}
+
+// Validates + normalizes body.files into a clean {name, content, truncated}[]
+// array, enforcing the three caps above server-side. Returns
+// { ok:true, files } or { ok:false, error } — error is the bilingual string
+// ready to drop straight into a 400 json({error}) response, matching this
+// file's existing validation-error style (see MAX_IMAGES_PER_REQUEST's
+// rejection in onRequestPost). Count violations reject outright (same
+// pattern as MAX_IMAGES_PER_REQUEST — a caller sending more than the UI
+// allows is bypassing the UI, worth a loud error); per-file/total character
+// overflows truncate instead of rejecting (same pattern as this file's own
+// MESSAGE_MAX_LEN silent-truncate) and are flagged inline by
+// buildTextFilesBlock() below so the model never treats truncated content
+// as complete.
+function extractTextFiles(body, likelyArabicMsg) {
+  if (!Array.isArray(body?.files) || body.files.length === 0) {
+    return { ok: true, files: [] };
+  }
+  if (body.files.length > MAX_TEXT_FILES) {
+    return {
+      ok: false,
+      error: likelyArabicMsg
+        ? `الحد الأقصى ${MAX_TEXT_FILES} ملفات في الرسالة الواحدة.`
+        : `Maximum ${MAX_TEXT_FILES} files per message.`,
+    };
+  }
+  const files = [];
+  let totalChars = 0;
+  for (const raw of body.files) {
+    const name = typeof raw?.name === 'string' && raw.name.trim()
+      ? raw.name.trim().slice(0, 200)
+      : 'attachment.txt';
+    let content = typeof raw?.content === 'string' ? raw.content : '';
+    if (!content.trim()) continue; // empty file — skip, not a rejection reason
+    let truncated = false;
+    if (content.length > MAX_CHARS_PER_TEXT_FILE) {
+      content = content.slice(0, MAX_CHARS_PER_TEXT_FILE);
+      truncated = true;
+    }
+    const roomLeft = MAX_TOTAL_TEXT_FILE_CHARS - totalChars;
+    if (roomLeft <= 0) break; // combined cap already reached — drop remaining files silently
+    if (content.length > roomLeft) {
+      content = content.slice(0, roomLeft);
+      truncated = true;
+    }
+    if (!content) continue;
+    // Binary-check runs AFTER both truncation steps, never on raw
+    // pre-truncation content — bounds the scan to at most
+    // MAX_CHARS_PER_TEXT_FILE chars regardless of how large the caller's
+    // raw content string is. MAX_BODY_BYTES already bounds the overall
+    // request here (unlike chat.js, which has no such cap), but this
+    // ordering is still strictly more correct: it checks binary-ness of
+    // exactly what will be sent to the model, not a discarded tail.
+    if (looksLikeBinaryContent(content)) {
+      return {
+        ok: false,
+        error: likelyArabicMsg
+          ? `الملف "${name}" لا يبدو ملف نصي صالح.`
+          : `"${name}" doesn't look like a valid text file.`,
+      };
+    }
+    totalChars += content.length;
+    files.push({ name, content, truncated });
+  }
+  return { ok: true, files };
+}
+
+// Formats validated files into the block appended ONLY to the model-bound
+// copy of the message (modelMessageText below) — never to userMessage
+// itself. userMessage stays the bare resolved caption everywhere else it's
+// used (wantsHighDetail()'s keyword heuristic, the MESSAGE_MAX_LEN cap) so
+// none of that logic sees file content it was never designed to handle.
+function buildTextFilesBlock(files) {
+  if (!files || files.length === 0) return '';
+  return files.map(f =>
+    `\n\n--- Attached file: ${f.name}${f.truncated ? ' (truncated)' : ''} ---\n${f.content}` +
+    (f.truncated ? '\n[... file truncated at the server-side size limit ...]' : '') +
+    `\n--- End of ${f.name} ---`
+  ).join('');
+}
 
 const ASSISTANT_NAME = 'Eng_pro assist';
 const VISION_SYSTEM_PROMPT = `You are ${ASSISTANT_NAME}, the AI assistant for Civil Engineering Suite \
@@ -830,6 +977,20 @@ export async function onRequestPost(context) {
     low: 'MEDIA_RESOLUTION_LOW', medium: 'MEDIA_RESOLUTION_MEDIUM', high: 'MEDIA_RESOLUTION_HIGH',
   }[detailReq];
 
+  // 5d. Text file attachments ("Insert Text File") — NEW v3.0. Extracted
+  //     AFTER detailReq (5c) is computed: wantsHighDetail() must run on the
+  //     person's own words only, never on file content that could
+  //     accidentally contain a matching keyword. Merged into a separate
+  //     modelMessageText variable below, never into userMessage itself —
+  //     userMessage is done being consumed after this point in the
+  //     function (its last read was wantsHighDetail() above).
+  const textFilesResult = extractTextFiles(body, likelyArabic);
+  if (!textFilesResult.ok) {
+    return json({ error: textFilesResult.error }, 400, undefined, request);
+  }
+  const textFilesBlock = buildTextFilesBlock(textFilesResult.files);
+  const modelMessageText = userMessage + textFilesBlock;
+
   // 6. Build the outbound Gemini payload ONCE — identical across every
   //    key/model attempt (only the URL varies), see header note on why
   //    this matters under a 10ms/invocation CPU ceiling. Casing verified
@@ -856,8 +1017,8 @@ export async function onRequestPost(context) {
       ]);
 
   const parts = images.length === 1
-    ? [...imageParts, { text: userMessage }]   // image before text — single-image best practice
-    : [{ text: userMessage }, ...imageParts];  // text before images — multi-image example pattern
+    ? [...imageParts, { text: modelMessageText }]   // image before text — single-image best practice
+    : [{ text: modelMessageText }, ...imageParts];  // text before images — multi-image example pattern
 
   const payloadString = JSON.stringify({
     system_instruction: { parts: [{ text: VISION_SYSTEM_PROMPT }] },
