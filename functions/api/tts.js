@@ -1,5 +1,5 @@
 /**
- * functions/api/tts.js  —  v8  (2026-07-19)
+ * functions/api/tts.js  —  v9  (2026-07-20)
  * ──────────────────────────────────────────────────────────────────────────
  * Cloudflare Pages Function — TTS Proxy
  * Routes: GET  /api/tts?text=...&lang=ar-EG[&voice=female|male][&speed=1.0]
@@ -129,14 +129,77 @@
  *      preference is a smaller surface area to maintain and test, it can be
  *      deleted with no effect on anything that currently calls this file.
  *
+ * ── HOW v9 GOT HERE ──────────────────────────────────────────────────────────
+ * Requested: confirm/enforce "recurring-quota providers rank above one-time-
+ * trial providers" and improve ar-EG pronunciation quality. Per-item:
+ *
+ *   1. [CONFIRMED, not changed] Execution order already satisfies the rule as
+ *      asked: Group 0 (Edge TTS, no quota) -> Tier 1 (ElevenLabs, recurring
+ *      monthly quota) -> Tier 2 (Deepgram, one-time credit, untouched exactly
+ *      as requested) -> opt-in Speechmatics -> Tier 3 (gTTS). Added
+ *      PROVIDER_TIERS as the single source of truth for the diagnostic tier
+ *      label each attempts.push() reports, so this ordering is machine-
+ *      checkable instead of only true by construction.
+ *   2. [FIX] Speechmatics' attempts[].tier literal was '1.5' (implying it
+ *      runs between Tier 1 and Tier 2) but the code has always CALLED it
+ *      after the Deepgram block — i.e. after Tier 2. The execution order
+ *      itself is correct (spend the free one-time Deepgram credit before
+ *      touching a metered provider) — only the label lied about it. Now
+ *      reads '2.5' from PROVIDER_TIERS, matching real call order.
+ *   3. [THE ACTUAL PRONUNCIATION FIX] renderedDialectFor() already documents
+ *      that ElevenLabs renders Arabic as MSA-leaning regardless of the
+ *      requested dialect — it has no ar-EG-specific model. Edge TTS
+ *      (SalmaNeural/ShakirNeural) is the only tier with genuine Egyptian-
+ *      dialect acoustic models, so priority-ordering ElevenLabs has no effect
+ *      on dialect accuracy; only Edge TTS does. Checked buildEdgeSsml's wire
+ *      format against the current reference client implementations
+ *      (msedge-tts/ms-edge-tts): both set the outer <speak xml:lang> to the
+ *      SELECTED VOICE's own locale, never a fixed value. This file hardcoded
+ *      'en-US' on every request regardless of voice — for ar-EG-SalmaNeural
+ *      that's a real mismatch against what genuine Edge traffic sends, and
+ *      Microsoft's service is documented (rany2/edge-tts README, v5.0.0+) to
+ *      reject any SSML shape it would not itself generate. Fixed: xml:lang
+ *      now derives from the resolved voice name via the new edgeVoiceLocale()
+ *      helper, and the missing xmlns:mstts declaration (present on every
+ *      reference client's default template, even when unused) was added.
+ *      Structure is still exactly one <voice>/<prosody> pair — the only
+ *      shape Microsoft's service currently accepts — so this is a stricter
+ *      match to genuine Edge output, not a new capability. Still blocked on
+ *      the same real-network verification as v8 point 1 (this sandbox cannot
+ *      reach speech.platform.bing.com) — confirm in a preview deploy.
+ *   4. [CORRECTION, sourced] Deepgram's own current pricing page
+ *      (deepgram.com/pricing, checked 2026-07-20) states the Pay-As-You-Go
+ *      $200 credit has "No expiration" — contradicting the 1-year-lifetime
+ *      assumption this file has carried since v7/tts-1.js. That 1-year term
+ *      applies to Growth-plan ANNUAL pre-paid credits, not this credit; a
+ *      few third-party sources conflate the two. Left ON by default (isDeep-
+ *      gramExpired's behavior is UNCHANGED unless explicitly opted out) since
+ *      this specific account's history can't be verified from here — added
+ *      DEEPGRAM_CREDIT_EXPIRES=false as an explicit env override for once
+ *      that's confirmed against the account's own dashboard.
+ *   5. [CORRECTION, sourced, NOT wired in — see prose] Speechmatics' own
+ *      pricing page (speechmatics.com/pricing) offers 8hrs/480min FREE per
+ *      month, recurring — i.e. it fits 'recurring-monthly', the same bucket
+ *      as ElevenLabs, not pure "real per-character cost" as previously
+ *      labeled here. Comment corrected. Enablement/ordering deliberately NOT
+ *      changed: Speechmatics auto-converts to billed usage on overage if a
+ *      card is on file (unlike ElevenLabs, which just stops), so flipping
+ *      ENABLE_SPEECHMATICS_TTS or reordering it ahead of Deepgram is a real-
+ *      money decision for a human, not a default this file should silently
+ *      change.
+ *
  * ── SETUP ─────────────────────────────────────────────────────────────────
  *   ELEVEN_API_KEY(_1..12), DEEPGRAM_API_KEY(_1..12) — case-insensitive.
  *   Optional: ELEVEN_VOICE_ID_F / ELEVEN_VOICE_ID_M
- *   Optional, real cost, off by default: ENABLE_SPEECHMATICS_TTS=true
+ *   Optional, free up to 480min/mo then billed, off by default (see v9 point
+ *     5): ENABLE_SPEECHMATICS_TTS=true
  *   Optional, off by default, see point 1: EDGE_TTS_ENABLED=true
  *   Optional, see point 4: IS_DEV=true
- *   Optional, see point 3: DEEPGRAM_SIGNUP_DATE_ISO=2026-03-14 (or any
+ *   Optional, see v8 point 3: DEEPGRAM_SIGNUP_DATE_ISO=2026-03-14 (or any
  *     Date.parse-able string) — precise alternative to first-use inference.
+ *   Optional, default "true" (unchanged behavior), see v9 point 4:
+ *     DEEPGRAM_CREDIT_EXPIRES=false — disables the proactive 1-year cutoff
+ *     once confirmed against Deepgram's current account-level terms.
  *   Optional, all env-overridable, defaults shown:
  *     TTS_TIER0_TIMEOUT_MS=4000   (Edge TTS handshake+stream)
  *     TTS_TIER1_TIMEOUT_MS=6000   (ElevenLabs)
@@ -251,7 +314,8 @@ const DEEPGRAM_BASE_NAME = 'DEEPGRAM_API_KEY';
 // request into a 400).
 const DEEPGRAM_SUPPORTS_SPEED = false;
 
-// ── Speechmatics constants (opt-in, real per-character cost) ──────────────
+// ── Speechmatics constants (opt-in; 480min/mo free, then billed if a card
+//    is on file — see v9 changelog point 5) ────────────────────────────────
 const SPEECHMATICS_TTS_URL_BASE = 'https://preview.tts.speechmatics.com/generate';
 const SPEECHMATICS_TTS_VOICE    = 'sarah';
 const SPEECHMATICS_BASE_NAME    = 'SPEECHMATICS_API_KEY';
@@ -464,6 +528,36 @@ const ringPointers = {
   speechmatics: { i: 0 },
 };
 
+// ── Provider tier registry (v9) ────────────────────────────────────────────
+// Single source of truth for the diagnostic `tier` label every
+// attempts.push() below reports. Execution order in runTtsCascade is NOT
+// driven by this table (the cascade is a fixed sequence of if-blocks, same
+// as v8) -- this exists so the reported label can never drift out of sync
+// with real call order the way the hand-typed '1.5' literal did for
+// Speechmatics (it executes after Tier 2, but was labeled as if it ran
+// between Tier 1 and 2 -- see v9 changelog point 2).
+//
+// quotaModel documents the business rule behind the ordering:
+//   'unlimited-unofficial'      : no publisher-enforced quota (Edge TTS, gTTS)
+//   'recurring-monthly'         : free allowance that resets every billing
+//                                 cycle (ElevenLabs: 10k chars/mo)
+//   'one-time-trial'            : a single non-renewing free allowance
+//                                 (Deepgram: $200 signup credit)
+//   'metered-recurring-partial' : free monthly allowance, then real billing
+//                                 on overage if a card is on file
+//                                 (Speechmatics: 480 free min/mo)
+// Providers with 'recurring-monthly' or 'unlimited-unofficial' models are
+// intentionally ordered ahead of 'one-time-trial' ones; a 'metered-*'
+// provider is opt-in and its position is a cost decision, not a quota one --
+// see v9 changelog point 5 for why that was not reordered here.
+const PROVIDER_TIERS = Object.freeze({
+  edge_tts    : { label: '0',   quotaModel: 'unlimited-unofficial' },
+  elevenlabs  : { label: '1',   quotaModel: 'recurring-monthly' },
+  deepgram    : { label: '2',   quotaModel: 'one-time-trial' },
+  speechmatics: { label: '2.5', quotaModel: 'metered-recurring-partial' },
+  gtts        : { label: '3',   quotaModel: 'unlimited-unofficial' },
+});
+
 /**
  * Generic round-robin + quota-failover walk over a provider's key ring.
  * Consults a shared subrequest `budget` (rotation.mjs's makeFetchBudget) and
@@ -622,6 +716,12 @@ async function getDeepgramClockStart(env) {
 }
 
 async function isDeepgramExpired(env, now = Date.now()) {
+  // v9: default "true" reproduces v8's behavior exactly -- this only takes
+  // effect if explicitly set to "false" once the 1-year assumption below is
+  // confirmed against this specific account's actual terms (see v9 changelog
+  // point 4: Deepgram's current public pricing states no expiration).
+  const expiryEnabled = (env?.DEEPGRAM_CREDIT_EXPIRES ?? 'true').trim().toLowerCase() !== 'false';
+  if (!expiryEnabled) return false;
   const clockStart = await getDeepgramClockStart(env);
   if (!clockStart) return false; // no override, never used yet -- nothing to expire
   return now >= (clockStart + DEEPGRAM_LIFETIME_MS - DEEPGRAM_SAFETY_BUFFER_MS);
@@ -708,7 +808,7 @@ async function fetchDeepgramTTS(text, apiKey, timeoutMs) {
   return { bytes: new Uint8Array(await res.arrayBuffer()), contentType: 'audio/mpeg' };
 }
 
-// ── OPT-IN ONLY — Speechmatics TTS (real per-character cost) ─────────────
+// ── OPT-IN ONLY — Speechmatics TTS (480min/mo free, then billed) ─────────
 async function fetchSpeechmaticsTTS(text, apiKey, timeoutMs) {
   const url = `${SPEECHMATICS_TTS_URL_BASE}/${SPEECHMATICS_TTS_VOICE}`;
 
@@ -785,9 +885,33 @@ function jsStyleDateString() {
   return new Date().toUTCString();
 }
 
+/**
+ * BCP-47 locale prefix of an Edge voice name, e.g. 'ar-EG-SalmaNeural' ->
+ * 'ar-EG'. Every EDGE_VOICE_MAP entry follows the {lang}-{REGION}-{Name}
+ * shape, and buildEdgeSsml is only ever called with a name that already
+ * passed EDGE_VOICE_ALLOWLIST, so the 'en-US' fallback below is defensive,
+ * not reachable in practice (verified against every current entry — see
+ * __edgeVoiceLocaleForTests).
+ */
+function edgeVoiceLocale(voiceName) {
+  const parts = String(voiceName).split('-');
+  return parts.length >= 2 ? `${parts[0]}-${parts[1]}` : 'en-US';
+}
+
+/**
+ * v9: xml:lang now matches the SELECTED VOICE's own locale instead of a
+ * hardcoded 'en-US' — reference client implementations (msedge-tts,
+ * ms-edge-tts) set this dynamically per voice, and Microsoft's service is
+ * documented to reject SSML shapes it would not itself generate. xmlns:mstts
+ * is declared (even though no mstts:-namespaced element is used here) because
+ * every reference client's default template includes it. Structure is still
+ * exactly one <voice> wrapping one <prosody> — the only shape currently
+ * accepted — so this only tightens conformance, it doesn't add capability.
+ */
 function buildEdgeSsml(voiceName, escapedText, rate) {
   return (
-    "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'>" +
+    "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' " +
+    `xmlns:mstts='https://www.w3.org/2001/mstts' xml:lang='${edgeVoiceLocale(voiceName)}'>` +
     `<voice name='${voiceName}'>` +
     `<prosody pitch='+0Hz' rate='${rate}' volume='+0%'>` +
     escapedText +
@@ -975,7 +1099,15 @@ export {
   parseEdgeBinaryFrame as __parseEdgeBinaryFrameForTests,
   escapeSsmlText as __escapeSsmlTextForTests,
   generateEdgeSecMsGec as __generateEdgeSecMsGecForTests,
+  edgeVoiceLocale as __edgeVoiceLocaleForTests,
+  buildEdgeSsml as __buildEdgeSsmlForTests,
 };
+
+// Test-only export (v9). isDeepgramExpired's new DEEPGRAM_CREDIT_EXPIRES
+// branch and the pre-existing clock-math branch both need direct coverage —
+// exercising the 1-year boundary through a real KV round trip isn't
+// practical in a unit test.
+export { isDeepgramExpired as __isDeepgramExpiredForTests };
 
 // ── Shared cascade engine (one copy, used by GET and POST) ────────────────
 /**
@@ -1012,10 +1144,10 @@ async function runTtsCascade({ text, lang, genderKey, speed, env, context, timeo
       };
     } catch (err) {
       recordOutcome(context, 'edge_tts', false);
-      attempts.push({ tier: 0, provider: 'edge_tts', reason: err.category || err.message });
+      attempts.push({ tier: PROVIDER_TIERS.edge_tts.label, provider: 'edge_tts', reason: err.category || err.message });
     }
   } else if (edgeEnabled) {
-    attempts.push({ tier: 0, provider: 'edge_tts', reason: 'circuit open' });
+    attempts.push({ tier: PROVIDER_TIERS.edge_tts.label, provider: 'edge_tts', reason: 'circuit open' });
   }
 
   // TIER 1 — ElevenLabs ring (all languages; recurring monthly quota -- runs in dev too)
@@ -1035,19 +1167,19 @@ async function runTtsCascade({ text, lang, genderKey, speed, env, context, timeo
       };
     } catch (err) {
       recordOutcome(context, 'elevenlabs', false);
-      attempts.push({ tier: 1, provider: 'elevenlabs', reason: err.category || err.message });
+      attempts.push({ tier: PROVIDER_TIERS.elevenlabs.label, provider: 'elevenlabs', reason: err.category || err.message });
     }
   } else if (eleven.keys.length > 0) {
-    attempts.push({ tier: 1, provider: 'elevenlabs', reason: 'circuit open' });
+    attempts.push({ tier: PROVIDER_TIERS.elevenlabs.label, provider: 'elevenlabs', reason: 'circuit open' });
   }
 
   // TIER 2 — Deepgram Aura-2, ENGLISH ONLY, skipped in dev (finite credit) or once lifetime-expired
   if (englishOnly && deepgram.keys.length > 0 && !devMode) {
     const expired = await isDeepgramExpired(env);
     if (expired) {
-      attempts.push({ tier: 2, provider: 'deepgram', reason: 'lifetime credit pre-emptively expired' });
+      attempts.push({ tier: PROVIDER_TIERS.deepgram.label, provider: 'deepgram', reason: 'lifetime credit pre-emptively expired' });
     } else if (await isCircuitOpen(env, 'deepgram')) {
-      attempts.push({ tier: 2, provider: 'deepgram', reason: 'circuit open' });
+      attempts.push({ tier: PROVIDER_TIERS.deepgram.label, provider: 'deepgram', reason: 'circuit open' });
     } else {
       try {
         const { response: result, keyIndex, keysTried } = await rotateAndFetchTTS(
@@ -1064,17 +1196,17 @@ async function runTtsCascade({ text, lang, genderKey, speed, env, context, timeo
         };
       } catch (err) {
         recordOutcome(context, 'deepgram', false);
-        attempts.push({ tier: 2, provider: 'deepgram', reason: err.category || err.message });
+        attempts.push({ tier: PROVIDER_TIERS.deepgram.label, provider: 'deepgram', reason: err.category || err.message });
       }
     }
   } else if (englishOnly && deepgram.keys.length > 0 && devMode) {
-    attempts.push({ tier: 2, provider: 'deepgram', reason: 'skipped: IS_DEV (protects finite one-time credit)' });
+    attempts.push({ tier: PROVIDER_TIERS.deepgram.label, provider: 'deepgram', reason: 'skipped: IS_DEV (protects finite one-time credit)' });
   }
 
-  // OPT-IN TIER — Speechmatics, ENGLISH ONLY, real cost, skipped in dev
+  // OPT-IN TIER — Speechmatics, ENGLISH ONLY, 480min/mo free then billed, skipped in dev
   if (englishOnly && speechmaticsEnabled && speechmatics.keys.length > 0 && !devMode) {
     if (await isCircuitOpen(env, 'speechmatics')) {
-      attempts.push({ tier: '1.5', provider: 'speechmatics', reason: 'circuit open' });
+      attempts.push({ tier: PROVIDER_TIERS.speechmatics.label, provider: 'speechmatics', reason: 'circuit open' });
     } else {
       try {
         const { response: result, keyIndex, keysTried } = await rotateAndFetchTTS(
@@ -1090,11 +1222,11 @@ async function runTtsCascade({ text, lang, genderKey, speed, env, context, timeo
         };
       } catch (err) {
         recordOutcome(context, 'speechmatics', false);
-        attempts.push({ tier: '1.5', provider: 'speechmatics', reason: err.category || err.message });
+        attempts.push({ tier: PROVIDER_TIERS.speechmatics.label, provider: 'speechmatics', reason: err.category || err.message });
       }
     }
   } else if (englishOnly && speechmaticsEnabled && speechmatics.keys.length > 0 && devMode) {
-    attempts.push({ tier: '1.5', provider: 'speechmatics', reason: 'skipped: IS_DEV (real per-character cost)' });
+    attempts.push({ tier: PROVIDER_TIERS.speechmatics.label, provider: 'speechmatics', reason: 'skipped: IS_DEV (protects the 480min/mo free allowance from dev traffic)' });
   }
 
   // TIER 3 — Google Translate TTS (final safety net, always attempted, all langs, no circuit breaker: nothing to fall back to)
@@ -1107,7 +1239,7 @@ async function runTtsCascade({ text, lang, genderKey, speed, env, context, timeo
     };
   } catch (err) {
     recordOutcome(context, 'gtts', false);
-    attempts.push({ tier: 3, provider: 'gtts', reason: err.message });
+    attempts.push({ tier: PROVIDER_TIERS.gtts.label, provider: 'gtts', reason: err.message });
   }
 
   const finalErr = new Error('All TTS providers unavailable');
