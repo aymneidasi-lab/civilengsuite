@@ -1,117 +1,167 @@
 /**
- * functions/api/tts.js  —  v6  (2026-07-19)
+ * functions/api/tts.js  —  v8  (2026-07-19)
  * ──────────────────────────────────────────────────────────────────────────
  * Cloudflare Pages Function — TTS Proxy
  * Routes: GET  /api/tts?text=...&lang=ar-EG[&voice=female|male][&speed=1.0]
  *         POST /api/tts   { text, dialect, voice_gender, speed, format }
  *
- * ── WHY v6 LOOKS DIFFERENT FROM tts-proxy-architecture-final.md ───────────
- * That document specs a 4-tier cascade (Edge TTS / Azure+Google+ElevenLabs /
- * Polly+Watson / gTTS+ResponsiveVoice) coordinated through Durable Objects.
- * Cross-checked against api_keys_EMPTY_KEYS_FOR_SECURITY.txt and this
- * project's actual Cloudflare bindings: there is no Azure, Google Cloud TTS,
- * AWS, or IBM Watson key anywhere in this deployment, no wrangler.toml, and
- * no Durable Object binding. The real, provisioned stack is ElevenLabs /
- * Deepgram / Speechmatics / Google Translate TTS — plain-JSON or
- * query-param APIs, none of them SSML. A literal port of the document would
- * ship dead code for four providers nobody has keys for, require a Workers
- * Paid + wrangler.toml + Durable Objects migration nobody asked for, and —
- * because the doc's request contract is `POST /api/tts` JSON — silently
- * break the live frontend, which loads audio via
- * `new Audio('/api/tts?text=...&lang=...')` (a bare GET, no body, no
- * headers; see pc_suite_v30.html line ~11574). An <audio> element cannot
- * issue a POST. That GET contract is preserved byte-for-byte below.
+ * ── HOW v8 GOT HERE ─────────────────────────────────────────────────────────
+ * Two independent passes forked from the same v5 after this file was first
+ * reviewed: this session's own v6/v7 (Deepgram model-string fix, real
+ * fetchWithTimeout signature, tts:-namespaced rate limiting, in-memory
+ * circuit breaker) and a separately-supplied "v6" (tts-1.js: Edge TTS as a
+ * new free Tier 0, a POST/JSON interface, a KV-backed circuit breaker, and
+ * proactive Deepgram credit-lifetime tracking). Both are real engineering,
+ * pointed at different gaps, and neither superset of the other. v8 merges
+ * them, keeping whichever side got a given thing right and fixing what
+ * neither side had fully closed. Per-item reconciliation:
  *
- * What v6 actually does: ports the document's PATTERNS onto the REAL
- * provider set, plus the one genuinely new, directly-portable capability —
- * Group 0 / Edge TTS — with material updates found during this pass that
- * the source document did not have:
+ *   1. [CARRIED FROM tts-1.js, verified] Group 0 — Microsoft Edge TTS. Free,
+ *      keyless, real per-dialect neural voices (the SalmaNeural/ShakirNeural
+ *      family — the same models Azure sells). Independently re-verified,
+ *      not just read, in this pass:
+ *        - The Sec-MS-GEC signature function actually runs and produces a
+ *          64-char uppercase hex SHA-256 digest, deterministic within its
+ *          5-minute bucket (measured directly, not assumed).
+ *        - Both frame parsers (text `\r\n\r\n`-delimited, and binary
+ *          2-byte-length-prefixed) were re-tested against hand-built
+ *          synthetic frames independently of tts-1.js's own claimed test,
+ *          including the >255-byte header case that exercises the full
+ *          two-byte length field rather than just the trivial one-byte path.
+ *          All pass.
+ *        - The Cloudflare WebSocket pattern (fetch()+Upgrade header to get
+ *          a `.webSocket` on the Response, then `.accept()`) is the correct
+ *          API for attaching custom upgrade headers, which a bare
+ *          `new WebSocket(url)` cannot do.
+ *      What was NOT and could not be verified from this sandbox: an actual
+ *      network round trip to speech.platform.bing.com (egress here is
+ *      restricted to package registries). EDGE_TTS_ENABLED still defaults
+ *      to "false" for exactly that reason — enable it in a preview
+ *      deployment and confirm one real request succeeds before relying on
+ *      it in production.
+ *   2. [CARRIED FROM tts-1.js, with one fix] KV-backed circuit breaker,
+ *      replacing this session's own in-memory version. On reflection this
+ *      is the better default: it survives cold starts and different edge
+ *      PoPs, which an in-memory breaker fundamentally cannot, and it needs
+ *      no new Cloudflare binding beyond the CES_CHAT_KV already required
+ *      for rate limiting. tts-1.js's own comment is honest about the
+ *      read-then-write race (lost updates under true concurrency) and
+ *      correctly calls it low-severity for a breaker rather than a hard
+ *      cap. What it didn't account for: recordOutcome() wrote to KV on
+ *      EVERY successful request, not only on failures or recoveries —
+ *      meaning a fully healthy system still spent one write per request,
+ *      competing with rotation.mjs's own rate-limiter for the same
+ *      Free-plan 1,000-writes/day ceiling that project's comments already
+ *      flag as tight. Fixed: the write is now skipped entirely when the
+ *      state has nothing to reset (already-healthy stays a read-only path).
+ *   3. [CARRIED FROM tts-1.js, verified] Deepgram's $200 signup credit is
+ *      one-time and expires 1 year after signup regardless of remaining
+ *      balance — proactively stopped 5 days early via a KV-tracked clock,
+ *      instead of finding out reactively via a failed request. Precision
+ *      caveat, stated plainly: the tracked clock starts at this tier's
+ *      first SUCCESSFUL call through this proxy, not the true Deepgram
+ *      account signup date — if this code was deployed some time after
+ *      that account was actually created, the proactive cutoff fires later
+ *      than the true expiry, which just means Deepgram itself rejects the
+ *      request at that point exactly as it would have before this feature
+ *      existed (silent degradation to the old reactive behavior, not a new
+ *      failure mode). Added DEEPGRAM_SIGNUP_DATE_ISO as an optional env
+ *      override for anyone who wants to set the real date once instead of
+ *      relying on first-use inference.
+ *   4. [CARRIED FROM tts-1.js] IS_DEV gate distinguishing recurring-quota
+ *      providers (Eleven, Edge TTS — safe to exercise in dev) from
+ *      finite/metered ones (Deepgram's one-time credit, Speechmatics' real
+ *      per-character billing — skipped in dev, straight to gTTS).
+ *   5. [CARRIED FROM tts-1.js, independently re-verified] HTTP header
+ *      VALUES are Latin-1/ByteString, not Unicode — confirmed by actually
+ *      trying to set a header containing U+2192 (→) in this pass: it throws
+ *      `TypeError: Cannot convert argument to a ByteString...`, exactly as
+ *      tts-1.js's comment claimed. The source architecture doc's own
+ *      illustrative header (`ar-EG→MSA`) would have shipped a request-time
+ *      crash on the very first fallback. Every degradation header here
+ *      uses ASCII "->" instead.
+ *   6. [FIX, this pass — regression in tts-1.js relative to this session's
+ *      own v7] tts-1.js called checkRateLimit(env, clientIp) — the bare,
+ *      unprefixed form. That reintroduces the exact problem this session's
+ *      v7 fixed: TTS sharing chat.js/vision.js's combined per-visitor
+ *      budget, when a single spoken reply can legitimately need several
+ *      sequential /api/tts calls (MAX_TEXT_LENGTH forces pre-chunking).
+ *      Restored the `tts:${clientIp}` namespacing plus rotation.mjs's
+ *      backward-compatible opts argument ({windowSeconds, maxPerWindow}),
+ *      same as v7 — see rotation.mjs's own diff.
+ *   7. [FIX, this pass — same bug independently reappeared] DEEPGRAM_TTS_MODEL
+ *      was still the bare string 'aura-2' here too. Same fix as v7:
+ *      'aura-2-asteria-en', Deepgram's own documented model+voice+language
+ *      syntax, matching the voice this file already intended.
+ *   8. [FIX, this pass — same bug independently reappeared] ringPointers had
+ *      no `speechmatics` entry; rotateAndFetchTTS was called with a fresh
+ *      `{ i: 0 }` literal every request for that tier, so it never actually
+ *      rotated its starting key across requests. Same fix as v7: added
+ *      ringPointers.speechmatics and wired it in.
+ *   9. [CORRECTION, this pass] tts-1.js's comment claimed ElevenLabs'
+ *      speed field rejects values outside 0.7-1.2 "per ElevenLabs' own
+ *      docs." Checked directly: ElevenLabs' own REST API reference states
+ *      the field's actual range is 0.25-4.0; 0.7-1.2 is where their Agents
+ *      Platform UI clamps its slider, not a REST API ceiling. The 0.7-1.2
+ *      clamp is kept here regardless — ElevenLabs' own guidance is that
+ *      extreme values degrade quality well before the technical limits, and
+ *      the caller-facing clampSpeed() is already a conservative 0.5-2.0 —
+ *      but the justification is corrected: a deliberate quality choice, not
+ *      an API-enforced rejection.
+ *  10. [CARRIED FROM tts-1.js] makeFetchBudget/SUBREQUEST_BUDGET_FREE_PLAN
+ *      now guards rotateAndFetchTTS and fetchEdgeTTS — this session's v7
+ *      flagged the same Free-plan 50-subrequest edge case (many keys, every
+ *      tier simultaneously quota-exhausted) but declined to wire in a
+ *      guard to avoid touching the shared ring-walk function. Given a
+ *      working version already exists, adopting it here closes that gap
+ *      rather than leaving it as a documented-but-unfixed risk.
+ *  11. [ADDED, this pass] X-TTS-Request-Id (crypto.randomUUID(), threaded
+ *      through every log line for the request) and X-TTS-Latency-Ms
+ *      (total elapsed) on every response — this session's own v7 additions,
+ *      not present in tts-1.js, ported over for the same reason: cheap,
+ *      and it is exactly what you want already present the one time a
+ *      request actually needs debugging.
+ *  12. [KEPT, decision stated plainly] The POST interface is currently
+ *      unused — the live frontend calls the GET form
+ *      (`new Audio('/api/tts?text=...')`, confirmed against
+ *      pc_suite_v30.html). Kept because it's purely additive and doesn't
+ *      touch the GET contract at all, but it is genuinely optional: if the
+ *      preference is a smaller surface area to maintain and test, it can be
+ *      deleted with no effect on anything that currently calls this file.
  *
- *   1. GROUP 0 — Microsoft Edge TTS added ahead of ElevenLabs (§3 of the
- *      doc). Free, keyless, real ar-EG neural voices. BUT: current-state
- *      research (this pass, not in the source doc) found Microsoft added a
- *      clock-derived DRM signature (`Sec-MS-GEC`, SHA-256 of a 5-minute
- *      Windows-FILETIME bucket + a public token) that a bare
- *      TrustedClientToken no longer satisfies — confirmed against the
- *      `rany2/edge-tts` reference implementation's `drm.py`, plus multiple
- *      dated 2024-2025 upstream issues showing 403s when it's stale/wrong.
- *      This is MORE fragile than the source doc knew, not less. Given that,
- *      and given this endpoint cannot be smoke-tested from this sandbox
- *      (no network route to speech.platform.bing.com here), EDGE_TTS_ENABLED
- *      defaults to "false" — the doc's own default-true recommendation is
- *      deliberately overridden. Flip it on in Cloudflare's dashboard only
- *      after confirming a real deployed request succeeds.
- *   2. Durable Objects (§4) replaced with a KV-backed circuit breaker/quota
- *      clock, reusing the SAME env.CES_CHAT_KV binding chat.js/vision.js
- *      already use (see functions/_lib/rotation.mjs) — zero new Cloudflare
- *      bindings required to deploy this. This is NOT atomicity-safe under
- *      true concurrent bursts the way a Durable Object is; that trade-off
- *      is explained where the helpers are defined below, and is the same
- *      "fails open, KV is good enough at this traffic scale" call
- *      rotation.mjs already makes for its own rate limiter.
- *   3. Deepgram's real exposure ported from Polly's §4 pattern: Deepgram's
- *      $200 signup credit is one-time and expires 1 year after signup
- *      regardless of balance (api_keys_EMPTY_KEYS_FOR_SECURITY.txt) — the
- *      same "finite, clock-bound pool" shape as Polly in the source doc.
- *      firstUsedAt/expiresAt now tracked in KV, pre-emptively stopped 5
- *      days ahead of the cutoff.
- *   4. IS_DEV gate (§2): Edge TTS and ElevenLabs (recurring monthly quota)
- *      still run in dev; Deepgram (finite credit) and opt-in Speechmatics
- *      (real per-character billing) are skipped, straight to gTTS.
- *   5. SSML escaping (§7) applies to exactly one provider here: Edge TTS is
- *      the only real-provider path in this file that builds an SSML
- *      document. ElevenLabs/Deepgram/Speechmatics take a JSON string field
- *      (JSON.stringify already escapes correctly); gTTS takes a URL query
- *      param (URLSearchParams already percent-encodes correctly). Applying
- *      the doc's escaping requirement to those would be a no-op dressed up
- *      as a fix; it is applied where it actually closes a gap.
- *   6. WAV-safe chunk concatenation (§8): does not apply. MAX_TEXT_LENGTH
- *      stays at 200 chars/request — chunking already happens client-side
- *      (pc_suite_v30.html's splitForProxy), one clip per request, never
- *      concatenated server-side across providers. Edge TTS's own output
- *      format is MP3 (frame-based, tolerant of concatenation per the doc's
- *      own §8), and its multiple binary WS frames are concatenated
- *      byte-for-byte from ONE provider within ONE request — the doc's
- *      "never splice providers mid-chunk-sequence" rule, satisfied by
- *      construction, not by new logic.
- *   7. Rate limiting (§15.5): wired to functions/_lib/rotation.mjs's
- *      checkRateLimit(), the same helper chat.js/vision.js already use.
- *      tts.js had zero request throttling before this version — an
- *      unauthenticated proxy in front of metered quota is exactly the
- *      shape of endpoint that gets hammered.
- *   8. Cloudflare Free-plan subrequest ceiling (50/invocation, still
- *      current per Cloudflare's Workers limits docs as of July 2026) is
- *      now enforced via rotation.mjs's makeFetchBudget(), same as chat.js.
- *
- * NOT carried over from the doc, with reasons: Azure/Google Cloud
- * TTS/Polly/Watson (no keys, no accounts — would be unreachable dead code);
- * Durable Objects (no binding, no wrangler.toml — see point 2); Watson
- * keep-alive Cron (no Watson); Cloudflare native Rate Limiting Rules (a
- * dashboard/wrangler config action, not code this file can apply — call it
- * out as a recommended follow-up instead of faking it).
- *
- * ── SETUP (unchanged from v5) ──────────────────────────────────────────────
+ * ── SETUP ─────────────────────────────────────────────────────────────────
  *   ELEVEN_API_KEY(_1..12), DEEPGRAM_API_KEY(_1..12) — case-insensitive.
  *   Optional: ELEVEN_VOICE_ID_F / ELEVEN_VOICE_ID_M
  *   Optional, real cost, off by default: ENABLE_SPEECHMATICS_TTS=true
- *   NEW: EDGE_TTS_ENABLED=true            (default false — see point 1)
- *   NEW: IS_DEV=true                      (default false)
- *   Reused, no new binding: env.CES_CHAT_KV (same KV namespace as chat.js)
+ *   Optional, off by default, see point 1: EDGE_TTS_ENABLED=true
+ *   Optional, see point 4: IS_DEV=true
+ *   Optional, see point 3: DEEPGRAM_SIGNUP_DATE_ISO=2026-03-14 (or any
+ *     Date.parse-able string) — precise alternative to first-use inference.
+ *   Optional, all env-overridable, defaults shown:
+ *     TTS_TIER0_TIMEOUT_MS=4000   (Edge TTS handshake+stream)
+ *     TTS_TIER1_TIMEOUT_MS=6000   (ElevenLabs)
+ *     TTS_TIER2_TIMEOUT_MS=6000   (Deepgram / opt-in Speechmatics)
+ *     TTS_GTTS_TIMEOUT_MS=10000   (last resort — no fallback after this,
+ *                                  so failing fast has no value; a late
+ *                                  success beats an early failure)
+ *     TTS_RATE_LIMIT_WINDOW_SECONDS=60
+ *     TTS_RATE_LIMIT_MAX_PER_WINDOW=40
+ *   Reused, no new binding beyond what chat.js/vision.js already need:
+ *     env.CES_CHAT_KV (rate limiter, circuit breaker, Deepgram lifetime clock)
+ *   Requires the v7+ rotation.mjs (checkRateLimit's third `opts` argument).
  *
- * ── RESPONSE HEADERS (additive — existing X-TTS-Engine/Voice/Lang/KeyIndex/
- *    KeysTried/KeysAvailable headers from v5 are unchanged) ────────────────
- *   X-TTS-Fallback              : "true" once any non-first-attempted tier answers
- *   X-TTS-Fallback-Reason       : why the winning tier wasn't the first one tried
- *   X-TTS-Provider-Official     : "true" | "false" (Edge TTS and gTTS are unofficial)
- *   X-TTS-Dialect-Requested     : echoes the resolved lang
- *   X-TTS-Dialect-Rendered      : what dialect actually comes out of the winning tier
- *   X-TTS-Quality-Score         : "neural" | "neural-degraded" | "robotic"
+ * ── RESPONSE HEADERS ─────────────────────────────────────────────────────
+ *   X-TTS-Engine, X-TTS-Voice, X-TTS-KeyIndex/KeysTried, X-TTS-*-KeysAvailable
+ *   X-TTS-Provider-Official  : "true" | "false" (Edge TTS and gTTS are unofficial)
+ *   X-TTS-Dialect-Requested / X-TTS-Dialect-Rendered / X-TTS-Quality-Score
+ *   X-TTS-Fallback / X-TTS-Fallback-Reason
+ *   X-TTS-Dialect-Degraded   : ASCII "->" only — see point 5
+ *   X-TTS-Request-Id, X-TTS-Latency-Ms : every response
  *
- * ── CSP NOTE (unchanged) ───────────────────────────────────────────────────
+ * ── CSP NOTE ───────────────────────────────────────────────────────────────
  *   Audio served from /api/tts (same origin). media-src 'self' is correct.
- *   Edge TTS's outbound WebSocket happens server-side inside this Function
- *   — CSP is a browser mechanism and does not apply to it; no _headers or
- *   functions/[[path]].js CSP change is required for Group 0.
+ *   Edge TTS's outbound WebSocket happens server-side inside this Function —
+ *   CSP is a browser mechanism and does not apply to it.
  */
 
 import {
@@ -134,7 +184,6 @@ function getCorsHeaders(request) {
     : ALLOWED_ORIGINS.values().next().value;
   return {
     'Access-Control-Allow-Origin' : allowed,
-    // v6: added POST — the new JSON-body interface (existing GET contract unchanged).
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
     'Vary'                        : 'Origin',
@@ -152,7 +201,13 @@ function jsonResponse(status, body, request, extraHeaders) {
   });
 }
 
-// ── Allowed TTS languages (unchanged) ──────────────────────────────────────
+function intFromEnv(env, name, fallback) {
+  const raw = env?.[name];
+  const n = raw !== undefined ? parseInt(raw, 10) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+// ── Allowed TTS languages ───────────────────────────────────────────────────
 const ALLOWED_LANGS = new Set([
   'ar', 'ar-EG', 'ar-SA', 'ar-MA', 'ar-JO', 'ar-DZ', 'ar-IQ',
   'en', 'en-US', 'en-GB', 'en-AU',
@@ -164,43 +219,49 @@ function isEnglish(lang) {
   return lang.toLowerCase().startsWith('en');
 }
 
-/** IS_DEV gate (v6, new) — see docblock point 4. */
+/** IS_DEV gate — see changelog point 4. */
 function isDevMode(env) {
   return String(env?.IS_DEV ?? '').trim().toLowerCase() === 'true';
 }
 
-// ── ElevenLabs constants (unchanged) ───────────────────────────────────────
+// ── ElevenLabs constants ────────────────────────────────────────────────────
 const ELEVEN_API_URL    = 'https://api.elevenlabs.io/v1/text-to-speech';
 const ELEVEN_MODEL      = 'eleven_multilingual_v2';
 const ELEVEN_OUT_FORMAT = 'mp3_44100_128';
 const ELEVEN_DEFAULT_F  = 'EXAVITQu4vr4xnSDxMaL';   // Bella (female)
 const ELEVEN_DEFAULT_M  = 'pNInz6obpgDQGcFmaJgB';   // Adam  (male)
 const ELEVEN_BASE_NAME  = 'ELEVEN_API_KEY';
-// v6: confirmed current (2026) — speed is a real voice_settings field, 0.7-1.2,
-// values outside that range are rejected/degrade quality per ElevenLabs' own docs.
+// v8: ElevenLabs' own REST API reference documents 0.25-4.0 as the field's
+// actual accepted range; 0.7-1.2 is where their Agents Platform UI clamps
+// its slider, not a REST ceiling (checked directly — see changelog point 9).
+// Kept at 0.7-1.2 anyway: ElevenLabs' own guidance is that extreme values
+// degrade quality well before the technical limits, and this is a
+// conservative, safe band, not a required one.
 const ELEVEN_SPEED_MIN = 0.7;
 const ELEVEN_SPEED_MAX = 1.2;
 
-// ── Deepgram constants (unchanged) ─────────────────────────────────────────
+// ── Deepgram constants ──────────────────────────────────────────────────────
 const DEEPGRAM_SPEAK_URL = 'https://api.deepgram.com/v1/speak';
-const DEEPGRAM_TTS_MODEL = 'aura-2';
+// v8: fully-qualified model+voice+language string — see changelog point 7.
+const DEEPGRAM_TTS_MODEL = 'aura-2-asteria-en';
 const DEEPGRAM_BASE_NAME = 'DEEPGRAM_API_KEY';
-// v6: Deepgram Aura's REST API has no confirmed speed-control parameter —
-// unlike ElevenLabs/Edge TTS/gTTS, a `speed` request is silently NOT applied
-// on this tier (documented here rather than guessing at an unverified field
-// name that could otherwise turn a working request into a 400).
+// Deepgram Aura's REST API has no confirmed speed-control parameter — a
+// `speed` request is silently NOT applied on this tier (documented rather
+// than guessing at an unverified field name that could turn a working
+// request into a 400).
 const DEEPGRAM_SUPPORTS_SPEED = false;
 
-// ── Speechmatics constants (unchanged, still opt-in/real-cost only) ───────
+// ── Speechmatics constants (opt-in, real per-character cost) ──────────────
 const SPEECHMATICS_TTS_URL_BASE = 'https://preview.tts.speechmatics.com/generate';
 const SPEECHMATICS_TTS_VOICE    = 'sarah';
 const SPEECHMATICS_BASE_NAME    = 'SPEECHMATICS_API_KEY';
 const SPEECHMATICS_SUPPORTS_SPEED = false; // same reasoning as Deepgram above
 
-// ── Edge TTS constants (v6, NEW — Group 0) ─────────────────────────────────
-// Endpoint/token/DRM algorithm confirmed against rany2/edge-tts (9k+ stars,
-// actively maintained) source as of this pass — see docblock point 1 for
-// why EDGE_TTS_ENABLED nonetheless defaults false.
+// ── Edge TTS constants (Group 0) ───────────────────────────────────────────
+// Endpoint/token/DRM algorithm verified against the rany2/edge-tts reference
+// implementation's approach; the signature FUNCTION itself was independently
+// re-run and checked in this pass (see changelog point 1) — the one thing
+// that could not be checked is a real network round trip.
 const EDGE_TTS_TRUSTED_CLIENT_TOKEN = '6A5AA1D4EAFF4E9FB37E23D68491D6F4';
 const EDGE_TTS_HOST = 'speech.platform.bing.com/consumer/speech/synthesize/readaloud';
 const EDGE_TTS_WSS_BASE = `wss://${EDGE_TTS_HOST}/edge/v1?TrustedClientToken=${EDGE_TTS_TRUSTED_CLIENT_TOKEN}`;
@@ -214,8 +275,6 @@ const EDGE_TTS_ORIGIN = 'chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold';
 const EDGE_TTS_WIN_EPOCH_OFFSET_SECONDS = 11644473600; // 1601-01-01 -> 1970-01-01
 const EDGE_TTS_OUTPUT_FORMAT = 'audio-24khz-48kbitrate-mono-mp3';
 
-// Known-current GA neural voice names (Salma/Shakir etc. are the SAME
-// models Azure sells — confirmed in the architecture doc's Appendix A).
 // Allowlisted explicitly — never interpolate a caller-supplied voice name
 // into the SSML `<voice name='...'>` attribute.
 const EDGE_VOICE_MAP = {
@@ -225,9 +284,8 @@ const EDGE_VOICE_MAP = {
   'ar-JO': { female: 'ar-JO-SanaNeural',    male: 'ar-JO-TaimNeural' },
   'ar-DZ': { female: 'ar-DZ-AminaNeural',   male: 'ar-DZ-IsmaelNeural' },
   'ar-IQ': { female: 'ar-IQ-RanaNeural',    male: 'ar-IQ-BasselNeural' },
-  // Plain 'ar' (MSA) has no single canonical Edge locale; Saudi voices are
-  // used as the MSA-adjacent rendering, consistent with the doc's own
-  // dialect-truth table treating Gulf/Saudi as the nearest non-Egyptian option.
+  // Plain 'ar' (MSA) has no single canonical Edge locale; Saudi voices used
+  // as the MSA-adjacent rendering.
   'ar'   : { female: 'ar-SA-ZariyahNeural', male: 'ar-SA-HamedNeural' },
   'en'   : { female: 'en-US-EmmaMultilingualNeural', male: 'en-US-AndrewMultilingualNeural' },
   'en-US': { female: 'en-US-EmmaMultilingualNeural', male: 'en-US-AndrewMultilingualNeural' },
@@ -238,36 +296,27 @@ const EDGE_VOICE_ALLOWLIST = new Set(
   Object.values(EDGE_VOICE_MAP).flatMap((v) => [v.female, v.male]),
 );
 
-// ── Dialect-rendering truth table (v6, adapted from doc §7 to REAL providers) ──
-// What ACTUALLY comes out, per provider, for a given requested dialect.
-// Used only to stamp honest X-TTS-Dialect-Rendered / Quality-Score headers —
-// never to change routing (routing stays: edge -> eleven -> deepgram(en) ->
-// speechmatics(en, opt-in) -> gtts, exactly the existing v5 order plus Tier 0).
+// ── Dialect-rendering truth table (honest headers only — never changes routing) ─
 function renderedDialectFor(provider, requestedLang) {
   const isArabic = requestedLang.toLowerCase().startsWith('ar');
   if (provider === 'edge_tts') {
-    // True per-locale Arabic voices exist for every ALLOWED_LANGS Arabic
-    // entry (see EDGE_VOICE_MAP) — genuinely renders the requested dialect.
     return { rendered: requestedLang, quality: 'neural', degraded: false };
   }
   if (provider === 'elevenlabs') {
-    // Multilingual model, not a true dialect-locale switch — matches the
-    // doc's own honest characterization of ElevenLabs for Arabic.
     return isArabic
       ? { rendered: 'ar (MSA-leaning, model-dependent)', quality: 'neural-degraded', degraded: true }
       : { rendered: requestedLang, quality: 'neural', degraded: false };
   }
   if (provider === 'deepgram' || provider === 'speechmatics') {
-    // English-only tiers in this file; never invoked for Arabic.
     return { rendered: requestedLang, quality: 'neural', degraded: false };
   }
-  // gTTS — MSA only, robotic, per doc §3/§13.
+  // gTTS — MSA only, robotic.
   return isArabic
     ? { rendered: 'ar (MSA)', quality: 'robotic', degraded: true }
     : { rendered: requestedLang, quality: 'robotic', degraded: false };
 }
 
-// ── Text preprocessing (unchanged) ─────────────────────────────────────────
+// ── Text preprocessing ──────────────────────────────────────────────────────
 function preprocessText(text) {
   return text
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, ' ')
@@ -278,13 +327,13 @@ function preprocessText(text) {
 }
 
 /**
- * v6, NEW — full 5-entity XML escape for SSML TEXT CONTENT, per architecture
- * doc §7. Stricter than strictly necessary for text-content position (which
- * only requires &<> per the XML spec) but harmless as a superset, and
- * defends any future attribute-context reuse. Verified in this session
- * against an actual injection attempt (closing </voice><voice name='...'>
- * mid-payload) — see chat log; after escaping, zero literal '<' or '>'
- * survives, so the payload cannot break out of the enclosing element.
+ * Full 5-entity XML escape for SSML text content (Edge TTS only — the sole
+ * provider here building an SSML document; ElevenLabs/Deepgram/Speechmatics
+ * take a JSON string field, gTTS a URL query param, both already correctly
+ * escaped by JSON.stringify/URLSearchParams). Re-verified in this pass with
+ * an injection attempt (`</voice><voice name='x'>`) — after escaping, zero
+ * literal '<' or '>' survives, so the payload cannot break out of the
+ * enclosing element.
  */
 function escapeSsmlText(text) {
   return String(text)
@@ -295,7 +344,6 @@ function escapeSsmlText(text) {
     .replace(/'/g, '&apos;');
 }
 
-/** Resolve voice ID from env or fall back to hardcoded default (unchanged). */
 function resolveVoiceId(genderKey, env) {
   if (genderKey === 'male') {
     return (env?.ELEVEN_VOICE_ID_M?.trim() || '') || ELEVEN_DEFAULT_M;
@@ -303,13 +351,6 @@ function resolveVoiceId(genderKey, env) {
   return (env?.ELEVEN_VOICE_ID_F?.trim() || '') || ELEVEN_DEFAULT_F;
 }
 
-/**
- * v6, NEW — resolve an Edge TTS voice name for a given (already-allowlisted)
- * lang + gender, falling back to the Egyptian voice if the lang has no
- * explicit entry (should not happen given ALLOWED_LANGS is a strict subset
- * of EDGE_VOICE_MAP's keys, but defends against future ALLOWED_LANGS growth
- * outpacing this map).
- */
 function resolveEdgeVoice(lang, genderKey) {
   const entry = EDGE_VOICE_MAP[lang] || EDGE_VOICE_MAP['ar-EG'];
   const name = genderKey === 'male' ? entry.male : entry.female;
@@ -326,18 +367,18 @@ function clampSpeed(speed) {
 /** speed float (0.5-2.0, 1.0=normal) -> Edge TTS's SSML prosody rate string ("+N%"/"-N%"). */
 function speedToEdgeRate(speed) {
   const pct = Math.round((clampSpeed(speed) - 1) * 100);
-  const clamped = Math.min(50, Math.max(-50, pct)); // keep within a safe, well-tested band
+  const clamped = Math.min(50, Math.max(-50, pct));
   return `${clamped >= 0 ? '+' : ''}${clamped}%`;
 }
 
-/** speed float -> ElevenLabs voice_settings.speed (0.7-1.2). */
+/** speed float -> ElevenLabs voice_settings.speed (clamped 0.7-1.2, see const comment above). */
 function speedToElevenSpeed(speed) {
   return Math.min(ELEVEN_SPEED_MAX, Math.max(ELEVEN_SPEED_MIN, clampSpeed(speed)));
 }
 
 /**
  * Read a failed fetch Response body ONCE and pull out a quota/credit signal
- * if present (unchanged from v5).
+ * if present.
  * @param {Response} res
  * @returns {Promise<{ raw: any, quotaMessage: string|null }>}
  */
@@ -381,7 +422,7 @@ async function readErrorBody(res) {
 
 /**
  * Discover every env var matching `<baseName>` or `<baseName>_<digits>`,
- * case-insensitively (unchanged from v5).
+ * case-insensitively.
  * @param {object} env
  * @param {string} baseName
  * @returns {{ keys: string[], matchedNames: string[] }}
@@ -415,25 +456,26 @@ function buildKeyRing(env, baseName) {
 }
 
 // Module-scoped ring pointers -- best-effort load spreading across requests
-// within a reused isolate; not relied on for correctness (unchanged from v5).
+// within a reused isolate; not relied on for correctness.
+// v8: added `speechmatics` -- see changelog point 8.
 const ringPointers = {
-  eleven  : { i: 0 },
-  deepgram: { i: 0 },
+  eleven      : { i: 0 },
+  deepgram    : { i: 0 },
+  speechmatics: { i: 0 },
 };
 
 /**
  * Generic round-robin + quota-failover walk over a provider's key ring.
- * v6: now consults a shared subrequest `budget` (rotation.mjs's
- * makeFetchBudget) and stops trying further keys — failing over to the
- * NEXT TIER instead — once the budget is exhausted, rather than risking the
- * platform hard-erroring the 51st subrequest on the Free plan.
+ * Consults a shared subrequest `budget` (rotation.mjs's makeFetchBudget) and
+ * stops trying further keys -- failing over to the NEXT TIER instead --
+ * once the budget is exhausted, rather than risking the platform
+ * hard-erroring the 51st subrequest on the Free plan.
  *
  * @param {{i:number}} pointerState
  * @param {string[]} keys
- * @param {(key: string) => Promise<Response>} singleFetchFn
+ * @param {(key: string) => Promise<{bytes:Uint8Array, contentType:string}>} singleFetchFn
  * @param {string} providerLabel
  * @param {{take: () => boolean, remaining: () => number}} budget
- * @returns {Promise<{ response: Response, keyIndex: number, keysTried: number }>}
  */
 async function rotateAndFetchTTS(pointerState, keys, singleFetchFn, providerLabel, budget) {
   if (keys.length === 0) {
@@ -478,10 +520,14 @@ async function rotateAndFetchTTS(pointerState, keys, singleFetchFn, providerLabe
   throw err;
 }
 
-// ── KV helpers (v6, NEW) ───────────────────────────────────────────────────
+// Test-only export. Not used by any request-handling path -- exists so a
+// test file can unit-test the subrequest-budget-exhaustion branch directly
+// (48 real key attempts would be impractical to exercise end-to-end).
+export { rotateAndFetchTTS as __rotateAndFetchTTSForTests };
+
+// ── KV helpers ───────────────────────────────────────────────────────────
 // Fail-open by design: any KV read/write error is swallowed and treated as
 // "no state yet" — a KV outage must never itself take the TTS proxy down.
-// This mirrors rotation.mjs's own checkRateLimit() philosophy exactly.
 async function kvGetJSON(kv, key) {
   if (!kv) return null;
   try {
@@ -501,16 +547,14 @@ async function kvPutJSON(kv, key, value) {
   }
 }
 
-// ── Circuit breaker (v6, NEW — KV approximation of doc §5, not DO-atomic) ─
-// HONEST CAVEAT (same shape as rotation.mjs's own KV rate-limiter caveat):
-// this is read-then-write, not atomic. Two concurrent requests can both read
-// consecutiveFailures=2 and both write back 3 instead of reaching 4 — a lost
-// update. For a circuit BREAKER (not a hard billing cap) that is a low-
-// severity, self-healing race: worst case a couple of extra requests reach
-// an already-failing provider before the circuit opens a moment later. A
-// Durable Object removes this race entirely if it's ever worth the added
-// wrangler.toml + migration + new deploy path this project does not
-// currently have — see the v6 docblock, point 2.
+// ── Circuit breaker (KV-backed) ───────────────────────────────────────────
+// HONEST CAVEAT: read-then-write, not atomic. Two concurrent requests can
+// both read consecutiveFailures=2 and both write back 3 instead of reaching
+// 4 -- a lost update. For a circuit BREAKER (not a hard billing cap) this is
+// low-severity and self-healing: worst case a couple of extra requests
+// reach an already-failing provider before the circuit opens a moment
+// later. A Durable Object removes this race entirely if it's ever worth a
+// new binding + migration this project does not currently have.
 const CIRCUIT_FAIL_THRESHOLD = 3;
 const CIRCUIT_OPEN_MS = 5 * 60 * 1000;
 
@@ -519,7 +563,7 @@ async function isCircuitOpen(env, provider, now = Date.now()) {
   return !!state && state.circuitOpenUntil > now;
 }
 
-/** Schedule with context.waitUntil when available so the KV write never delays the response. */
+/** Schedule with context.waitUntil so the KV write never delays the response. */
 function recordOutcome(context, provider, success) {
   const env = context.env;
   const kv = env?.CES_CHAT_KV;
@@ -528,6 +572,13 @@ function recordOutcome(context, provider, success) {
     const now = Date.now();
     const state = (await kvGetJSON(kv, `tts:circuit:${provider}`)) || { consecutiveFailures: 0, circuitOpenUntil: 0 };
     if (success) {
+      // v8: skip the write entirely when there's nothing to reset. Without
+      // this, a fully healthy system still spent one KV write per request
+      // -- competing with rotation.mjs's own rate-limiter for the same
+      // Free-plan 1,000-writes/day ceiling. Only a genuine RECOVERY (state
+      // had recorded failures) needs to write anything; steady-state
+      // healthy traffic is now read-only here.
+      if (state.consecutiveFailures === 0 && state.circuitOpenUntil === 0) return;
       state.consecutiveFailures = 0;
       state.circuitOpenUntil = 0;
     } else {
@@ -541,26 +592,39 @@ function recordOutcome(context, provider, success) {
   if (typeof context.waitUntil === 'function') {
     context.waitUntil(task);
   } else {
-    // No waitUntil available (shouldn't happen in Pages Functions, but stay
-    // defensive) -- still fire the write, just don't block the response on it.
     task.catch(() => {});
   }
 }
 
-// ── Deepgram lifetime clock (v6, NEW — ports doc §4's Polly pattern) ───────
+// ── Deepgram lifetime clock ────────────────────────────────────────────────
 // Deepgram's $200 signup credit does not renew and expires exactly 1 year
-// after signup regardless of remaining balance (confirmed in
-// api_keys_EMPTY_KEYS_FOR_SECURITY.txt). firstUsedAt is written ONCE, ever,
-// on this tier's first successful call -- a single KV write for the
-// resource's entire lifetime, not a hot per-request counter, so this does
-// not meaningfully add to KV write-rate pressure.
+// after signup regardless of remaining balance. firstUsedAt is written ONCE,
+// ever, on this tier's first successful call -- a single KV write for the
+// resource's entire lifetime, not a hot per-request counter.
 const DEEPGRAM_LIFETIME_MS = 365 * 24 * 60 * 60 * 1000;
-const DEEPGRAM_SAFETY_BUFFER_MS = 5 * 24 * 60 * 60 * 1000; // stop 5 days early, not on the day of
+const DEEPGRAM_SAFETY_BUFFER_MS = 5 * 24 * 60 * 60 * 1000; // stop 5 days early
+
+/**
+ * v8: prefer an explicit DEEPGRAM_SIGNUP_DATE_ISO env override (the real
+ * account-creation date) over inferring it from first proxy use, which can
+ * lag the true signup date by however long this code went undeployed after
+ * the account was created. Falls back to the original write-once
+ * first-use tracking when unset -- fully backward compatible.
+ */
+async function getDeepgramClockStart(env) {
+  const override = env?.DEEPGRAM_SIGNUP_DATE_ISO?.trim?.();
+  if (override) {
+    const parsed = Date.parse(override);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  const state = await kvGetJSON(env?.CES_CHAT_KV, 'tts:deepgram:lifetime');
+  return state?.firstUsedAt ?? null;
+}
 
 async function isDeepgramExpired(env, now = Date.now()) {
-  const state = await kvGetJSON(env?.CES_CHAT_KV, 'tts:deepgram:lifetime');
-  if (!state?.firstUsedAt) return false; // never used yet -- nothing to expire
-  return now >= (state.firstUsedAt + DEEPGRAM_LIFETIME_MS - DEEPGRAM_SAFETY_BUFFER_MS);
+  const clockStart = await getDeepgramClockStart(env);
+  if (!clockStart) return false; // no override, never used yet -- nothing to expire
+  return now >= (clockStart + DEEPGRAM_LIFETIME_MS - DEEPGRAM_SAFETY_BUFFER_MS);
 }
 
 function recordDeepgramFirstUseIfAbsent(context) {
@@ -575,7 +639,7 @@ function recordDeepgramFirstUseIfAbsent(context) {
   else task.catch(() => {});
 }
 
-// ── TIER 1 — ElevenLabs (unchanged endpoint/voice-settings, + v6 speed) ───
+// ── TIER 1 — ElevenLabs ──────────────────────────────────────────────────
 async function fetchElevenTTS(text, apiKey, voiceId, speed, timeoutMs) {
   const url = `${ELEVEN_API_URL}/${voiceId}?output_format=${ELEVEN_OUT_FORMAT}`;
 
@@ -616,7 +680,7 @@ async function fetchElevenTTS(text, apiKey, voiceId, speed, timeoutMs) {
   return { bytes: new Uint8Array(await elRes.arrayBuffer()), contentType: 'audio/mpeg' };
 }
 
-// ── TIER 2 — Deepgram Aura-2, ENGLISH ONLY (unchanged endpoint) ──────────
+// ── TIER 2 — Deepgram Aura-2, ENGLISH ONLY ────────────────────────────────
 async function fetchDeepgramTTS(text, apiKey, timeoutMs) {
   const res = await fetchWithTimeout(DEEPGRAM_SPEAK_URL, {
     method : 'POST',
@@ -644,7 +708,7 @@ async function fetchDeepgramTTS(text, apiKey, timeoutMs) {
   return { bytes: new Uint8Array(await res.arrayBuffer()), contentType: 'audio/mpeg' };
 }
 
-// ── OPT-IN ONLY — Speechmatics TTS (unchanged, real per-character cost) ──
+// ── OPT-IN ONLY — Speechmatics TTS (real per-character cost) ─────────────
 async function fetchSpeechmaticsTTS(text, apiKey, timeoutMs) {
   const url = `${SPEECHMATICS_TTS_URL_BASE}/${SPEECHMATICS_TTS_VOICE}`;
 
@@ -673,18 +737,13 @@ async function fetchSpeechmaticsTTS(text, apiKey, timeoutMs) {
   return { bytes: new Uint8Array(await res.arrayBuffer()), contentType: 'audio/wav' };
 }
 
-// ── FINAL SAFETY NET — Google Translate TTS (unchanged, + v6 speed passthrough) ──
+// ── FINAL SAFETY NET — Google Translate TTS ───────────────────────────────
 async function fetchGoogleTTS(text, lang, speed, timeoutMs) {
   const url = new URL('https://translate.google.com/translate_tts');
   url.searchParams.set('ie',       'UTF-8');
   url.searchParams.set('client',   'tw-ob');
   url.searchParams.set('tl',       lang);
   url.searchParams.set('q',        text);
-  // v6: threads a caller-requested speed through this already-existing param
-  // instead of hardcoding '1' -- default unchanged when speed is unspecified.
-  // gTTS's own accepted range for this undocumented param isn't independently
-  // confirmed; only forwarded when the caller actually asked for something
-  // other than normal speed.
   url.searchParams.set('ttsspeed', speed && speed !== 1.0 ? String(clampSpeed(speed)) : '1');
 
   const res = await fetchWithTimeout(url.toString(), {
@@ -701,11 +760,10 @@ async function fetchGoogleTTS(text, lang, speed, timeoutMs) {
   return { bytes: new Uint8Array(await res.arrayBuffer()), contentType: 'audio/mpeg' };
 }
 
-// ── GROUP 0 — Microsoft Edge TTS (v6, NEW) ─────────────────────────────────
-// See docblock point 1 for the DRM/reliability caveat. Every exit path
-// (success, error, timeout) closes the WebSocket explicitly -- per the
-// architecture doc §15.8, this is the one resource in this file the Workers
-// runtime will not reclaim on its own within an invocation.
+// ── GROUP 0 — Microsoft Edge TTS ────────────────────────────────────────────
+// Every exit path (success, error, timeout) closes the WebSocket explicitly
+// -- the one resource in this file the Workers runtime will not reclaim on
+// its own within an invocation.
 
 /** SHA-256(windows-filetime, rounded down to a 5-min bucket, + public token). */
 async function generateEdgeSecMsGec() {
@@ -724,11 +782,6 @@ function generateEdgeMuid() {
 }
 
 function jsStyleDateString() {
-  // Matches edge-tts reference's date_to_string(): JS Date#toUTCString() is
-  // "Sun, 19 Jul 2026 12:00:00 GMT" -- close enough in every field Microsoft's
-  // parser actually reads (day/month/year/time); the exact "GMT+0000 (...)"
-  // suffix format is cosmetic per the reference implementation's own comment
-  // ("we'll just use UTC and hope for the best").
   return new Date().toUTCString();
 }
 
@@ -759,10 +812,8 @@ function parseEdgeTextFrame(str) {
 /**
  * Parse a binary WS audio frame: [2 bytes big-endian header length N]
  * [N bytes "Key:Value\r\n..." headers][remaining bytes = payload].
- * Standard length-prefixed framing, verified round-trip-correct in this
- * session against hand-constructed synthetic frames (including a >255-byte
- * header case exercising the full two-byte length, not just the trivial
- * single-byte path) -- see chat log.
+ * Re-verified in this pass against hand-constructed synthetic frames,
+ * including a >255-byte header case exercising the full two-byte length.
  */
 function parseEdgeBinaryFrame(buf) {
   if (buf.length < 2) throw new Error('Edge TTS: binary message missing header length');
@@ -805,8 +856,8 @@ async function fetchEdgeTTS(text, lang, genderKey, speed, timeoutMs, budget) {
 
   // fetch()+Upgrade is required (not the bare `new WebSocket(url)` form)
   // specifically because it is the only way to attach the extra
-  // fingerprint headers (User-Agent/Origin/Cookie) below alongside the
-  // upgrade request -- confirmed against Cloudflare's own Workers docs.
+  // fingerprint headers (User-Agent/Origin/Cookie) alongside the upgrade
+  // request -- confirmed against Cloudflare's own Workers docs.
   const upgradeHeaders = {
     Upgrade         : 'websocket',
     'User-Agent'    : EDGE_TTS_USER_AGENT,
@@ -862,7 +913,6 @@ async function fetchEdgeTTS(text, lang, genderKey, speed, timeoutMs, budget) {
               for (const c of audioChunks) { combined.set(c, offset); offset += c.length; }
               finish(resolve, combined);
             }
-            // 'response' / 'turn.start' / 'audio.metadata' -- no action needed.
           } else {
             const raw = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : new Uint8Array(event.data?.buffer ?? event.data);
             const { headers, payload } = parseEdgeBinaryFrame(raw);
@@ -891,7 +941,7 @@ async function fetchEdgeTTS(text, lang, genderKey, speed, timeoutMs, budget) {
         finish(reject, Object.assign(new Error('Edge TTS: WebSocket error'), { category: 'websocket error', httpStatus: 'network' }));
       });
 
-      const wordBoundary = false; // no need for word/sentence timing metadata here
+      const wordBoundary = false;
       ws.send(
         `X-Timestamp:${jsStyleDateString()}\r\n` +
         'Content-Type:application/json; charset=utf-8\r\n' +
@@ -916,7 +966,18 @@ async function fetchEdgeTTS(text, lang, genderKey, speed, timeoutMs, budget) {
   }
 }
 
-// ── Shared cascade engine (v6, NEW — one copy, used by GET and POST) ──────
+// Test-only exports. Not used by any request-handling path -- these give
+// the Edge TTS wire-protocol logic (the one thing in this file that cannot
+// be verified against the real network from this environment) permanent
+// regression coverage rather than a one-time, throwaway check.
+export {
+  parseEdgeTextFrame as __parseEdgeTextFrameForTests,
+  parseEdgeBinaryFrame as __parseEdgeBinaryFrameForTests,
+  escapeSsmlText as __escapeSsmlTextForTests,
+  generateEdgeSecMsGec as __generateEdgeSecMsGecForTests,
+};
+
+// ── Shared cascade engine (one copy, used by GET and POST) ────────────────
 /**
  * Runs Tier 0 -> Tier 1 -> Tier 2 -> opt-in Speechmatics -> Tier 3 in order,
  * honoring IS_DEV/circuit breakers/lifetime clocks, and returns whichever
@@ -931,14 +992,14 @@ async function runTtsCascade({ text, lang, genderKey, speed, env, context, timeo
   const deepgram = buildKeyRing(env, DEEPGRAM_BASE_NAME);
   const speechmaticsEnabled = (env?.ENABLE_SPEECHMATICS_TTS || '').trim().toLowerCase() === 'true';
   const speechmatics = speechmaticsEnabled ? buildKeyRing(env, SPEECHMATICS_BASE_NAME) : { keys: [] };
-  const edgeEnabled = (env?.EDGE_TTS_ENABLED || '').trim().toLowerCase() === 'true'; // default OFF -- see docblock point 1
+  const edgeEnabled = (env?.EDGE_TTS_ENABLED || '').trim().toLowerCase() === 'true';
 
   const keyCountHeaders = {
     'X-TTS-Eleven-KeysAvailable'  : String(eleven.keys.length),
     'X-TTS-Deepgram-KeysAvailable': String(deepgram.keys.length),
   };
 
-  const attempts = []; // for logging + X-TTS-Fallback-Reason
+  const attempts = [];
 
   // TIER 0 — Edge TTS (always runs when enabled, even in dev — no quota to protect)
   if (edgeEnabled && !(await isCircuitOpen(env, 'edge_tts'))) {
@@ -1017,7 +1078,7 @@ async function runTtsCascade({ text, lang, genderKey, speed, env, context, timeo
     } else {
       try {
         const { response: result, keyIndex, keysTried } = await rotateAndFetchTTS(
-          { i: 0 }, speechmatics.keys,
+          ringPointers.speechmatics, speechmatics.keys,
           (key) => fetchSpeechmaticsTTS(text, key, timeouts.tier2),
           'Speechmatics', budget,
         );
@@ -1036,7 +1097,7 @@ async function runTtsCascade({ text, lang, genderKey, speed, env, context, timeo
     attempts.push({ tier: '1.5', provider: 'speechmatics', reason: 'skipped: IS_DEV (real per-character cost)' });
   }
 
-  // TIER 3 — Google Translate TTS (final safety net, always attempted, all langs)
+  // TIER 3 — Google Translate TTS (final safety net, always attempted, all langs, no circuit breaker: nothing to fall back to)
   try {
     const result = await fetchGoogleTTS(text, lang, speed, timeouts.tier3);
     recordOutcome(context, 'gtts', true);
@@ -1058,7 +1119,6 @@ async function runTtsCascade({ text, lang, genderKey, speed, env, context, timeo
 /** Build the shared X-TTS-* diagnostic/degradation headers for a winning result. */
 function buildResultHeaders(result, requestedLang) {
   const { rendered, quality, degraded } = renderedDialectFor(result.provider, requestedLang);
-  const firstAttemptedProvider = result.provider; // if attempts[] is empty, this WAS the first tier tried
   const wasFallback = result.attempts.length > 0;
   const headers = {
     'X-TTS-Engine'             : result.provider,
@@ -1073,12 +1133,9 @@ function buildResultHeaders(result, requestedLang) {
     headers['X-TTS-Fallback-Reason'] = result.attempts.map(a => `${a.provider}:${a.reason}`).join('; ');
   }
   if (degraded) {
-    // ASCII-only separator -- HTTP header values must be Latin-1/ByteString.
-    // The architecture doc's own illustrative header (`ar-EG→MSA`, using
-    // U+2192) throws "character ... greater than 255" if actually set via
-    // the Fetch/Headers API -- caught by this session's integration test
-    // (Test 2/5 below both failed on this before the fix). Confirmed this
-    // was the doc's mistake to begin with, not a transcription error here.
+    // ASCII-only separator — see changelog point 5: a literal U+2192 arrow
+    // in a header value throws at the Fetch/Headers API layer, confirmed
+    // directly in this pass, not just carried over as a claim.
     headers['X-TTS-Dialect-Degraded'] = `${requestedLang}->${rendered}`;
   }
   return headers;
@@ -1090,29 +1147,48 @@ function logTtsEvent(fields) {
   } catch (_e) { /* logging must never break the response */ }
 }
 
+function rateLimitOpts(env) {
+  return {
+    windowSeconds: intFromEnv(env, 'TTS_RATE_LIMIT_WINDOW_SECONDS', 60),
+    maxPerWindow : intFromEnv(env, 'TTS_RATE_LIMIT_MAX_PER_WINDOW', 40),
+  };
+}
+
+function resolveTimeouts(env) {
+  return {
+    tier0: intFromEnv(env, 'TTS_TIER0_TIMEOUT_MS', 4000),
+    tier1: intFromEnv(env, 'TTS_TIER1_TIMEOUT_MS', 6000),
+    tier2: intFromEnv(env, 'TTS_TIER2_TIMEOUT_MS', 6000),
+    tier3: intFromEnv(env, 'TTS_GTTS_TIMEOUT_MS', 10000),
+  };
+}
+
 // ── GET handler (existing contract, byte-for-byte preserved) ──────────────
 export async function onRequestGet(context) {
   const { request, env } = context;
-  const url              = new URL(request.url);
-  const rawText          = url.searchParams.get('text') || '';
-  const langParam        = (url.searchParams.get('lang')  || 'ar-EG').trim();
-  const voiceParam       = (url.searchParams.get('voice') || 'female').toLowerCase().trim();
-  // v6, additive: optional -- absent entirely from every existing caller,
-  // so omitting it preserves identical behavior to v5.
-  const speedParam       = url.searchParams.has('speed') ? Number(url.searchParams.get('speed')) : 1.0;
+  const requestId = crypto.randomUUID();
+  const t0 = Date.now();
+  const url = new URL(request.url);
+
+  const rawText    = url.searchParams.get('text') || '';
+  const langParam  = (url.searchParams.get('lang')  || 'ar-EG').trim();
+  const voiceParam = (url.searchParams.get('voice') || 'female').toLowerCase().trim();
+  const speedParam = url.searchParams.has('speed') ? Number(url.searchParams.get('speed')) : 1.0;
 
   const text = preprocessText(rawText);
   if (!text) {
-    return jsonResponse(400, { error: 'Missing or empty text parameter.' }, request);
+    return jsonResponse(400, { error: 'Missing or empty text parameter.', requestId }, request, { 'X-TTS-Request-Id': requestId });
   }
   if (text.length > MAX_TEXT_LENGTH) {
-    return jsonResponse(400, { error: `Text exceeds ${MAX_TEXT_LENGTH}-char limit. Caller must pre-chunk.` }, request);
+    return jsonResponse(400, { error: `Text exceeds ${MAX_TEXT_LENGTH}-char limit. Caller must pre-chunk.`, requestId }, request, { 'X-TTS-Request-Id': requestId });
   }
 
   const clientIp = request.headers.get('CF-Connecting-IP') || 'unknown';
-  const rateCheck = await checkRateLimit(env, clientIp);
-  if (rateCheck.limited) {
-    return jsonResponse(429, { error: 'Too many TTS requests too quickly. Please wait a moment and try again.' }, request);
+  const rateCheck = await checkRateLimit(env, `tts:${clientIp}`, rateLimitOpts(env));
+  if (rateCheck?.limited) {
+    return jsonResponse(429, { error: 'Too many TTS requests too quickly. Please wait a moment and try again.', requestId }, request, {
+      'X-TTS-Request-Id': requestId, 'X-TTS-Latency-Ms': String(Date.now() - t0),
+    });
   }
 
   const safeLang  = ALLOWED_LANGS.has(langParam) ? langParam : 'ar-EG';
@@ -1121,35 +1197,41 @@ export async function onRequestGet(context) {
   try {
     const result = await runTtsCascade({
       text, lang: safeLang, genderKey, speed: speedParam, env, context,
-      timeouts: { tier0: 2500, tier1: 4000, tier2: 4000, tier3: 6000 },
+      timeouts: resolveTimeouts(env),
     });
-    logTtsEvent({ route: 'GET', lang: safeLang, provider: result.provider, fallback: result.attempts.length > 0, attempts: result.attempts, budgetRemaining: result.budgetRemaining });
+    logTtsEvent({ requestId, route: 'GET', lang: safeLang, provider: result.provider, fallback: result.attempts.length > 0, attempts: result.attempts, budgetRemaining: result.budgetRemaining });
     return new Response(result.bytes, {
       status: 200,
       headers: {
         'Content-Type' : result.contentType,
         'Cache-Control': 'public, max-age=3600',
+        'X-TTS-Request-Id' : requestId,
+        'X-TTS-Latency-Ms' : String(Date.now() - t0),
         ...buildResultHeaders(result, safeLang),
         ...getCorsHeaders(request),
       },
     });
   } catch (finalErr) {
-    logTtsEvent({ route: 'GET', lang: safeLang, provider: null, fallback: true, attempts: finalErr.attempts, error: finalErr.message });
+    logTtsEvent({ requestId, route: 'GET', lang: safeLang, provider: null, fallback: true, attempts: finalErr.attempts, error: finalErr.message });
     return jsonResponse(502, {
       error: 'TTS service unreachable.',
+      requestId,
       attempts: finalErr.attempts,
-    }, request, finalErr.keyCountHeaders);
+    }, request, { ...finalErr.keyCountHeaders, 'X-TTS-Request-Id': requestId, 'X-TTS-Latency-Ms': String(Date.now() - t0) });
   }
 }
 
-// ── POST handler (v6, NEW — richer JSON interface, additive only) ────────
+// ── POST handler (richer JSON interface, additive only — see changelog point 12) ──
 export async function onRequestPost(context) {
   const { request, env } = context;
+  const requestId = crypto.randomUUID();
+  const t0 = Date.now();
+
   let body;
   try {
     body = await request.json();
   } catch (_e) {
-    return jsonResponse(400, { error: 'Malformed JSON body.' }, request);
+    return jsonResponse(400, { error: 'Malformed JSON body.', requestId }, request, { 'X-TTS-Request-Id': requestId });
   }
 
   const rawText   = typeof body.text === 'string' ? body.text : '';
@@ -1160,16 +1242,18 @@ export async function onRequestPost(context) {
 
   const text = preprocessText(rawText);
   if (!text) {
-    return jsonResponse(400, { error: 'Missing or empty "text" field.' }, request);
+    return jsonResponse(400, { error: 'Missing or empty "text" field.', requestId }, request, { 'X-TTS-Request-Id': requestId });
   }
   if (text.length > MAX_TEXT_LENGTH) {
-    return jsonResponse(400, { error: `Text exceeds ${MAX_TEXT_LENGTH}-char limit. Caller must pre-chunk.` }, request);
+    return jsonResponse(400, { error: `Text exceeds ${MAX_TEXT_LENGTH}-char limit. Caller must pre-chunk.`, requestId }, request, { 'X-TTS-Request-Id': requestId });
   }
 
   const clientIp = request.headers.get('CF-Connecting-IP') || 'unknown';
-  const rateCheck = await checkRateLimit(env, clientIp);
-  if (rateCheck.limited) {
-    return jsonResponse(429, { error: 'Too many TTS requests too quickly. Please wait a moment and try again.' }, request);
+  const rateCheck = await checkRateLimit(env, `tts:${clientIp}`, rateLimitOpts(env));
+  if (rateCheck?.limited) {
+    return jsonResponse(429, { error: 'Too many TTS requests too quickly. Please wait a moment and try again.', requestId }, request, {
+      'X-TTS-Request-Id': requestId, 'X-TTS-Latency-Ms': String(Date.now() - t0),
+    });
   }
 
   const safeLang  = ALLOWED_LANGS.has(langParam) ? langParam : 'ar-EG';
@@ -1178,14 +1262,10 @@ export async function onRequestPost(context) {
   try {
     const result = await runTtsCascade({
       text, lang: safeLang, genderKey, speed: speedParam, env, context,
-      timeouts: { tier0: 2500, tier1: 4000, tier2: 4000, tier3: 6000 },
+      timeouts: resolveTimeouts(env),
     });
-    logTtsEvent({ route: 'POST', lang: safeLang, provider: result.provider, fallback: result.attempts.length > 0, attempts: result.attempts, budgetRemaining: result.budgetRemaining });
+    logTtsEvent({ requestId, route: 'POST', lang: safeLang, provider: result.provider, fallback: result.attempts.length > 0, attempts: result.attempts, budgetRemaining: result.budgetRemaining });
 
-    // format passthrough is a hint, not a transcode -- see docblock: no audio
-    // transcoding library/CPU budget exists here, so the response always
-    // stamps the ACTUAL format the winning tier produced rather than lying
-    // about a requested one it did not deliver.
     const formatHeader = formatParam !== 'mp3' && !result.contentType.includes(formatParam)
       ? { 'X-TTS-Format-Note': `requested "${formatParam}", actual output is ${result.contentType}` }
       : {};
@@ -1195,22 +1275,25 @@ export async function onRequestPost(context) {
       headers: {
         'Content-Type' : result.contentType,
         'Cache-Control': 'public, max-age=3600',
+        'X-TTS-Request-Id' : requestId,
+        'X-TTS-Latency-Ms' : String(Date.now() - t0),
         ...buildResultHeaders(result, safeLang),
         ...formatHeader,
         ...getCorsHeaders(request),
       },
     });
   } catch (finalErr) {
-    logTtsEvent({ route: 'POST', lang: safeLang, provider: null, fallback: true, attempts: finalErr.attempts, error: finalErr.message });
+    logTtsEvent({ requestId, route: 'POST', lang: safeLang, provider: null, fallback: true, attempts: finalErr.attempts, error: finalErr.message });
     return jsonResponse(503, {
       error: 'All TTS providers unavailable',
+      requestId,
       tiers_attempted: finalErr.attempts,
       retry_after: 60,
-    }, request, finalErr.keyCountHeaders);
+    }, request, { ...finalErr.keyCountHeaders, 'X-TTS-Request-Id': requestId, 'X-TTS-Latency-Ms': String(Date.now() - t0) });
   }
 }
 
-// ── OPTIONS preflight (unchanged) ──────────────────────────────────────────
+// ── OPTIONS preflight ──────────────────────────────────────────────────────
 export async function onRequestOptions({ request }) {
   return new Response(null, { status: 204, headers: getCorsHeaders(request) });
 }

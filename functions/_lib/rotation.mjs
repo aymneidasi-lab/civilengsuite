@@ -109,7 +109,19 @@ export async function fetchWithTimeout(url, init, timeoutMs) {
 // visitors takes priority over strict enforcement for a sales chatbot.
 //
 // `key` is the caller-supplied identifier (IP via CF-Connecting-IP).
-export async function checkRateLimit(env, key) {
+//
+// `opts` (added for tts.js, v7 -- optional, backward compatible): a route
+// whose traffic shape is "many small calls per one user action" (e.g. a
+// single spoken chat reply needing several sequential /api/tts calls,
+// since MAX_TEXT_LENGTH forces the caller to pre-chunk) doesn't fit the
+// same window/threshold tuned for "one call per user action" (a chat
+// message, a vision request). Omitting opts reproduces the exact prior
+// hardcoded behavior (60s / 8 requests) -- chat.js and vision.js's
+// existing two-argument calls are unaffected by this. Only the KV-fallback
+// branch reads opts; the native RATE_LIMITER binding's threshold is set in
+// wrangler config/dashboard and cannot be overridden from a call site --
+// a genuinely separate allowance there needs its own binding.
+export async function checkRateLimit(env, key, opts = {}) {
   if (env.RATE_LIMITER) {
     try {
       const { success } = await env.RATE_LIMITER.limit({ key });
@@ -122,15 +134,15 @@ export async function checkRateLimit(env, key) {
 
   if (env.CES_CHAT_KV) {
     try {
-      const WINDOW_SECONDS = 60;
-      const MAX_PER_WINDOW = 8; // ~1 action every 7.5s sustained, generous for one real user
-      const bucket = Math.floor(Date.now() / 1000 / WINDOW_SECONDS);
+      const windowSeconds = opts.windowSeconds ?? 60;
+      const maxPerWindow  = opts.maxPerWindow  ?? 8; // ~1 action every 7.5s sustained, generous for one real user
+      const bucket = Math.floor(Date.now() / 1000 / windowSeconds);
       const kvKey = `rl:${key}:${bucket}`;
       const current = parseInt((await env.CES_CHAT_KV.get(kvKey)) || '0', 10);
-      if (current >= MAX_PER_WINDOW) {
+      if (current >= maxPerWindow) {
         return { limited: true, mechanism: 'kv' };
       }
-      await env.CES_CHAT_KV.put(kvKey, String(current + 1), { expirationTtl: WINDOW_SECONDS * 2 });
+      await env.CES_CHAT_KV.put(kvKey, String(current + 1), { expirationTtl: windowSeconds * 2 });
       return { limited: false, mechanism: 'kv' };
     } catch (err) {
       console.error('[rotation.mjs] CES_CHAT_KV error (failing open):', err.message);
