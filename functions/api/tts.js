@@ -188,6 +188,145 @@
  *      money decision for a human, not a default this file should silently
  *      change.
  *
+ * ── HOW v10 GOT HERE ─────────────────────────────────────────────────────────
+ * Requested: a strict 4-tier priority hierarchy — (1) recurring-monthly
+ * default service until exhausted, (2) Google TTS as the unlimited
+ * continuous provider, (3) one-time/welcome-quota reserve triggered ONLY by
+ * Tier-2 429/outage, (4) a final fallback that cannot itself fail. This
+ * REVERSES the v9-confirmed rule ("recurring-quota providers rank above
+ * one-time-trial providers") for Deepgram specifically — stated plainly,
+ * not silently, because v9 point 1 explicitly locked that ordering in one
+ * revision ago. The reversal is deliberate and, on inspection, the more
+ * defensible resource policy: v9's order spent Deepgram's non-renewing
+ * one-time credit immediately on every Tier-1 miss, ahead of the free-
+ * unlimited gTTS tier — burning an irreplaceable resource before a
+ * replaceable one. v10 spends the free/unlimited tier first and holds the
+ * one-time credit in reserve for when even that is degraded. "Google TTS"
+ * here means the gTTS/Google Translate endpoint already implemented as the
+ * old Tier 3 (fetchGoogleTTS) — confirmed against chat.js's own developer-
+ * mode text, which separately lists "Google Cloud Text-to-Speech (not
+ * Translate)" as a NEVER-integrated alternative requiring GOOGLE_TTS_API_KEY;
+ * no such key or client exists anywhere in this file, and the official
+ * product is quota/billing-bound, contradicting the "unlimited, no quota"
+ * requirement. Per-item:
+ *
+ *   1. [RE-ARCHITECTURE] Cascade reordered: Group 0 (Edge TTS, unchanged,
+ *      opt-in, off by default) -> Tier 1 (ElevenLabs) -> Tier 2 (gTTS,
+ *      PROMOTED from old Tier 3) -> Tier 3 (Deepgram, then opt-in
+ *      Speechmatics — DEMOTED from old Tier 2, now conditionally gated) ->
+ *      Tier 4 (new — guaranteed local fallback). PROVIDER_TIERS relabeled
+ *      to match; quotaModel gains 'always-available-local' for Tier 4.
+ *   2. [ADDED] Tier 1 monthly-exhaustion cache. Previously every request
+ *      re-attempted ElevenLabs even after a confirmed quota_exceeded body,
+ *      paying a full round trip (and, with N keys all exhausted, N round
+ *      trips) before falling through. isElevenLabsMonthlyExhausted() now
+ *      short-circuits straight to Tier 2 once genuine exhaustion is seen,
+ *      via a KV flag namespaced `tts:elevenlabs:quota:<UTC YYYY-MM>` — the
+ *      calendar-month key means it self-clears at the next month boundary
+ *      with no cron/reset code needed (mirrors the Deepgram lifetime clock's
+ *      existing KV-flag pattern, one more read, no new binding). Gated
+ *      strictly on a BODY-CONFIRMED quota signal (see point 3) — never on a
+ *      bare status code — so one transient failure can't wrongly blacklist
+ *      the tier for the rest of the month. Manual remedy if the account is
+ *      topped up or upgraded mid-month: delete that KV key from CES_CHAT_KV
+ *      via the dashboard to force an immediate retry; otherwise it clears
+ *      itself at the next UTC month rollover.
+ *   3. [CORRECTION, sourced] fetchElevenTTS's fallback hint mislabeled bare
+ *      HTTP 429 as "ElevenLabs quota exceeded". Checked against ElevenLabs'
+ *      own current error docs (elevenlabs.io/docs/eleven-api/resources/
+ *      errors; help.elevenlabs.io API-Error-Code-429): 429 means
+ *      rate_limit_exceeded, concurrent_limit_exceeded, or system_busy — all
+ *      transient, all retryable, NONE of them quota exhaustion. The real
+ *      quota signal is HTTP 401 with `detail.status === "quota_exceeded"`
+ *      (confirmed against ElevenLabs' own docs and independently against a
+ *      live user-reported 401 body in the wild). This distinction is now
+ *      load-bearing, not cosmetic: point 2's monthly cache would otherwise
+ *      blacklist ElevenLabs for a month over one concurrency blip. Fixed:
+ *      the 429 hint now names it correctly as a transient limit; only a
+ *      body-confirmed quota/credit message (readErrorBody's quotaMessage)
+ *      sets the new quotaConfirmed flag that feeds the monthly cache. Either
+ *      failure mode still fails over to Tier 2 for THIS request — only the
+ *      month-long cache write is gated on the stricter signal.
+ *   4. [FIX] fetchGoogleTTS previously threw a bare Error with no
+ *      httpStatus/category — every other provider function in this file
+ *      sets both. Harmless while gTTS was the unconditional final tier;
+ *      load-bearing now, because Tier 3's trigger condition (429 or outage)
+ *      and the subrequest budget both need to read those fields. Fixed, and
+ *      added: (a) budget.take() — gTTS previously did not draw from the
+ *      shared subrequest budget at all, safe when it ran once per exhausted
+ *      request, not safe now that it runs on every Tier-1 miss; (b) response
+ *      validation — an unofficial, unauthenticated endpoint under automated
+ *      load can return HTTP 200 with an HTML interstitial/anti-abuse page
+ *      instead of audio (this is a documented failure class for scraped
+ *      Google endpoints generally, not something this specific file had
+ *      re-verified against a live request from this sandbox — flagging
+ *      that rather than asserting it). Previously this would have been
+ *      silently served to the browser as "successful" broken audio with no
+ *      fallback triggered. Now checked: Content-Type must contain "audio",
+ *      and the body must clear a minimum plausible byte floor, or it's
+ *      treated as a failure and handed to the same classification as any
+ *      other gTTS error.
+ *   5. [ADDED] isOutageOrRateLimited(err) — the single predicate gating
+ *      Tier 3: true for HTTP 429, HTTP 5xx, or the 'network' sentinel
+ *      (timeout/DNS/connection-level failures, the same sentinel
+ *      rotateAndFetchTTS and fetchEdgeTTS already use). For gTTS
+ *      specifically — keyless, unauthenticated, no request-shape the
+ *      caller controls beyond `q`/`tl` — this is close to its entire
+ *      realistic failure surface; there is no quota/auth-style failure mode
+ *      for this endpoint the way there is for ElevenLabs. Stated plainly:
+ *      the condition is implemented exactly as specified, not loosened to
+ *      "any gTTS failure", even though in practice those two are nearly the
+ *      same set for this particular provider.
+ *   6. [ADDED] Tier 2 (gTTS) now participates in the KV circuit breaker
+ *      (isCircuitOpen/recordOutcome, same mechanism, provider key 'gtts').
+ *      Not applicable under v9 ("no circuit breaker: nothing to fall back
+ *      to" — the old Tier-3-final comment, now removed because it's no
+ *      longer true). A known-bad gTTS is now skipped outright rather than
+ *      re-timing-out on every request, and — same as any circuit-open tier
+ *      elsewhere in this file — that itself counts as satisfying point 5's
+ *      condition, so Tier 3 still gets a chance while the circuit is open.
+ *   7. [ADDED] Tier 4 — runFinalFallback(): tries one best-effort KV read
+ *      (env.CES_CHAT_KV key `tts:tier4:cached_audio`, operator-populated
+ *      `{base64, contentType}`, satisfies the spec's "cached default audio"
+ *      half) and, on any miss/error/empty decode, falls through to a
+ *      locally generated, dependency-free silent 16-bit PCM WAV (satisfies
+ *      the "silent response" half). The WAV is built once per isolate
+ *      (module-scope cache, same reuse pattern as ringPointers) and costs a
+ *      DataView write over ~13KB, not a network call — genuinely
+ *      sub-millisecond CPU time, unlike any tier before it. This path
+ *      cannot throw barring a runtime-level failure; runTtsCascade's
+ *      contract changes accordingly (point 8).
+ *   8. [BEHAVIOR CHANGE] runTtsCascade no longer throws on the expected
+ *      "every network tier failed" path — Tier 4 always resolves it. The
+ *      GET/POST 502/503 catch blocks are retained as defense-in-depth for
+ *      genuinely unexpected internal errors (a bug, not a provider outage),
+ *      and are now expected to be effectively unreachable in normal
+ *      operation rather than a routine "everything's down" outcome.
+ *   9. [BREAKING — ENV VAR RENAME] Timeout env vars renamed to match the new
+ *      tier numbers: TTS_TIER2_TIMEOUT_MS now governs gTTS (was
+ *      TTS_GTTS_TIMEOUT_MS, default lowered 10000ms -> 7000ms — see prose
+ *      below); TTS_TIER3_TIMEOUT_MS now governs Deepgram/Speechmatics (was
+ *      TTS_TIER2_TIMEOUT_MS, default unchanged at 6000ms). Any deployment
+ *      with these set to non-default values in the Cloudflare dashboard
+ *      needs those values moved to the new names or they silently revert to
+ *      default on this deploy. The 10000ms -> 7000ms default change on the
+ *      gTTS slot is deliberate, not cosmetic: v9's comment justified 10s
+ *      specifically because gTTS was the final tier ("a late success beats
+ *      an early failure" — nothing else to try, so wait it out). That
+ *      reasoning no longer holds now that Tier 3 and Tier 4 exist behind
+ *      it; a long hang on Tier 2 now delays reaching them for no benefit.
+ *  10. [RISK, stated for the record — see also the delivered risk analysis]
+ *      Promoting gTTS to the primary continuous tier concentrates far more
+ *      traffic onto an unofficial, unauthenticated, no-SLA endpoint than it
+ *      carried as a last resort. Cloudflare Workers egress IPs are shared
+ *      across unrelated tenants; rate-limiting Google applies to that
+ *      shared IP space in response to OTHER customers' traffic is
+ *      indistinguishable, from this code's position, from rate-limiting
+ *      caused by this project's own volume. This is a real dependency
+ *      concentration risk inherent to the requested reordering, not
+ *      something this revision can engineer away — it is exactly why Tier 3
+ *      and Tier 4 now matter architecturally rather than being decorative.
+ *
  * ── SETUP ─────────────────────────────────────────────────────────────────
  *   ELEVEN_API_KEY(_1..12), DEEPGRAM_API_KEY(_1..12) — case-insensitive.
  *   Optional: ELEVEN_VOICE_ID_F / ELEVEN_VOICE_ID_M
