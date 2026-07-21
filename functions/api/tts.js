@@ -342,22 +342,34 @@
  *   Optional, all env-overridable, defaults shown:
  *     TTS_TIER0_TIMEOUT_MS=4000   (Edge TTS handshake+stream)
  *     TTS_TIER1_TIMEOUT_MS=6000   (ElevenLabs)
- *     TTS_TIER2_TIMEOUT_MS=6000   (Deepgram / opt-in Speechmatics)
- *     TTS_GTTS_TIMEOUT_MS=10000   (last resort — no fallback after this,
- *                                  so failing fast has no value; a late
- *                                  success beats an early failure)
+ *     TTS_TIER2_TIMEOUT_MS=7000   (gTTS — v10 RENAME, was TTS_GTTS_TIMEOUT_MS;
+ *                                  default also lowered from 10000, see v10
+ *                                  point 9 — no longer the last tier, so a
+ *                                  long hang here just delays Tier 3/4)
+ *     TTS_TIER3_TIMEOUT_MS=6000   (Deepgram / opt-in Speechmatics — v10
+ *                                  RENAME, was TTS_TIER2_TIMEOUT_MS)
  *     TTS_RATE_LIMIT_WINDOW_SECONDS=60
  *     TTS_RATE_LIMIT_MAX_PER_WINDOW=40
+ *   v10, optional, no new binding: env.CES_CHAT_KV key
+ *     `tts:tier4:cached_audio` = JSON {"base64":"<audio bytes>",
+ *     "contentType":"audio/mpeg"} — operator-populated "cached default
+ *     audio" override for Tier 4. Unset is fully supported and is the
+ *     default: Tier 4 then serves a generated silent WAV, never a failure.
  *   Reused, no new binding beyond what chat.js/vision.js already need:
- *     env.CES_CHAT_KV (rate limiter, circuit breaker, Deepgram lifetime clock)
+ *     env.CES_CHAT_KV (rate limiter, circuit breakers incl. new 'gtts' key,
+ *     Deepgram lifetime clock, v10: ElevenLabs monthly-exhaustion cache,
+ *     v10: Tier 4 cached-audio override)
  *   Requires the v7+ rotation.mjs (checkRateLimit's third `opts` argument).
  *
  * ── RESPONSE HEADERS ─────────────────────────────────────────────────────
  *   X-TTS-Engine, X-TTS-Voice, X-TTS-KeyIndex/KeysTried, X-TTS-*-KeysAvailable
- *   X-TTS-Provider-Official  : "true" | "false" (Edge TTS and gTTS are unofficial)
+ *   X-TTS-Provider-Official  : "true" | "false" (Edge TTS, gTTS, and the v10
+ *                              Tier-4 fallback are all unofficial/local)
  *   X-TTS-Dialect-Requested / X-TTS-Dialect-Rendered / X-TTS-Quality-Score
  *   X-TTS-Fallback / X-TTS-Fallback-Reason
  *   X-TTS-Dialect-Degraded   : ASCII "->" only — see point 5
+ *   X-TTS-Guaranteed-Fallback : "true", v10, present ONLY when Tier 4 served
+ *                               the response — the signal worth alerting on
  *   X-TTS-Request-Id, X-TTS-Latency-Ms : every response
  *
  * ── CSP NOTE ───────────────────────────────────────────────────────────────
@@ -513,6 +525,12 @@ function renderedDialectFor(provider, requestedLang) {
   if (provider === 'deepgram' || provider === 'speechmatics') {
     return { rendered: requestedLang, quality: 'neural', degraded: false };
   }
+  // v10: Tier 4 guaranteed fallback -- explicit case so this doesn't fall
+  // into the gTTS/MSA branch below and get mislabeled "robotic" with an
+  // Arabic-specific rendering note that doesn't apply to silence.
+  if (provider === 'fallback_final') {
+    return { rendered: 'silent', quality: 'silent', degraded: true };
+  }
   // gTTS — MSA only, robotic.
   return isArabic
     ? { rendered: 'ar (MSA)', quality: 'robotic', degraded: true }
@@ -667,14 +685,14 @@ const ringPointers = {
   speechmatics: { i: 0 },
 };
 
-// ── Provider tier registry (v9) ────────────────────────────────────────────
+// ── Provider tier registry (v10) ───────────────────────────────────────────
 // Single source of truth for the diagnostic `tier` label every
 // attempts.push() below reports. Execution order in runTtsCascade is NOT
-// driven by this table (the cascade is a fixed sequence of if-blocks, same
-// as v8) -- this exists so the reported label can never drift out of sync
-// with real call order the way the hand-typed '1.5' literal did for
-// Speechmatics (it executes after Tier 2, but was labeled as if it ran
-// between Tier 1 and 2 -- see v9 changelog point 2).
+// driven by this table (the cascade is a fixed sequence of if-blocks) --
+// this exists so the reported label can never drift out of sync with real
+// call order the way the hand-typed '1.5' literal did for Speechmatics in
+// v8 (see v9 changelog point 2 -- the exact failure mode this table exists
+// to prevent).
 //
 // quotaModel documents the business rule behind the ordering:
 //   'unlimited-unofficial'      : no publisher-enforced quota (Edge TTS, gTTS)
@@ -685,16 +703,23 @@ const ringPointers = {
 //   'metered-recurring-partial' : free monthly allowance, then real billing
 //                                 on overage if a card is on file
 //                                 (Speechmatics: 480 free min/mo)
-// Providers with 'recurring-monthly' or 'unlimited-unofficial' models are
-// intentionally ordered ahead of 'one-time-trial' ones; a 'metered-*'
-// provider is opt-in and its position is a cost decision, not a quota one --
-// see v9 changelog point 5 for why that was not reordered here.
+//   'always-available-local'    : v10, Tier 4 only -- no network dependency,
+//                                 cannot be exhausted or rate-limited
+//
+// v10 REORDERING (see changelog "HOW v10 GOT HERE" for the full rationale
+// and the explicit reversal of v9 point 1's "recurring/unlimited ranks
+// above one-time-trial" rule as it applied to Deepgram): gTTS promoted from
+// old Tier 3 (final safety net) to Tier 2 (primary continuous fallback,
+// all languages). Deepgram/Speechmatics demoted from old Tier 2/2.5 to
+// Tier 3, now an emergency reserve gated on isOutageOrRateLimited(tier2Err)
+// rather than run unconditionally on every Tier-1 miss. Tier 4 is new.
 const PROVIDER_TIERS = Object.freeze({
-  edge_tts    : { label: '0',   quotaModel: 'unlimited-unofficial' },
-  elevenlabs  : { label: '1',   quotaModel: 'recurring-monthly' },
-  deepgram    : { label: '2',   quotaModel: 'one-time-trial' },
-  speechmatics: { label: '2.5', quotaModel: 'metered-recurring-partial' },
-  gtts        : { label: '3',   quotaModel: 'unlimited-unofficial' },
+  edge_tts      : { label: '0 (opt-in, pre-Tier-1)', quotaModel: 'unlimited-unofficial' },
+  elevenlabs    : { label: '1',   quotaModel: 'recurring-monthly' },
+  gtts          : { label: '2',   quotaModel: 'unlimited-unofficial' },
+  deepgram      : { label: '3',   quotaModel: 'one-time-trial' },
+  speechmatics  : { label: '3.5', quotaModel: 'metered-recurring-partial' },
+  fallback_final: { label: '4',   quotaModel: 'always-available-local' },
 });
 
 /**
@@ -734,7 +759,18 @@ async function rotateAndFetchTTS(pointerState, keys, singleFetchFn, providerLabe
       const response = await singleFetchFn(keys[idx]);
       return { response, keyIndex: idx, keysTried: step + 1 };
     } catch (err) {
-      attemptErrors.push({ idx, category: err.category || err.message, httpStatus: err.httpStatus });
+      // v10 [BUG FIX, found by executing the test harness, not by review]:
+      // this previously captured only category/httpStatus. The final
+      // aggregate error below is a brand-new Error object, so any OTHER
+      // property a singleFetchFn sets on its per-key error (e.g.
+      // fetchElevenTTS's quotaConfirmed) was silently dropped -- meaning
+      // Tier 1's monthly-exhaustion cache could never fire for a key ring
+      // of any size, since runTtsCascade only ever sees this generic
+      // wrapper's error, never the original. Now the last attempt's raw
+      // error is kept and quotaConfirmed is forwarded generically (this
+      // function is shared by ElevenLabs/Deepgram/Speechmatics rings; the
+      // field is simply undefined/falsy for the latter two, harmless).
+      attemptErrors.push({ idx, category: err.category || err.message, httpStatus: err.httpStatus, raw: err });
 
       const isKeySpecific =
         /quota exceeded/i.test(err.category || '') ||
@@ -750,6 +786,7 @@ async function rotateAndFetchTTS(pointerState, keys, singleFetchFn, providerLabe
     ? `${attemptErrors.length} keys exhausted (last: ${last?.category})`
     : (last?.category || 'unknown');
   err.httpStatus = last?.httpStatus ?? 'network';
+  err.quotaConfirmed = last?.raw?.quotaConfirmed;
   throw err;
 }
 
@@ -770,10 +807,13 @@ async function kvGetJSON(kv, key) {
     return null;
   }
 }
-async function kvPutJSON(kv, key, value) {
+// v10: optional third arg (e.g. { expirationTtl: seconds }) -- passed
+// straight through to the KV binding's own put() options. Omitting it
+// reproduces the exact prior behavior; existing call sites are unaffected.
+async function kvPutJSON(kv, key, value, opts) {
   if (!kv) return false;
   try {
-    await kv.put(key, JSON.stringify(value));
+    await kv.put(key, JSON.stringify(value), opts);
     return true;
   } catch (_e) {
     return false;
@@ -904,15 +944,33 @@ async function fetchElevenTTS(text, apiKey, voiceId, speed, timeoutMs) {
 
   if (!elRes.ok) {
     const { quotaMessage } = await readErrorBody(elRes);
+    // v10 point 3 [CORRECTION, sourced]: ElevenLabs' own docs (eleven-api/
+    // resources/errors; API-Error-Code-429) document HTTP 429 as
+    // rate_limit_exceeded / concurrent_limit_exceeded / system_busy -- all
+    // transient, none of them quota exhaustion. The real quota signal is
+    // HTTP 401 with body `detail.status === "quota_exceeded"`, which
+    // readErrorBody already parses into quotaMessage (checked first, below,
+    // so a genuine quota-exceeded 401 is never shadowed by the generic
+    // "invalid key" 401 hint). Previously this fallback mislabeled bare 429
+    // as "quota exceeded" -- harmless as a log string alone, but load-bearing
+    // now that quotaConfirmed (not this hint string) gates the new monthly
+    // exhaustion cache below.
     const hint =
       quotaMessage ? `ElevenLabs ${quotaMessage}` :
       elRes.status === 401 ? 'invalid or missing key' :
       elRes.status === 422 ? 'invalid voice_id — check ELEVEN_VOICE_ID_F/M' :
-      elRes.status === 429 ? 'ElevenLabs quota exceeded' :
+      elRes.status === 429 ? 'ElevenLabs rate/concurrency limit (429, transient -- not a quota signal)' :
       `HTTP ${elRes.status}`;
     const err = new Error(`ElevenLabs TTS: ${hint}`);
     err.httpStatus = elRes.status;
     err.category = hint;
+    // v10: true ONLY when readErrorBody found a genuine body-confirmed
+    // quota/credit message -- never inferred from a bare status code. This
+    // is what runTtsCascade's Tier 1 block checks before writing the
+    // monthly-exhaustion KV flag; a bare 429/5xx/network failure still
+    // fails over to Tier 2 for this request but does not blacklist the
+    // tier for the rest of the calendar month.
+    err.quotaConfirmed = !!quotaMessage;
     throw err;
   }
 
@@ -976,8 +1034,30 @@ async function fetchSpeechmaticsTTS(text, apiKey, timeoutMs) {
   return { bytes: new Uint8Array(await res.arrayBuffer()), contentType: 'audio/wav' };
 }
 
-// ── FINAL SAFETY NET — Google Translate TTS ───────────────────────────────
-async function fetchGoogleTTS(text, lang, speed, timeoutMs) {
+// ── TIER 2 — Google Translate TTS (v10: PROMOTED from final safety net) ───
+// v10 point 4 [FIX]: three gaps that were harmless as the unconditional
+// final tier and are load-bearing now that Tier 3's trigger condition reads
+// this function's thrown error: (a) budget.take() was never called here --
+// fine when this ran once per exhausted request, not fine now that it runs
+// on every Tier-1 miss; (b) errors carried no httpStatus/category, so
+// isOutageOrRateLimited() had nothing to classify; (c) no response
+// validation -- an unofficial, unauthenticated endpoint under automated
+// load can return HTTP 200 with an HTML interstitial/anti-abuse page
+// instead of audio (a documented failure class for scraped Google
+// endpoints generally; NOT independently re-verified against a live
+// request from this sandbox, flagged rather than asserted). That would
+// previously have been served to the browser as "successful" broken audio
+// with zero fallback triggered.
+const GTTS_MIN_PLAUSIBLE_BYTES = 256; // shortest real utterance is still >1 audio frame
+
+async function fetchGoogleTTS(text, lang, speed, timeoutMs, budget) {
+  if (budget && !budget.take()) {
+    const err = new Error('gTTS: subrequest budget exhausted');
+    err.category = 'subrequest budget exhausted';
+    err.httpStatus = 'network';
+    throw err;
+  }
+
   const url = new URL('https://translate.google.com/translate_tts');
   url.searchParams.set('ie',       'UTF-8');
   url.searchParams.set('client',   'tw-ob');
@@ -985,18 +1065,47 @@ async function fetchGoogleTTS(text, lang, speed, timeoutMs) {
   url.searchParams.set('q',        text);
   url.searchParams.set('ttsspeed', speed && speed !== 1.0 ? String(clampSpeed(speed)) : '1');
 
-  const res = await fetchWithTimeout(url.toString(), {
-    headers: {
-      'Referer'   : 'https://translate.google.com/',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
-                    'AppleWebKit/537.36 (KHTML, like Gecko) ' +
-                    'Chrome/125.0.0.0 Safari/537.36',
-    },
-    cf: { cacheEverything: true, cacheTtl: 3600 },
-  }, timeoutMs);
+  let res;
+  try {
+    res = await fetchWithTimeout(url.toString(), {
+      headers: {
+        'Referer'   : 'https://translate.google.com/',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
+                      'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+                      'Chrome/125.0.0.0 Safari/537.36',
+      },
+      cf: { cacheEverything: true, cacheTtl: 3600 },
+    }, timeoutMs);
+  } catch (networkErr) {
+    // AbortError (timeout) or any connection-level failure -- no HTTP
+    // status exists yet, so use the same 'network' sentinel as every other
+    // tier's timeout/connection errors in this file.
+    const err = new Error(`gTTS: ${networkErr.name === 'AbortError' ? 'timeout' : networkErr.message}`);
+    err.category = networkErr.name === 'AbortError' ? 'timeout' : 'network error';
+    err.httpStatus = 'network';
+    throw err;
+  }
 
-  if (!res.ok) throw new Error(`gTTS upstream HTTP ${res.status}`);
-  return { bytes: new Uint8Array(await res.arrayBuffer()), contentType: 'audio/mpeg' };
+  if (!res.ok) {
+    const err = new Error(`gTTS upstream HTTP ${res.status}`);
+    err.httpStatus = res.status;
+    err.category = res.status === 429 ? 'rate limited (429)' : `HTTP ${res.status}`;
+    throw err;
+  }
+
+  const contentType = res.headers.get('Content-Type') || '';
+  const bytes = new Uint8Array(await res.arrayBuffer());
+
+  if (!contentType.toLowerCase().includes('audio') || bytes.length < GTTS_MIN_PLAUSIBLE_BYTES) {
+    const err = new Error(
+      `gTTS: HTTP 200 but response is not plausible audio (Content-Type="${contentType}", ${bytes.length} bytes) -- likely an interstitial/anti-abuse page, not synthesized speech`,
+    );
+    err.httpStatus = 200;
+    err.category = 'invalid response body (non-audio 200)';
+    throw err;
+  }
+
+  return { bytes, contentType: 'audio/mpeg' };
 }
 
 // ── GROUP 0 — Microsoft Edge TTS ────────────────────────────────────────────
@@ -1248,11 +1357,147 @@ export {
 // practical in a unit test.
 export { isDeepgramExpired as __isDeepgramExpiredForTests };
 
+// ── v10: Tier 2 -> Tier 3 trigger condition ────────────────────────────────
+// "Triggered only if Tier 2 encounters Rate Limiting (HTTP 429) or temporary
+// service outages" -- implemented literally, not loosened to "any Tier 2
+// failure". True for: HTTP 429; any 5xx; the 'network' sentinel this file
+// already uses for timeouts/connection failures (fetchGoogleTTS, Edge TTS,
+// rotateAndFetchTTS's budget-exhaustion case all set this). An open circuit
+// breaker on 'gtts' is treated the same as a fresh outage, consistent with
+// how every other circuit-broken tier in this file is handled -- it already
+// IS the outcome of repeated recent 429/5xx/network failures.
+function isOutageOrRateLimited(err) {
+  if (!err) return false;
+  if (err.httpStatus === 429) return true;
+  if (err.httpStatus === 'network') return true;
+  if (typeof err.httpStatus === 'number' && err.httpStatus >= 500) return true;
+  return false;
+}
+
+// ── v10: Tier 1 monthly-exhaustion cache ───────────────────────────────────
+// Namespaced by UTC calendar month so the flag self-clears at the next
+// month boundary with no cron/reset code -- same reasoning as the Deepgram
+// lifetime clock's KV-flag pattern, one more read, no new binding. Gated
+// strictly on quotaConfirmed (a real body-confirmed quota/credit signal),
+// never a bare status code -- see fetchElevenTTS's v10 point 3 fix for why
+// that distinction matters here specifically.
+function getElevenLabsQuotaMonthKey(now = new Date()) {
+  return `tts:elevenlabs:quota:${now.toISOString().slice(0, 7)}`; // "YYYY-MM"
+}
+
+async function isElevenLabsMonthlyExhausted(env) {
+  const state = await kvGetJSON(env?.CES_CHAT_KV, getElevenLabsQuotaMonthKey());
+  return !!state?.exhausted;
+}
+
+/** Fire-and-forget, same waitUntil pattern as recordOutcome/recordDeepgramFirstUseIfAbsent. */
+function markElevenLabsMonthlyExhausted(context) {
+  const kv = context.env?.CES_CHAT_KV;
+  if (!kv) return;
+  const key = getElevenLabsQuotaMonthKey();
+  const task = (async () => {
+    const existing = await kvGetJSON(kv, key);
+    if (existing?.exhausted) return; // already recorded this month -- skip the write
+    // 32 days comfortably covers a month + buffer; avoids relying on any
+    // cleanup job to expire stale month-keys.
+    await kvPutJSON(kv, key, { exhausted: true, since: Date.now() }, { expirationTtl: 32 * 24 * 60 * 60 });
+  })();
+  if (typeof context.waitUntil === 'function') context.waitUntil(task);
+  else task.catch(() => {});
+}
+
+// ── TIER 4 — Guaranteed final fallback (v10, new) ──────────────────────────
+// Cannot fail in normal operation: no network call on the guaranteed path,
+// no auth, no quota, no upstream to be down. The one optional step (a KV
+// read for an operator-supplied override) is wrapped fail-open, exactly
+// like every other KV read in this file -- any error there falls straight
+// through to the generated silence rather than propagating.
+const TIER4_KV_CACHE_KEY = 'tts:tier4:cached_audio'; // operator-set: {base64, contentType}
+const TIER4_SILENCE_DURATION_MS = 800;
+const TIER4_SAMPLE_RATE = 8000; // minimum viable -- keeps the generated buffer tiny
+
+/**
+ * Builds a canonical, always-valid 16-bit mono PCM WAV of pure silence.
+ * Zero dependencies, zero I/O, deterministic. The data section is an
+ * ArrayBuffer's native zero-initialization -- never explicitly written --
+ * so the only work done is a 44-byte RIFF/fmt/data header write.
+ */
+function buildSilentWav(durationMs = TIER4_SILENCE_DURATION_MS, sampleRate = TIER4_SAMPLE_RATE) {
+  const numSamples = Math.round(sampleRate * (durationMs / 1000));
+  const dataSize = numSamples * 2; // 16-bit mono => 2 bytes/sample
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+  const writeAscii = (offset, str) => {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  };
+  writeAscii(0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeAscii(8, 'WAVE');
+  writeAscii(12, 'fmt ');
+  view.setUint32(16, 16, true);              // fmt chunk size
+  view.setUint16(20, 1, true);               // PCM
+  view.setUint16(22, 1, true);               // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);  // byte rate (sampleRate * blockAlign)
+  view.setUint16(32, 2, true);               // block align
+  view.setUint16(34, 16, true);              // bits per sample
+  writeAscii(36, 'data');
+  view.setUint32(40, dataSize, true);
+  return new Uint8Array(buffer);             // bytes 44.. are already zero => silence
+}
+
+// Module-scoped, same reuse pattern as ringPointers -- computed once per
+// isolate, not per request.
+let _cachedSilentWavBytes = null;
+function getSilentWavBytes() {
+  if (!_cachedSilentWavBytes) _cachedSilentWavBytes = buildSilentWav();
+  return _cachedSilentWavBytes;
+}
+
+/**
+ * Never throws. Tries one best-effort KV read for an operator-configured
+ * override (satisfies the spec's "cached default audio" half); any miss,
+ * parse failure, or empty decode falls through to the generated silent WAV
+ * (satisfies the "silent response" half). Returns the same result shape
+ * every other tier returns so callers don't need a special case.
+ */
+async function runFinalFallback(env) {
+  try {
+    const cached = await kvGetJSON(env?.CES_CHAT_KV, TIER4_KV_CACHE_KEY);
+    if (cached?.base64 && cached?.contentType) {
+      const binary = atob(cached.base64);
+      if (binary.length > 0) {
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return { bytes, contentType: cached.contentType, source: 'kv_cached_override' };
+      }
+    }
+  } catch (_e) {
+    // Fail open -- malformed base64, missing key, KV error: all fall
+    // through to the guaranteed branch below. Never rethrow from Tier 4.
+  }
+  return { bytes: getSilentWavBytes(), contentType: 'audio/wav', source: 'generated_silence' };
+}
+
+// Test-only exports. Pure functions -- cheap to give permanent regression
+// coverage rather than relying on end-to-end exercising.
+export {
+  isOutageOrRateLimited as __isOutageOrRateLimitedForTests,
+  buildSilentWav as __buildSilentWavForTests,
+  getElevenLabsQuotaMonthKey as __getElevenLabsQuotaMonthKeyForTests,
+};
+
 // ── Shared cascade engine (one copy, used by GET and POST) ────────────────
 /**
- * Runs Tier 0 -> Tier 1 -> Tier 2 -> opt-in Speechmatics -> Tier 3 in order,
- * honoring IS_DEV/circuit breakers/lifetime clocks, and returns whichever
- * tier answers first (or throws a final aggregate error).
+ * v10: Group 0 (Edge TTS, opt-in, unchanged) -> Tier 1 (ElevenLabs, recurring
+ * monthly quota, monthly-exhaustion-cached) -> Tier 2 (gTTS, PROMOTED,
+ * unlimited/unofficial, all languages) -> Tier 3 (Deepgram then opt-in
+ * Speechmatics, DEMOTED, english-only, gated on isOutageOrRateLimited(tier2
+ * error)) -> Tier 4 (guaranteed local fallback, cannot fail). Returns
+ * whichever tier answers first. Does NOT throw on the "every network tier
+ * degraded" path -- Tier 4 always resolves that case; see v10 changelog
+ * point 8. A thrown error here is now an unexpected internal fault, not a
+ * routine outcome.
  */
 async function runTtsCascade({ text, lang, genderKey, speed, env, context, timeouts }) {
   const devMode = isDevMode(env);
@@ -1272,7 +1517,9 @@ async function runTtsCascade({ text, lang, genderKey, speed, env, context, timeo
 
   const attempts = [];
 
-  // TIER 0 — Edge TTS (always runs when enabled, even in dev — no quota to protect)
+  // GROUP 0 — Edge TTS (unchanged from v9: opt-in, off by default, always
+  // runs when enabled even in dev -- no quota to protect). Sits outside the
+  // requested 1-4 numbering; see PROVIDER_TIERS label.
   if (edgeEnabled && !(await isCircuitOpen(env, 'edge_tts'))) {
     try {
       const { bytes, contentType } = await fetchEdgeTTS(text, lang, genderKey, speed, timeouts.tier0, budget);
@@ -1289,8 +1536,15 @@ async function runTtsCascade({ text, lang, genderKey, speed, env, context, timeo
     attempts.push({ tier: PROVIDER_TIERS.edge_tts.label, provider: 'edge_tts', reason: 'circuit open' });
   }
 
-  // TIER 1 — ElevenLabs ring (all languages; recurring monthly quota -- runs in dev too)
-  if (eleven.keys.length > 0 && !(await isCircuitOpen(env, 'elevenlabs'))) {
+  // TIER 1 — ElevenLabs ring (all languages; recurring monthly quota -- runs
+  // in dev too). v10: cheap KV pre-check skips the whole ring the moment a
+  // genuine quota_exceeded body has already been seen this UTC calendar
+  // month, saving a doomed round trip (or N doomed round trips, one per
+  // configured key) on every subsequent request until the month rolls over.
+  const monthlyExhausted = eleven.keys.length > 0 && !devMode ? await isElevenLabsMonthlyExhausted(env) : false;
+  if (eleven.keys.length > 0 && monthlyExhausted) {
+    attempts.push({ tier: PROVIDER_TIERS.elevenlabs.label, provider: 'elevenlabs', reason: 'monthly quota pre-emptively exhausted (cached; resets next UTC month, or delete the KV key to force an early retry)' });
+  } else if (eleven.keys.length > 0 && !(await isCircuitOpen(env, 'elevenlabs'))) {
     try {
       const voiceId = resolveVoiceId(genderKey, env);
       const { response: result, keyIndex, keysTried } = await rotateAndFetchTTS(
@@ -1306,86 +1560,138 @@ async function runTtsCascade({ text, lang, genderKey, speed, env, context, timeo
       };
     } catch (err) {
       recordOutcome(context, 'elevenlabs', false);
+      // v10: only a BODY-CONFIRMED quota signal writes the month-long cache
+      // (see fetchElevenTTS's quotaConfirmed, point 3) -- a bare 429/5xx/
+      // network failure still fails over to Tier 2 for this request but
+      // does not blacklist the tier for the rest of the month.
+      if (err.quotaConfirmed) markElevenLabsMonthlyExhausted(context);
       attempts.push({ tier: PROVIDER_TIERS.elevenlabs.label, provider: 'elevenlabs', reason: err.category || err.message });
     }
   } else if (eleven.keys.length > 0) {
     attempts.push({ tier: PROVIDER_TIERS.elevenlabs.label, provider: 'elevenlabs', reason: 'circuit open' });
   }
 
-  // TIER 2 — Deepgram Aura-2, ENGLISH ONLY, skipped in dev (finite credit) or once lifetime-expired
-  if (englishOnly && deepgram.keys.length > 0 && !devMode) {
-    const expired = await isDeepgramExpired(env);
-    if (expired) {
-      attempts.push({ tier: PROVIDER_TIERS.deepgram.label, provider: 'deepgram', reason: 'lifetime credit pre-emptively expired' });
-    } else if (await isCircuitOpen(env, 'deepgram')) {
-      attempts.push({ tier: PROVIDER_TIERS.deepgram.label, provider: 'deepgram', reason: 'circuit open' });
-    } else {
-      try {
-        const { response: result, keyIndex, keysTried } = await rotateAndFetchTTS(
-          ringPointers.deepgram, deepgram.keys,
-          (key) => fetchDeepgramTTS(text, key, timeouts.tier2),
-          'Deepgram', budget,
-        );
-        recordOutcome(context, 'deepgram', true);
-        recordDeepgramFirstUseIfAbsent(context);
-        return {
-          bytes: result.bytes, contentType: result.contentType, provider: 'deepgram', providerOfficial: true,
-          engineHeaders: { 'X-TTS-KeyIndex': String(keyIndex), 'X-TTS-KeysTried': String(keysTried), ...keyCountHeaders },
-          attempts, budgetRemaining: budget.remaining(),
-        };
-      } catch (err) {
-        recordOutcome(context, 'deepgram', false);
-        attempts.push({ tier: PROVIDER_TIERS.deepgram.label, provider: 'deepgram', reason: err.category || err.message });
-      }
+  // TIER 2 — Google Translate TTS (v10: PROMOTED, all languages, unlimited/
+  // unofficial, primary continuous fallback). Now circuit-broken like every
+  // other tier (v9's "nothing to fall back to" rationale no longer holds --
+  // Tier 3 and Tier 4 exist behind it). tier2Err is captured (not just
+  // logged) because Tier 3's trigger condition reads it directly.
+  let tier2Err = null;
+  const gttsCircuitOpen = await isCircuitOpen(env, 'gtts');
+  if (!gttsCircuitOpen) {
+    try {
+      const result = await fetchGoogleTTS(text, lang, speed, timeouts.tier2, budget);
+      recordOutcome(context, 'gtts', true);
+      return {
+        bytes: result.bytes, contentType: result.contentType, provider: 'gtts', providerOfficial: false,
+        engineHeaders: { ...keyCountHeaders }, attempts, budgetRemaining: budget.remaining(),
+      };
+    } catch (err) {
+      recordOutcome(context, 'gtts', false);
+      tier2Err = err;
+      attempts.push({ tier: PROVIDER_TIERS.gtts.label, provider: 'gtts', reason: err.category || err.message });
     }
-  } else if (englishOnly && deepgram.keys.length > 0 && devMode) {
-    attempts.push({ tier: PROVIDER_TIERS.deepgram.label, provider: 'deepgram', reason: 'skipped: IS_DEV (protects finite one-time credit)' });
+  } else {
+    attempts.push({ tier: PROVIDER_TIERS.gtts.label, provider: 'gtts', reason: 'circuit open' });
   }
 
-  // OPT-IN TIER — Speechmatics, ENGLISH ONLY, 480min/mo free then billed, skipped in dev
-  if (englishOnly && speechmaticsEnabled && speechmatics.keys.length > 0 && !devMode) {
-    if (await isCircuitOpen(env, 'speechmatics')) {
-      attempts.push({ tier: PROVIDER_TIERS.speechmatics.label, provider: 'speechmatics', reason: 'circuit open' });
-    } else {
-      try {
-        const { response: result, keyIndex, keysTried } = await rotateAndFetchTTS(
-          ringPointers.speechmatics, speechmatics.keys,
-          (key) => fetchSpeechmaticsTTS(text, key, timeouts.tier2),
-          'Speechmatics', budget,
-        );
-        recordOutcome(context, 'speechmatics', true);
-        return {
-          bytes: result.bytes, contentType: result.contentType, provider: 'speechmatics', providerOfficial: true,
-          engineHeaders: { 'X-TTS-KeyIndex': String(keyIndex), 'X-TTS-KeysTried': String(keysTried) },
-          attempts, budgetRemaining: budget.remaining(),
-        };
-      } catch (err) {
-        recordOutcome(context, 'speechmatics', false);
-        attempts.push({ tier: PROVIDER_TIERS.speechmatics.label, provider: 'speechmatics', reason: err.category || err.message });
+  // TIER 3 — Emergency reserve: Deepgram (one-time credit), then opt-in
+  // Speechmatics (metered-partial). v10: DEMOTED from the old Tier 2 --
+  // now gated strictly on "Tier 2 encountered 429 or a temporary outage",
+  // exactly as specified, not on "Tier 1 failed" as in v9. A circuit-open
+  // Tier 2 counts as satisfying that condition (it IS the accumulated
+  // result of recent 429/5xx/network failures). Internal Deepgram/
+  // Speechmatics logic (lifetime clock, circuit breakers, dev-mode gating,
+  // key-ring rotation) is unchanged from v9.
+  const tier2QualifiesForReserve = gttsCircuitOpen || isOutageOrRateLimited(tier2Err);
+
+  if (tier2QualifiesForReserve) {
+    // TIER 3a — Deepgram Aura-2, ENGLISH ONLY, skipped in dev (finite
+    // credit) or once lifetime-expired.
+    if (englishOnly && deepgram.keys.length > 0 && !devMode) {
+      const expired = await isDeepgramExpired(env);
+      if (expired) {
+        attempts.push({ tier: PROVIDER_TIERS.deepgram.label, provider: 'deepgram', reason: 'lifetime credit pre-emptively expired' });
+      } else if (await isCircuitOpen(env, 'deepgram')) {
+        attempts.push({ tier: PROVIDER_TIERS.deepgram.label, provider: 'deepgram', reason: 'circuit open' });
+      } else {
+        try {
+          const { response: result, keyIndex, keysTried } = await rotateAndFetchTTS(
+            ringPointers.deepgram, deepgram.keys,
+            (key) => fetchDeepgramTTS(text, key, timeouts.tier3),
+            'Deepgram', budget,
+          );
+          recordOutcome(context, 'deepgram', true);
+          recordDeepgramFirstUseIfAbsent(context);
+          return {
+            bytes: result.bytes, contentType: result.contentType, provider: 'deepgram', providerOfficial: true,
+            engineHeaders: { 'X-TTS-KeyIndex': String(keyIndex), 'X-TTS-KeysTried': String(keysTried), ...keyCountHeaders },
+            attempts, budgetRemaining: budget.remaining(),
+          };
+        } catch (err) {
+          recordOutcome(context, 'deepgram', false);
+          attempts.push({ tier: PROVIDER_TIERS.deepgram.label, provider: 'deepgram', reason: err.category || err.message });
+        }
       }
+    } else if (englishOnly && deepgram.keys.length > 0 && devMode) {
+      attempts.push({ tier: PROVIDER_TIERS.deepgram.label, provider: 'deepgram', reason: 'skipped: IS_DEV (protects finite one-time credit)' });
+    } else if (!englishOnly && deepgram.keys.length > 0) {
+      // v10, small addition for observability (see changelog): previously
+      // silent. Deepgram's Aura-2 model here is English-only by capability,
+      // not by policy -- this doesn't change with the reorder.
+      attempts.push({ tier: PROVIDER_TIERS.deepgram.label, provider: 'deepgram', reason: `skipped: english-only provider, requested lang is ${lang}` });
     }
-  } else if (englishOnly && speechmaticsEnabled && speechmatics.keys.length > 0 && devMode) {
-    attempts.push({ tier: PROVIDER_TIERS.speechmatics.label, provider: 'speechmatics', reason: 'skipped: IS_DEV (protects the 480min/mo free allowance from dev traffic)' });
+
+    // TIER 3b — opt-in Speechmatics, ENGLISH ONLY, 480min/mo free then
+    // billed, skipped in dev.
+    if (englishOnly && speechmaticsEnabled && speechmatics.keys.length > 0 && !devMode) {
+      if (await isCircuitOpen(env, 'speechmatics')) {
+        attempts.push({ tier: PROVIDER_TIERS.speechmatics.label, provider: 'speechmatics', reason: 'circuit open' });
+      } else {
+        try {
+          const { response: result, keyIndex, keysTried } = await rotateAndFetchTTS(
+            ringPointers.speechmatics, speechmatics.keys,
+            (key) => fetchSpeechmaticsTTS(text, key, timeouts.tier3),
+            'Speechmatics', budget,
+          );
+          recordOutcome(context, 'speechmatics', true);
+          return {
+            bytes: result.bytes, contentType: result.contentType, provider: 'speechmatics', providerOfficial: true,
+            engineHeaders: { 'X-TTS-KeyIndex': String(keyIndex), 'X-TTS-KeysTried': String(keysTried) },
+            attempts, budgetRemaining: budget.remaining(),
+          };
+        } catch (err) {
+          recordOutcome(context, 'speechmatics', false);
+          attempts.push({ tier: PROVIDER_TIERS.speechmatics.label, provider: 'speechmatics', reason: err.category || err.message });
+        }
+      }
+    } else if (englishOnly && speechmaticsEnabled && speechmatics.keys.length > 0 && devMode) {
+      attempts.push({ tier: PROVIDER_TIERS.speechmatics.label, provider: 'speechmatics', reason: 'skipped: IS_DEV (protects the 480min/mo free allowance from dev traffic)' });
+    }
+  } else if (tier2Err) {
+    // Tier 2 failed but not via 429/5xx/network -- per spec, Tier 3's
+    // reserve is not consulted. Realistically near-unreachable for gTTS
+    // specifically (see changelog point 5) but implemented as specified
+    // rather than silently widened.
+    attempts.push({ tier: `${PROVIDER_TIERS.deepgram.label}/${PROVIDER_TIERS.speechmatics.label}`, provider: 'reserve', reason: 'skipped: Tier 2 failure was not rate-limit/outage-class, reserve not consulted per policy' });
   }
 
-  // TIER 3 — Google Translate TTS (final safety net, always attempted, all langs, no circuit breaker: nothing to fall back to)
-  try {
-    const result = await fetchGoogleTTS(text, lang, speed, timeouts.tier3);
-    recordOutcome(context, 'gtts', true);
-    return {
-      bytes: result.bytes, contentType: result.contentType, provider: 'gtts', providerOfficial: false,
-      engineHeaders: { ...keyCountHeaders }, attempts, budgetRemaining: budget.remaining(),
-    };
-  } catch (err) {
-    recordOutcome(context, 'gtts', false);
-    attempts.push({ tier: PROVIDER_TIERS.gtts.label, provider: 'gtts', reason: err.message });
-  }
-
-  const finalErr = new Error('All TTS providers unavailable');
-  finalErr.attempts = attempts;
-  finalErr.keyCountHeaders = keyCountHeaders;
-  throw finalErr;
+  // TIER 4 — Guaranteed final fallback (v10, new). Cannot fail; always
+  // returns. See runFinalFallback's own doc comment.
+  const finalResult = await runFinalFallback(env);
+  attempts.push({ tier: PROVIDER_TIERS.fallback_final.label, provider: 'fallback_final', reason: `serving ${finalResult.source}` });
+  return {
+    bytes: finalResult.bytes, contentType: finalResult.contentType, provider: 'fallback_final', providerOfficial: false,
+    engineHeaders: { ...keyCountHeaders, 'X-TTS-Guaranteed-Fallback': 'true' },
+    attempts, budgetRemaining: budget.remaining(),
+  };
 }
+
+// Test-only export (v10). Not used by any request-handling path -- lets a
+// test harness drive the full tier cascade with a mocked env/context/fetch
+// instead of only its individual pure-function pieces, the same rationale
+// as every other __xForTests export in this file.
+export { runTtsCascade as __test_runTtsCascade };
 
 /** Build the shared X-TTS-* diagnostic/degradation headers for a winning result. */
 function buildResultHeaders(result, requestedLang) {
@@ -1412,6 +1718,19 @@ function buildResultHeaders(result, requestedLang) {
   return headers;
 }
 
+// v10 [FIX]: both handlers previously applied the same `public, max-age=3600`
+// to every 200 response, including gTTS-circuit-open/reserve fallbacks and
+// (new in v10) the guaranteed Tier 4 silence. Caching a Tier-4 response as
+// if it were real audio means a transient full-outage for one piece of text
+// gets frozen into up to an hour of cached SILENCE for that exact query
+// even after every provider recovers -- caching is supposed to save
+// redundant upstream calls for a GOOD result, not preserve a degraded one.
+// Only the guaranteed fallback is excluded; a genuine Tier 2/3 audio
+// response is exactly as cacheable as Tier 1's, unchanged from v9.
+function cacheControlFor(result) {
+  return result.provider === 'fallback_final' ? 'no-store' : 'public, max-age=3600';
+}
+
 function logTtsEvent(fields) {
   try {
     console.log(JSON.stringify({ ts: new Date().toISOString(), ...fields }));
@@ -1425,12 +1744,17 @@ function rateLimitOpts(env) {
   };
 }
 
+// v10 point 9 [BREAKING RENAME]: tier2 now means gTTS (was TTS_GTTS_TIMEOUT_MS,
+// default lowered 10000->7000, see changelog); tier3 now means Deepgram/
+// Speechmatics (was TTS_TIER2_TIMEOUT_MS, default unchanged at 6000). A
+// deployment relying on the old names' non-default values needs those
+// values moved to the new names.
 function resolveTimeouts(env) {
   return {
     tier0: intFromEnv(env, 'TTS_TIER0_TIMEOUT_MS', 4000),
     tier1: intFromEnv(env, 'TTS_TIER1_TIMEOUT_MS', 6000),
-    tier2: intFromEnv(env, 'TTS_TIER2_TIMEOUT_MS', 6000),
-    tier3: intFromEnv(env, 'TTS_GTTS_TIMEOUT_MS', 10000),
+    tier2: intFromEnv(env, 'TTS_TIER2_TIMEOUT_MS', 7000),
+    tier3: intFromEnv(env, 'TTS_TIER3_TIMEOUT_MS', 6000),
   };
 }
 
@@ -1475,7 +1799,7 @@ export async function onRequestGet(context) {
       status: 200,
       headers: {
         'Content-Type' : result.contentType,
-        'Cache-Control': 'public, max-age=3600',
+        'Cache-Control': cacheControlFor(result),
         'X-TTS-Request-Id' : requestId,
         'X-TTS-Latency-Ms' : String(Date.now() - t0),
         ...buildResultHeaders(result, safeLang),
@@ -1483,9 +1807,12 @@ export async function onRequestGet(context) {
       },
     });
   } catch (finalErr) {
+    // v10: runTtsCascade no longer throws on the routine "every network
+    // tier degraded" path (Tier 4 always resolves that) -- reaching this
+    // block now means an unexpected internal fault, not a provider outage.
     logTtsEvent({ requestId, route: 'GET', lang: safeLang, provider: null, fallback: true, attempts: finalErr.attempts, error: finalErr.message });
     return jsonResponse(502, {
-      error: 'TTS service unreachable.',
+      error: 'Unexpected internal error -- all managed tiers including the guaranteed fallback failed.',
       requestId,
       attempts: finalErr.attempts,
     }, request, { ...finalErr.keyCountHeaders, 'X-TTS-Request-Id': requestId, 'X-TTS-Latency-Ms': String(Date.now() - t0) });
@@ -1545,7 +1872,7 @@ export async function onRequestPost(context) {
       status: 200,
       headers: {
         'Content-Type' : result.contentType,
-        'Cache-Control': 'public, max-age=3600',
+        'Cache-Control': cacheControlFor(result),
         'X-TTS-Request-Id' : requestId,
         'X-TTS-Latency-Ms' : String(Date.now() - t0),
         ...buildResultHeaders(result, safeLang),
@@ -1554,9 +1881,11 @@ export async function onRequestPost(context) {
       },
     });
   } catch (finalErr) {
+    // v10: see GET handler's matching comment -- this is now an unexpected
+    // internal fault path, not a routine "all providers down" outcome.
     logTtsEvent({ requestId, route: 'POST', lang: safeLang, provider: null, fallback: true, attempts: finalErr.attempts, error: finalErr.message });
     return jsonResponse(503, {
-      error: 'All TTS providers unavailable',
+      error: 'Unexpected internal error -- all managed tiers including the guaranteed fallback failed.',
       requestId,
       tiers_attempted: finalErr.attempts,
       retry_after: 60,
