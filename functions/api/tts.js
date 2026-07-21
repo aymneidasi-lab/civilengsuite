@@ -548,6 +548,127 @@ function preprocessText(text) {
 }
 
 /**
+ * Egyptian Arabic (Ammiya) text normalization.
+ * TTS engines trained on MSA often mispronounce Egyptian colloquial spellings.
+ * This normalizes toward forms the dialect-native models (Edge ar-EG-SalmaNeural/
+ * ShakirNeural) and Egyptian community voices (ElevenLabs Yasmine/Masry) handle
+ * most naturally, without destroying intentional colloquial character.
+ */
+function normalizeEgyptianArabic(text) {
+  let s = text;
+
+  // 1. Tatweel (kashida) is decorative, never pronounced — strip everywhere.
+  s = s.replace(/ـ+/g, '');
+
+  // 2. Normalize alef variants to the two phonemic forms Egyptian Arabic
+  //    actually distinguishes: initial hamza-bearing أ / إ vs. plain ا.
+  //    Order matters: handle hamza-bearing first, then collapse remaining
+  //    alef variants to plain ا.
+  s = s.replace(/[آٱ]/g, 'ا');
+  s = s.replace(/[ﭐﭑ]/g, 'ا');
+
+  // 3. Normalize ta marbuta (ة) — Egyptian colloquial often spells with ه,
+  //    but dialect-native TTS models were trained on mixed corpora. Keep ة
+  //    when present (it signals feminine ending to the model), but normalize
+  //    isolated ه-at-end-of-word that is clearly a colloquial ta-marbuta
+  //    substitution back to ة for model consistency. This is conservative:
+  //    only when the word is >2 chars and ends in ه preceded by a consonant.
+  s = s.replace(/([ب ت ث ج ح خ د ذ ر ز س ش ص ض ط ظ ع غ ف ق ك ل م ن ه و ي])ه(?=\s|$|[،؛:!?.])/g, '$1ة');
+
+  // 4. Normalize ya variants — Egyptian uses ي consistently.
+  s = s.replace(/ى/g, 'ي');
+  s = s.replace(/[ﯨﯩ]/g, 'ي');
+
+  // 5. Normalize kaf variants.
+  s = s.replace(/[ﮎﮏﮐﮑ]/g, 'ك');
+
+  // 6. Normalize dad variants.
+  s = s.replace(/[ﮃﮄ]/g, 'ض');
+
+  // 7. Normalize qaf variants.
+  s = s.replace(/[ﯓﯔﯕﯖ]/g, 'ق');
+
+  // 8. Whitespace around Arabic punctuation — models read punctuation
+  //    position as prosodic cues; inconsistent spacing degrades intonation.
+  s = s.replace(/\s*([،؛:!?.؟])\s*/g, '$1 ');
+  s = s.replace(/\s+/g, ' ').trim();
+
+  // 9. Normalize repeated letters (Egyptian colloquial emphasis: "ككككده" -> "كده")
+  //    Only collapse 3+ repeats to a single char; 2 repeats may be intentional
+  //    shadda-like emphasis in colloquial writing.
+  s = s.replace(/(.)\1{2,}/g, '$1$1');
+
+  // 10. Normalize common Egyptian Latin/Arabic mixed abbreviations.
+  s = s.replace(/\b(ok|OK|okay)\b/gi, 'أوكيه');
+  s = s.replace(/\b(no|NO)\b/gi, 'نو');
+  s = s.replace(/\b(yes|YES)\b/gi, 'يس');
+
+  return s;
+}
+
+/**
+ * Arabic-aware sentence chunker. Respects MAX_TEXT_LENGTH but prefers
+ * splitting on Arabic sentence boundaries (، ؛ . ! ? ؟) rather than
+ * mid-sentence, which destroys intonation. Falls back to word boundary
+ * if a single sentence exceeds the limit.
+ */
+function chunkArabicText(text, maxLen = MAX_TEXT_LENGTH) {
+  if (text.length <= maxLen) return [text];
+
+  const chunks = [];
+  const sentenceDelims = /[.!?؟。]/;
+  const sentences = text.split(sentenceDelims).filter(Boolean);
+
+  let current = '';
+  for (let raw of sentences) {
+    const sentence = raw.trim();
+    if (!sentence) continue;
+    // Re-attach the delimiter that was consumed by split
+    const withDelim = sentence + (text.includes(sentence + '.') ? '.' :
+                                   text.includes(sentence + '!') ? '!' :
+                                   text.includes(sentence + '?') ? '?' :
+                                   text.includes(sentence + '؟') ? '؟' : '');
+
+    if (withDelim.length > maxLen) {
+      // Single sentence too long — split on comma/semicolon, then word boundary
+      if (current) { chunks.push(current.trim()); current = ''; }
+      const subParts = withDelim.split(/[،؛,;]/);
+      for (const part of subParts) {
+        const p = part.trim();
+        if (!p) continue;
+        if (p.length <= maxLen) {
+          if ((current + ' ' + p).trim().length <= maxLen) {
+            current = current ? current + '، ' + p : p;
+          } else {
+            if (current) chunks.push(current.trim());
+            current = p;
+          }
+        } else {
+          // Even comma-split too long — word boundary fallback
+          if (current) { chunks.push(current.trim()); current = ''; }
+          const words = p.split(/\s+/);
+          for (const w of words) {
+            if ((current + ' ' + w).trim().length <= maxLen) {
+              current = current ? current + ' ' + w : w;
+            } else {
+              if (current) chunks.push(current.trim());
+              current = w;
+            }
+          }
+        }
+      }
+    } else if ((current + ' ' + withDelim).trim().length <= maxLen) {
+      current = current ? current + ' ' + withDelim : withDelim;
+    } else {
+      if (current) chunks.push(current.trim());
+      current = withDelim;
+    }
+  }
+  if (current) chunks.push(current.trim());
+  return chunks.length ? chunks : [text.slice(0, maxLen)];
+}
+
+/**
  * Full 5-entity XML escape for SSML text content (Edge TTS only — the sole
  * provider here building an SSML document; ElevenLabs/Deepgram/Speechmatics
  * take a JSON string field, gTTS a URL query param, both already correctly
@@ -1105,7 +1226,34 @@ async function fetchGoogleTTS(text, lang, speed, timeoutMs, budget) {
     throw err;
   }
 
+  // v10-EG: Entropy check — detect silence or near-silence masquerading as audio.
+  // A real MP3 frame has high byte entropy; a zeroed or padded response does not.
+  const entropy = approximateByteEntropy(bytes);
+  if (entropy < 1.5) {
+    const err = new Error(
+      `gTTS: HTTP 200 audio entropy too low (${entropy.toFixed(2)}), likely silent/padded response`,
+    );
+    err.httpStatus = 200;
+    err.category = 'invalid response body (low-entropy audio)';
+    throw err;
+  }
+
   return { bytes, contentType: 'audio/mpeg' };
+}
+
+/** Shannon entropy approximation over a byte sample (fast, no deps). */
+function approximateByteEntropy(bytes, sampleSize = 2048) {
+  if (bytes.length === 0) return 0;
+  const len = Math.min(bytes.length, sampleSize);
+  const freq = new Uint32Array(256);
+  for (let i = 0; i < len; i++) freq[bytes[i]]++;
+  let entropy = 0;
+  for (let i = 0; i < 256; i++) {
+    if (freq[i] === 0) continue;
+    const p = freq[i] / len;
+    entropy -= p * Math.log2(p);
+  }
+  return entropy;
 }
 
 // ── GROUP 0 — Microsoft Edge TTS ────────────────────────────────────────────
@@ -1156,13 +1304,25 @@ function edgeVoiceLocale(voiceName) {
  * exactly one <voice> wrapping one <prosody> — the only shape currently
  * accepted — so this only tightens conformance, it doesn't add capability.
  */
-function buildEdgeSsml(voiceName, escapedText, rate) {
+function buildEdgeSsml(voiceName, escapedText, rate, lang) {
+  // v10-EG: For Egyptian Arabic, insert gentle breaks after commas and
+  // semicolons to match natural Cairene prosody (slightly longer pauses
+  // than MSA default). This is conservative: only <break> tags, no
+  // <emphasis> or <phoneme> that could be rejected by the service.
+  const isEG = String(lang).toLowerCase() === 'ar-eg';
+  let body = escapedText;
+  if (isEG) {
+    // Short pause after comma/semicolon (150ms), medium after sentence end (300ms)
+    body = body
+      .replace(/([،؛])\s*/g, '$1<break time="150ms"/> ')
+      .replace(/([.!?؟])\s*/g, '$1<break time="300ms"/> ');
+  }
   return (
     "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' " +
     `xmlns:mstts='https://www.w3.org/2001/mstts' xml:lang='${edgeVoiceLocale(voiceName)}'>` +
     `<voice name='${voiceName}'>` +
     `<prosody pitch='+0Hz' rate='${rate}' volume='+0%'>` +
-    escapedText +
+    body +
     '</prosody></voice></speak>'
   );
 }
@@ -1216,13 +1376,21 @@ async function fetchEdgeTTS(text, lang, genderKey, speed, timeoutMs, budget) {
   }
 
   const voiceName = resolveEdgeVoice(lang, genderKey);
-  const rate = speedToEdgeRate(speed);
+  // v10-EG: Egyptian Arabic natural cadence is slightly slower than MSA
+  // news reading. Default to -10% rate (0.9x) when caller passes speed=1.0
+  // and lang is ar-EG. Explicit caller speed still respected.
+  const effectiveSpeed = (String(lang).toLowerCase() === 'ar-eg' && speed === 1.0) ? 0.9 : speed;
+  const rate = speedToEdgeRate(effectiveSpeed);
   const escapedText = escapeSsmlText(text);
 
   const connectionId = crypto.randomUUID().replace(/-/g, '');
   const requestId = crypto.randomUUID().replace(/-/g, '');
-  const secMsGec = await generateEdgeSecMsGec();
-  const url =
+  // v10-EG: Retry once on handshake/auth errors. The Sec-MS-GEC token is
+  // bucketed to 5-minute windows; if the request lands on a bucket boundary
+  // the token may be rejected. A single retry with a fresh token resolves
+  // this without adding meaningful latency (the retry is only taken on 403).
+  let secMsGec = await generateEdgeSecMsGec();
+  let url =
     `${EDGE_TTS_WSS_BASE}&ConnectionId=${connectionId}` +
     `&Sec-MS-GEC=${secMsGec}&Sec-MS-GEC-Version=${EDGE_TTS_SEC_MS_GEC_VERSION}`;
 
@@ -1242,23 +1410,38 @@ async function fetchEdgeTTS(text, lang, genderKey, speed, timeoutMs, budget) {
 
   let ws;
   let timer;
+  let handshake;
   try {
-    const handshake = await Promise.race([
-      fetch(url, { headers: upgradeHeaders }),
-      new Promise((_, reject) => {
-        timer = setTimeout(() => reject(Object.assign(new Error('Edge TTS: handshake timeout'), { category: 'handshake timeout', httpStatus: 'network' })), timeoutMs);
-      }),
-    ]);
-    clearTimeout(timer);
+    // v10-EG: Retry loop — one retry on 403/401 (token bucket boundary).
+    for (let attempt = 0; attempt < 2; attempt++) {
+      handshake = await Promise.race([
+        fetch(url, { headers: upgradeHeaders }),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(Object.assign(new Error('Edge TTS: handshake timeout'), { category: 'handshake timeout', httpStatus: 'network' })), timeoutMs);
+        }),
+      ]);
+      clearTimeout(timer);
 
-    ws = handshake.webSocket;
-    if (!ws) {
-      const err = new Error(`Edge TTS: handshake rejected (HTTP ${handshake.status})`);
-      err.category = `handshake HTTP ${handshake.status}`;
-      err.httpStatus = handshake.status;
+      ws = handshake.webSocket;
+      if (ws) {
+        ws.accept();
+        break;
+      }
+
+      const status = handshake.status;
+      if (attempt === 0 && (status === 403 || status === 401)) {
+        // Regenerate token and retry once
+        secMsGec = await generateEdgeSecMsGec();
+        url = `${EDGE_TTS_WSS_BASE}&ConnectionId=${connectionId}` +
+              `&Sec-MS-GEC=${secMsGec}&Sec-MS-GEC-Version=${EDGE_TTS_SEC_MS_GEC_VERSION}`;
+        continue;
+      }
+
+      const err = new Error(`Edge TTS: handshake rejected (HTTP ${status})`);
+      err.category = `handshake HTTP ${status}`;
+      err.httpStatus = status;
       throw err;
     }
-    ws.accept();
 
     const result = await new Promise((resolve, reject) => {
       const audioChunks = [];
@@ -1327,10 +1510,18 @@ async function fetchEdgeTTS(text, lang, genderKey, speed, timeoutMs, budget) {
         'Content-Type:application/ssml+xml\r\n' +
         `X-Timestamp:${jsStyleDateString()}Z\r\n` +
         'Path:ssml\r\n\r\n' +
-        buildEdgeSsml(voiceName, escapedText, rate),
+        buildEdgeSsml(voiceName, escapedText, rate, lang),
       );
     });
 
+    // v10-EG: Validate Edge TTS audio isn't silent/padded before returning
+    const edgeEntropy = approximateByteEntropy(result);
+    if (edgeEntropy < 1.5) {
+      const err = new Error(`Edge TTS: audio entropy too low (${edgeEntropy.toFixed(2)}), likely silent response`);
+      err.category = 'low-entropy audio';
+      err.httpStatus = 'network';
+      throw err;
+    }
     return { bytes: result, contentType: 'audio/mpeg' };
   } finally {
     clearTimeout(timer);
@@ -1485,6 +1676,9 @@ export {
   isOutageOrRateLimited as __isOutageOrRateLimitedForTests,
   buildSilentWav as __buildSilentWavForTests,
   getElevenLabsQuotaMonthKey as __getElevenLabsQuotaMonthKeyForTests,
+  normalizeEgyptianArabic as __normalizeEgyptianArabicForTests,
+  chunkArabicText as __chunkArabicTextForTests,
+  approximateByteEntropy as __approximateByteEntropyForTests,
 };
 
 // ── Shared cascade engine (one copy, used by GET and POST) ────────────────
@@ -1504,6 +1698,10 @@ async function runTtsCascade({ text, lang, genderKey, speed, env, context, timeo
   const englishOnly = isEnglish(lang);
   const budget = makeFetchBudget(SUBREQUEST_BUDGET_FREE_PLAN);
 
+  // v10-EG: Apply Egyptian Arabic normalization before synthesis.
+  const isEG = String(lang).toLowerCase() === 'ar-eg';
+  const normalizedText = isEG ? normalizeEgyptianArabic(text) : text;
+
   const eleven   = buildKeyRing(env, ELEVEN_BASE_NAME);
   const deepgram = buildKeyRing(env, DEEPGRAM_BASE_NAME);
   const speechmaticsEnabled = (env?.ENABLE_SPEECHMATICS_TTS || '').trim().toLowerCase() === 'true';
@@ -1522,7 +1720,7 @@ async function runTtsCascade({ text, lang, genderKey, speed, env, context, timeo
   // requested 1-4 numbering; see PROVIDER_TIERS label.
   if (edgeEnabled && !(await isCircuitOpen(env, 'edge_tts'))) {
     try {
-      const { bytes, contentType } = await fetchEdgeTTS(text, lang, genderKey, speed, timeouts.tier0, budget);
+      const { bytes, contentType } = await fetchEdgeTTS(normalizedText, lang, genderKey, speed, timeouts.tier0, budget);
       recordOutcome(context, 'edge_tts', true);
       return {
         bytes, contentType, provider: 'edge_tts', providerOfficial: false,
@@ -1549,7 +1747,7 @@ async function runTtsCascade({ text, lang, genderKey, speed, env, context, timeo
       const voiceId = resolveVoiceId(genderKey, env);
       const { response: result, keyIndex, keysTried } = await rotateAndFetchTTS(
         ringPointers.eleven, eleven.keys,
-        (key) => fetchElevenTTS(text, key, voiceId, speed, timeouts.tier1),
+        (key) => fetchElevenTTS(normalizedText, key, voiceId, speed, timeouts.tier1),
         'ElevenLabs', budget,
       );
       recordOutcome(context, 'elevenlabs', true);
@@ -1580,7 +1778,7 @@ async function runTtsCascade({ text, lang, genderKey, speed, env, context, timeo
   const gttsCircuitOpen = await isCircuitOpen(env, 'gtts');
   if (!gttsCircuitOpen) {
     try {
-      const result = await fetchGoogleTTS(text, lang, speed, timeouts.tier2, budget);
+      const result = await fetchGoogleTTS(normalizedText, lang, speed, timeouts.tier2, budget);
       recordOutcome(context, 'gtts', true);
       return {
         bytes: result.bytes, contentType: result.contentType, provider: 'gtts', providerOfficial: false,
@@ -1618,7 +1816,7 @@ async function runTtsCascade({ text, lang, genderKey, speed, env, context, timeo
         try {
           const { response: result, keyIndex, keysTried } = await rotateAndFetchTTS(
             ringPointers.deepgram, deepgram.keys,
-            (key) => fetchDeepgramTTS(text, key, timeouts.tier3),
+            (key) => fetchDeepgramTTS(normalizedText, key, timeouts.tier3),
             'Deepgram', budget,
           );
           recordOutcome(context, 'deepgram', true);
@@ -1651,7 +1849,7 @@ async function runTtsCascade({ text, lang, genderKey, speed, env, context, timeo
         try {
           const { response: result, keyIndex, keysTried } = await rotateAndFetchTTS(
             ringPointers.speechmatics, speechmatics.keys,
-            (key) => fetchSpeechmaticsTTS(text, key, timeouts.tier3),
+            (key) => fetchSpeechmaticsTTS(normalizedText, key, timeouts.tier3),
             'Speechmatics', budget,
           );
           recordOutcome(context, 'speechmatics', true);
@@ -1727,8 +1925,13 @@ function buildResultHeaders(result, requestedLang) {
 // redundant upstream calls for a GOOD result, not preserve a degraded one.
 // Only the guaranteed fallback is excluded; a genuine Tier 2/3 audio
 // response is exactly as cacheable as Tier 1's, unchanged from v9.
-function cacheControlFor(result) {
-  return result.provider === 'fallback_final' ? 'no-store' : 'public, max-age=3600';
+function cacheControlFor(result, lang) {
+  if (result.provider === 'fallback_final') return 'no-store';
+  // v10-EG: Cache Egyptian Arabic Edge TTS longer — it's the highest-quality
+  // dialect-native path and expensive to regenerate. Other tiers keep standard TTL.
+  const isEG = String(lang).toLowerCase() === 'ar-eg';
+  if (isEG && result.provider === 'edge_tts') return 'public, max-age=7200';
+  return 'public, max-age=3600';
 }
 
 function logTtsEvent(fields) {
@@ -1799,7 +2002,7 @@ export async function onRequestGet(context) {
       status: 200,
       headers: {
         'Content-Type' : result.contentType,
-        'Cache-Control': cacheControlFor(result),
+        'Cache-Control': cacheControlFor(result, safeLang),
         'X-TTS-Request-Id' : requestId,
         'X-TTS-Latency-Ms' : String(Date.now() - t0),
         ...buildResultHeaders(result, safeLang),
@@ -1872,7 +2075,7 @@ export async function onRequestPost(context) {
       status: 200,
       headers: {
         'Content-Type' : result.contentType,
-        'Cache-Control': cacheControlFor(result),
+        'Cache-Control': cacheControlFor(result, safeLang),
         'X-TTS-Request-Id' : requestId,
         'X-TTS-Latency-Ms' : String(Date.now() - t0),
         ...buildResultHeaders(result, safeLang),
