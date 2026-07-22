@@ -451,18 +451,19 @@
  *     All 13 keys = 650 OpenRouter req/day free.
  *
  *   OPTIONAL — Gemini extra keys (each must be a DIFFERENT Google account):
- *     GEMINI_API_KEY_2        Secret   Google account 2  (~3,000 req/day)
- *     GEMINI_API_KEY_3        Secret   Google account 3
- *     GEMINI_API_KEY_4        Secret   Google account 4
- *     GEMINI_API_KEY_5        Secret   Google account 5
- *     GEMINI_API_KEY_6        Secret   Google account 6
- *     GEMINI_API_KEY_7        Secret   Google account 7
- *     GEMINI_API_KEY_8        Secret   Google account 8
- *     GEMINI_API_KEY_9        Secret   Google account 9
- *     GEMINI_API_KEY_10       Secret   Google account 10
- *     GEMINI_API_KEY_11       Secret   Google account 11
- *     GEMINI_API_KEY_12       Secret   Google account 12
- *     GEMINI_API_KEY_13       Secret   Google account 13
+ *     GEMINI_API_KEY             Secret   Google account 1  (~3,000 req/day)
+ *     GEMINI_API_KEY_1        Secret   Google account 2 
+ *     GEMINI_API_KEY_2        Secret   Google account 3
+ *     GEMINI_API_KEY_3        Secret   Google account 4
+ *     GEMINI_API_KEY_4        Secret   Google account 5
+ *     GEMINI_API_KEY_5        Secret   Google account 6
+ *     GEMINI_API_KEY_6        Secret   Google account 7
+ *     GEMINI_API_KEY_7        Secret   Google account 8
+ *     GEMINI_API_KEY_8        Secret   Google account 9
+ *     GEMINI_API_KEY_9        Secret   Google account 10
+ *     GEMINI_API_KEY_10       Secret   Google account 11
+ *     GEMINI_API_KEY_11       Secret   Google account 12
+ *     GEMINI_API_KEY_12       Secret   Google account 13
  *     All 13 keys = ~39,000 Gemini req/day free.
  *     ⚠️  Each key must come from a distinct Google account — the same account
  *     does not produce a second quota pool (verified June 2026).

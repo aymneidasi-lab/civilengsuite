@@ -122,6 +122,17 @@ export async function fetchWithTimeout(url, init, timeoutMs) {
 // wrangler config/dashboard and cannot be overridden from a call site --
 // a genuinely separate allowance there needs its own binding.
 export async function checkRateLimit(env, key, opts = {}) {
+  // Defensive: opts can be explicitly passed as null from a caller; ?? on
+  // a null object throws. Default-param only catches undefined.
+  opts = opts || {};
+  if (!env) {
+    if (!checkRateLimit._warned) {
+      checkRateLimit._warned = true;
+      console.warn('[rotation.mjs] No env provided — endpoint is unthrottled.');
+    }
+    return { limited: false, mechanism: 'no-env' };
+  }
+
   if (env.RATE_LIMITER) {
     try {
       const { success } = await env.RATE_LIMITER.limit({ key });
@@ -138,7 +149,13 @@ export async function checkRateLimit(env, key, opts = {}) {
       const maxPerWindow  = opts.maxPerWindow  ?? 8; // ~1 action every 7.5s sustained, generous for one real user
       const bucket = Math.floor(Date.now() / 1000 / windowSeconds);
       const kvKey = `rl:${key}:${bucket}`;
-      const current = parseInt((await env.CES_CHAT_KV.get(kvKey)) || '0', 10);
+      // BUG FIX: parseInt on a corrupted/truthy non-numeric KV value
+      // (e.g. "NaN", "abc", or a manual dashboard edit) returns NaN.
+      // NaN >= maxPerWindow is always false, so the limiter silently
+      // becomes a no-op for that bucket's TTL. Guard against it.
+      const rawCurrent = await env.CES_CHAT_KV.get(kvKey);
+      const parsed = parseInt(rawCurrent || '0', 10);
+      const current = Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
       if (current >= maxPerWindow) {
         return { limited: true, mechanism: 'kv' };
       }
@@ -158,23 +175,21 @@ export async function checkRateLimit(env, key, opts = {}) {
 }
 
 // ── Gemini key pool ──────────────────────────────────────────────────────
-// Gemini's ring uniquely SKIPS _1 — confirmed against chat.js's own literal
-// env reads: account 1 = GEMINI_API_KEY (unsuffixed), accounts 2–13 =
-// GEMINI_API_KEY_2 .. GEMINI_API_KEY_13. This does NOT match Groq/
-// OpenRouter's plain _1.._12 pattern in the same codebase, and does not
-// match one of the two conflicting docs in api_keys.txt (its "reference
-// doc" lists _1.._12 contiguous for Gemini too — that doc is wrong; the
-// OTHER conflicting doc, check_api_keys-1.py, which says "Gemini's own
-// pool skips _1", is the one that matches this actual code). Verify
-// against the live Cloudflare dashboard if this ever needs to change —
-// do not "fix" this to look consistent with Groq/OpenRouter without
-// confirming which env vars actually exist first.
-//
-// Blank/absent keys are excluded by the .filter() — rotateStart() then
-// only rotates among keys that are actually configured.
+// CORRECTED: The actual Cloudflare dashboard env vars are:
+//   GEMINI_API_KEY          = Google account 1  (unsuffixed)
+//   GEMINI_API_KEY_1        = Google account 2
+//   GEMINI_API_KEY_2        = Google account 3
+//   ...
+//   GEMINI_API_KEY_12       = Google account 13
+// The previous version incorrectly skipped _1 and looked for a non-existent
+// _13, meaning GEMINI_API_KEY_1 (a real, configured key) was never used,
+// and GEMINI_API_KEY_13 (which does not exist) was searched instead.
+// This now matches the live dashboard exactly: 1 unsuffixed + _1.._12.
 export function buildGeminiKeyPool(env) {
+  if (!env) return [];
   return [
     env.GEMINI_API_KEY    || '',
+    env.GEMINI_API_KEY_1  || '',
     env.GEMINI_API_KEY_2  || '',
     env.GEMINI_API_KEY_3  || '',
     env.GEMINI_API_KEY_4  || '',
@@ -186,7 +201,6 @@ export function buildGeminiKeyPool(env) {
     env.GEMINI_API_KEY_10 || '',
     env.GEMINI_API_KEY_11 || '',
     env.GEMINI_API_KEY_12 || '',
-    env.GEMINI_API_KEY_13 || '',
   ]
     .map((key, originalIndex) => ({ key, originalIndex }))
     .filter(k => k.key);
