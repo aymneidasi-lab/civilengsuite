@@ -1,6 +1,66 @@
 /**
- * functions/api/chat.js  —  v24  (2026-07-20)
+ * functions/api/chat.js  —  v25  (2026-07-26)
  * ──────────────────────────────────────────────────────────────────────────
+ * ════════════════════════════════════════
+ * CHANGELOG v25 — STANDARD-MODE CONFIDENTIALITY + MISATTRIBUTED FINAL ERROR
+ *   + DEAD-KEY BUDGET WASTE (false "الوصول محجوب" reports investigated)
+ * ════════════════════════════════════════
+ *
+ * CONTEXT: reported symptom was normal users, and intermittently the
+ *   developer, seeing "الوصول محجوب، تواصل مع المسؤول" (API access denied)
+ *   with no apparent connection to what they typed. Investigated on the
+ *   assumption of a content/keyword filter — none exists anywhere in this
+ *   file (confirmed by direct read of the full request pipeline, step 3a
+ *   through 3d below); userMessage validation is exactly: non-empty,
+ *   contains a letter/digit, ≤2000 chars. Three real, unrelated issues
+ *   found and fixed instead:
+ *
+ * CHANGE 1 (SYSTEM_PROMPT — standard-mode confidentiality): added an
+ *   IMPLEMENTATION CONFIDENTIALITY section so the model doesn't surface
+ *   backend/API/Cloudflare vocabulary to non-developer users. Vocabulary/
+ *   tone rule only — does not change model behaviour toward any request,
+ *   does not gate topics behind a password, does not touch
+ *   DEVELOPER_SYSTEM_PROMPT (unchanged).
+ *
+ * CHANGE 2 (BUG — final error mis-attributed to Gemini): the very last
+ *   line of onRequestPost, `buildFriendlyError(lastGeminiResult, ...)`,
+ *   always passed the LAST GEMINI-layer result, even though Workers AI,
+ *   Groq (13 keys), and OpenRouter (13 keys) all run AFTER Gemini and are
+ *   each capable of being the actual final failure. A dead Groq/OpenRouter
+ *   key surfaced to the user as a Gemini-flavoured "access blocked"
+ *   message, and server logs were the only way to learn what really
+ *   failed. FIX: `lastGeminiResult` renamed to `lastProviderResult`,
+ *   updated after every layer's failure (Gemini/Workers AI/Groq/
+ *   OpenRouter), passed into buildFriendlyError at the end. That
+ *   function's own wording was already provider-agnostic — only the
+ *   caller was wrongly Gemini-only.
+ *
+ * CHANGE 3 (WASTE — dead key retried forever + wasted same-key fallback
+ *   call): a key that returns 401/403 (revoked, API not enabled, referrer/
+ *   region-restricted, billing-suspended — a permission problem, not
+ *   transient) was retried on literally every future request forever, and
+ *   within a single request the FALLBACK model was still attempted on the
+ *   same broken key even though a credential failure applies to the whole
+ *   account, not one model. Both waste subrequest budget (48 on the Free
+ *   plan) that the later Groq/OpenRouter layers need — plausible mechanism
+ *   for why failures looked intermittent/random rather than a clean
+ *   single-key outage. FIX: (a) skip the same-key fallback-model call when
+ *   the primary already returned 401/403; (b) new per-isolate, in-memory,
+ *   30-min TTL dead-key cache (skipDeadKeys/markKeyResult/isKeyDead,
+ *   defined near the rotation.mjs imports) — NOT KV-backed, deliberately,
+ *   since env.CES_CHAT_KV already runs close to its Free-plan 1,000-
+ *   writes/day ceiling for rate limiting alone. Fails open if an entire
+ *   pool is marked dead. Keyed by provider+pool-index, never by message
+ *   content or caller identity — applies equally to every visitor,
+ *   developer included, which is the opposite of the originally suspected
+ *   (and disconfirmed) per-user keyword filter.
+ *
+ * NOT DONE (verify separately, outside this file): whether any of the 13
+ *   Gemini / 13 Groq / 13 OpenRouter keys are actually the ones returning
+ *   401/403 — that requires hitting each provider directly with live
+ *   credentials, which this sandbox does not have. Change 3 makes a dead
+ *   key cheap to carry; it does not replace fixing or removing it.
+ *
  * ════════════════════════════════════════
  * CHANGELOG v24 — TEXT FILE ATTACHMENTS SILENTLY DROPPED (Insert Text File)
  * ════════════════════════════════════════
@@ -880,6 +940,59 @@ import {
   keyTagFor,
 } from '../_lib/rotation.mjs';
 
+// ── Per-isolate dead-key skip cache (v25) ─────────────────────────────────
+// Module scope — persists for the lifetime of a warm Worker isolate, reset
+// on cold start. Not durable, not shared across isolates or regions: this
+// is a best-effort optimisation, not a source of truth. Deliberately NOT
+// backed by KV — env.CES_CHAT_KV already runs close to its Free-plan
+// 1,000-writes/day ceiling for rate limiting alone (see rotation.mjs); an
+// extra read+write per provider attempt here would compete for that same
+// budget to solve a problem in-memory state already handles well enough.
+//
+// PURPOSE: a key that returns 401/403 is credential-broken (revoked, wrong
+// project, API not enabled, region/referrer restriction) — that does not
+// self-heal in seconds the way a 429/500/503 does, so retrying it on every
+// single request forever wastes 1 fetch() subrequest (2, counting Gemini's
+// primary+fallback model on the same key) out of the 48-subrequest
+// Free-plan budget on a call that cannot succeed. Skipping it for a
+// bounded window frees that budget for keys/providers that can actually
+// answer — this is what stops one dead key from starving the tail of the
+// fallback chain (Groq/OpenRouter) under concurrent load, the mechanism
+// most likely behind intermittent "الوصول محجوب" reports that don't
+// correlate with anything the user typed.
+//
+// NOT a security control and NOT a content filter: entries are keyed by
+// provider + pool-index (e.g. "gemini:3"), never by message content or by
+// who is asking — a bad key is skipped for every caller equally, developer
+// included, which is the direction opposite the originally reported symptom.
+const DEAD_KEY_TTL_MS = 30 * 60 * 1000; // 30 min: long enough to matter under
+                                         // sustained traffic, short enough that
+                                         // a manually-fixed key self-recovers
+                                         // without a redeploy.
+const deadKeyUntil = new Map(); // "provider:originalIndex" -> epoch ms
+
+function isKeyDead(provider, originalIndex) {
+  const until = deadKeyUntil.get(`${provider}:${originalIndex}`);
+  return typeof until === 'number' && Date.now() < until;
+}
+// Only 401/403 mark a key dead — those are credential/permission errors.
+// 429/500/503/network/timeout are transient by nature and must keep being
+// retried at full frequency; marking those dead would turn a temporary
+// quota blip into a self-inflicted 30-minute outage for that key.
+function markKeyResult(provider, originalIndex, result) {
+  if (result.httpStatus === 401 || result.httpStatus === 403) {
+    deadKeyUntil.set(`${provider}:${originalIndex}`, Date.now() + DEAD_KEY_TTL_MS);
+  }
+}
+// Fail-open: if every key in a pool is currently marked dead (stale entries
+// after a real fix, or a genuinely all-broken pool), ignore the cache
+// entirely rather than handing back an empty pool — an occasional wasted
+// subrequest is preferable to a caching bug causing a total outage.
+function skipDeadKeys(pool, provider) {
+  const live = pool.filter(k => !isKeyDead(provider, k.originalIndex));
+  return live.length > 0 ? live : pool;
+}
+
 // ── Knowledge-base retrieval (Footing Pro + PC Suite, v16) ────────────────
 // Stopwords kept short and cheap on purpose — this runs on every request.
 const KB_STOPWORDS = new Set([
@@ -1256,6 +1369,27 @@ questions, teach when useful, and steer genuine interest toward purchase without
 You know this product cold. You are proud of it because you understand the engineering.
 For quick questions give quick answers (2–4 sentences). For technical depth or real purchase intent,
 go as long as the question deserves. Every sentence earns its place. Never pad.
+
+════════════════════════════════════════
+IMPLEMENTATION CONFIDENTIALITY — STANDARD MODE (CRITICAL)
+════════════════════════════════════════
+You run on infrastructure the user never needs to think about. In standard (non-developer)
+conversations:
+• Don't name or describe your own implementation — "backend", "API", "prompt", "token budget",
+  "Cloudflare", "server-side", "system instructions", "chat.js", or the underlying model/provider
+  name. Not because it's secret, but because it's irrelevant to someone asking about footing
+  design — answer what they actually need instead of narrating your own plumbing.
+• If someone asks how you work, why an attached file didn't behave as expected, or anything about
+  what's "under the hood": give a short, honest, non-technical answer and move on to their actual
+  question. Don't invent a cover story, and don't claim capabilities — or limits — you don't
+  actually have. (Text-file attachments ARE read and answered from directly; if one fails, say
+  what's wrong with the file itself — too many files, not a text file, too long — not "I can't
+  read attachments.")
+• This is a tone/vocabulary rule, not a change in scope or in what you're willing to help with —
+  a curious user asking a genuine question still gets a real, complete answer, just without
+  engineering internals mixed into it.
+• Developer Mode (separate, password-gated, defined later in this prompt if attached) is the only
+  context where implementation detail is in scope at all.
 
 ════════════════════════════════════════
 LANGUAGE RULE — CRITICAL
@@ -3384,10 +3518,15 @@ function isArabicText(str) {
   return /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/.test(str || '');
 }
 
-// ── Friendly error builder — v10 update, v15 single-language fix ──────────
-// `geminiResult` is the callGeminiWithRetry() result from the LAST Gemini
-// layer attempted (flash-lite if it ran, otherwise flash) — or a synthetic
-// NOT_CONFIGURED stand-in when GEMINI_API_KEY is missing entirely.
+// ── Friendly error builder — v10 update, v15 single-language fix, v25 scope fix ──
+// `lastProviderResult` [v25, was `geminiResult`] is the {ok,httpStatus,
+// errStatus,errBody} result from whichever of the four layers — Gemini,
+// Workers AI, Groq, OpenRouter — actually ran and failed last, not
+// necessarily Gemini. The wording below was already provider-agnostic
+// (no layer name appears in any user-facing string); only the caller used
+// to restrict this argument to Gemini's own outcome, which mis-attributed
+// a Groq/OpenRouter failure to "API access denied" whenever one of those
+// two was the true last attempt.
 // `workersAttempted` tells the message whether Layer 3 was even tried.
 // `userMessage` is the visitor's own text, used only to pick ONE reply
 // language — the same thing the live model already does correctly per
@@ -3400,10 +3539,10 @@ function isArabicText(str) {
 // v10 change (still true): all quota-exhausted and generic failure paths
 // include WhatsApp (+201287232413) and email as a direct contact fallback —
 // a quota failure is no longer a dead end for the user.
-function buildFriendlyError(geminiResult, workersAttempted, userMessage) {
+function buildFriendlyError(lastProviderResult, workersAttempted, userMessage) {
   const ar = isArabicText(userMessage);
 
-  if (geminiResult.errStatus === 'RESOURCE_EXHAUSTED') {
+  if (lastProviderResult.errStatus === 'RESOURCE_EXHAUSTED') {
     if (workersAttempted) {
       return ar
         ? 'المساعد مش متاح دلوقتي — كل المزودين المجانيين وصلوا للحد أو اشتغلوا. ' +
@@ -3418,7 +3557,7 @@ function buildFriendlyError(geminiResult, workersAttempted, userMessage) {
       : 'Daily AI quota reached — the assistant resets after midnight UTC. ' +
         'For urgent questions: WhatsApp +201287232413 · aymneidasi@gmail.com.';
   }
-  if (geminiResult.errStatus === 'RATE_LIMIT_EXCEEDED') {
+  if (lastProviderResult.errStatus === 'RATE_LIMIT_EXCEEDED') {
     return ar
       ? 'في طلبات كتير دلوقتي. استنى 30–60 ثانية وحاول تاني.'
       : 'Too many requests right now. Please wait 30–60 seconds and try again.';
@@ -3428,7 +3567,7 @@ function buildFriendlyError(geminiResult, workersAttempted, userMessage) {
   // heavy-traffic symptom (lots of concurrent users, lots of retries
   // burning the budget), not a quota or single-provider outage, so the
   // wording is shorter-timescale than the RESOURCE_EXHAUSTED message.
-  if (geminiResult.errStatus === 'SUBREQUEST_BUDGET_EXHAUSTED') {
+  if (lastProviderResult.errStatus === 'SUBREQUEST_BUDGET_EXHAUSTED') {
     return ar
       ? 'المساعد مشغول جداً دلوقتي. حاول تاني بعد لحظات.'
       : 'The assistant is extremely busy right now. Please try again in a moment.';
@@ -3448,7 +3587,7 @@ function buildFriendlyError(geminiResult, workersAttempted, userMessage) {
     503: { en: 'The AI service is temporarily unavailable. Please try again in a minute.',
            ar: 'الخدمة مش متاحة دلوقتي، جرب تاني بعد دقيقة.' },
   };
-  const matched = friendlyErrors[geminiResult.httpStatus];
+  const matched = friendlyErrors[lastProviderResult.httpStatus];
   if (matched) return ar ? matched.ar : matched.en;
 
   return ar
@@ -3470,6 +3609,23 @@ function buildFriendlyError(geminiResult, workersAttempted, userMessage) {
 const DEV_SESSION_KV_PREFIX      = 'dev_chat:';
 const DEV_SESSION_KEY_MAX_LEN    = 128;        // sessionKey length cap
 const DEV_SESSION_MAX_SERIALIZED = 1_000_000;  // ~1MB guard on stored JSON size
+// v26: charset enforced on WRITE (save) only, never on read (load/list).
+// Enforcing it on load too would lock the developer out of any session
+// saved before this validation existed (spaces, punctuation, etc. were
+// previously unrestricted) — those must stay loadable. New saves are
+// restricted to Latin letters/digits, the Arabic block (U+0600-U+06FF,
+// which also covers Arabic-Indic digits), underscore, and hyphen — this
+// app is Arabic/English only (see cesGetSttLang()), so this isn't a
+// narrower charset than the product actually needs. No \p{L}/u-flag
+// property escapes here on purpose, so the identical pattern can be
+// reused verbatim on the frontend without depending on a modern regex
+// engine in whatever browser/webview embeds the chat widget.
+const DEV_SESSION_NAME_PATTERN   = /^[A-Za-z0-9\u0600-\u06FF_-]+$/;
+// v26: the exact, deterministic confirmation devCommand:'activate' returns.
+// Kept as a single literal (not templated per-language) — see the /dev
+// handler's rationale comment in the frontend for why English-only is the
+// right call here despite the app being bilingual elsewhere.
+const DEV_ACTIVATION_BANNER      = '🔒 Developer mode active — Eng. Aymn Asi authenticated.';
 
 // saveConversation() — writes { history, title, savedAt, messageCount } to
 // `${DEV_SESSION_KV_PREFIX}${sessionKey}` in the given KV binding. No
@@ -3500,8 +3656,22 @@ async function saveConversation(kv, sessionKey, history, title) {
       code: 'SESSION_TOO_LARGE',
     };
   }
+  // v25: metadata mirrors {title, savedAt, messageCount} onto the KV key
+  // entry itself (KV metadata cap is 1024 bytes serialized — this object is
+  // a few dozen bytes, nowhere close). This is what makes listSessions()
+  // below cheap: namespace.list() returns metadata inline with each key
+  // name, so the list command never has to kv.get() every session just to
+  // show the developer what's in it. Existing keys written before this
+  // change have no metadata — listSessions() treats that as "unknown", not
+  // an error (see the fallback there).
   try {
-    await kv.put(DEV_SESSION_KV_PREFIX + sessionKey, serialized);
+    await kv.put(DEV_SESSION_KV_PREFIX + sessionKey, serialized, {
+      metadata: {
+        title: payload.title,
+        savedAt: payload.savedAt,
+        messageCount: payload.messageCount,
+      },
+    });
     return { ok: true, savedAt: payload.savedAt, messageCount: payload.messageCount };
   } catch (err) {
     console.error('[chat.js] saveConversation KV put error:', err.message);
@@ -3548,6 +3718,65 @@ async function loadConversation(kv, sessionKey) {
     savedAt: typeof payload.savedAt === 'string' ? payload.savedAt : null,
     messageCount: typeof payload.messageCount === 'number' ? payload.messageCount : payload.history.length,
   };
+}
+
+// listSessions() — enumerates every key under DEV_SESSION_KV_PREFIX via the
+// KV binding's native list({prefix}) call. This is the actual fix for the
+// problem the request was written to solve: KV has no query/index layer, so
+// naming keys with a shared prefix and using list({prefix}) is the
+// documented way to get "just the names" without a full-namespace scan
+// (list() only ever walks keys under the prefix, not the whole namespace)
+// and without reading each value (list() returns metadata, not the value —
+// see saveConversation()'s kv.put(..., {metadata}) above, which is what
+// populates title/savedAt/messageCount here for free).
+//
+// Pagination: the binding caps each list() call at 1000 keys and signals
+// more with list_complete === false + a cursor. A single developer's
+// session count will never approach that, but the loop below still drains
+// the cursor correctly rather than silently truncating at 1000 — anything
+// else is a latent bug waiting for a user who saves a lot of sessions.
+// MAX_PAGES is a hard stop (100 pages = up to 100,000 keys) purely as a
+// runaway-loop guard against a corrupted or unexpectedly huge cursor chain;
+// it is not expected to ever bind in practice.
+//
+// Like saveConversation()/loadConversation(), `kv` is injected by the
+// caller (env.CES_SESSIONS) rather than read from `env` in here.
+const DEV_SESSION_LIST_MAX_PAGES = 100;
+
+async function listSessions(kv, prefix) {
+  const sessions = [];
+  let cursor;
+  let pages = 0;
+  try {
+    do {
+      const page = await kv.list({ prefix, cursor });
+      for (const key of page.keys) {
+        const meta = key.metadata && typeof key.metadata === 'object' ? key.metadata : null;
+        sessions.push({
+          name: key.name.slice(prefix.length),
+          title: meta && typeof meta.title === 'string' ? meta.title : null,
+          savedAt: meta && typeof meta.savedAt === 'string' ? meta.savedAt : null,
+          messageCount: meta && typeof meta.messageCount === 'number' ? meta.messageCount : null,
+        });
+      }
+      cursor = page.list_complete ? undefined : page.cursor;
+      pages += 1;
+    } while (cursor && pages < DEV_SESSION_LIST_MAX_PAGES);
+  } catch (err) {
+    console.error('[chat.js] listSessions KV list error:', err.message);
+    return { ok: false, error: 'Failed to list saved sessions from storage.', code: 'KV_LIST_ERROR' };
+  }
+
+  // Most-recently-saved first. Sessions with no savedAt (pre-v25 keys with
+  // no metadata) sort to the end rather than being placed arbitrarily.
+  sessions.sort((a, b) => {
+    if (a.savedAt && b.savedAt) return b.savedAt.localeCompare(a.savedAt);
+    if (a.savedAt) return -1;
+    if (b.savedAt) return 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  return { ok: true, sessions };
 }
 
 // ── POST handler ───────────────────────────────────────────────────────────
@@ -3705,8 +3934,33 @@ export async function onRequestPost(context) {
       );
     }
 
+    // v26: 'activate' — the /dev PASSWORD flow. Previously this command
+    // didn't exist: the client sent a real Arabic probe MESSAGE through the
+    // full AI pipeline, relying on DEVELOPER_SYSTEM_PROMPT's FIRST-RESPONSE
+    // PROTOCOL to make the model print a fixed welcome banner as its reply.
+    // Two problems with that: (1) it burns one real provider call — on the
+    // Workers AI layer specifically, one call off an ~100/day quota — just
+    // to confirm a password check the server already ran deterministically
+    // above; (2) instruction-following on whichever provider actually
+    // answers isn't 100% reliable, so the wording can drift from what
+    // DEVELOPER_SYSTEM_PROMPT specifies (observed: a fallback-tier model
+    // produced its own paraphrase instead of the exact banner text).
+    // Activation is a yes/no the server already knows — it needs none of
+    // the AI's judgment, so it gets the same short-circuit save/load/list
+    // already have. Placed before the sessionKey/CES_SESSIONS checks below
+    // because 'activate' needs neither.
+    if (rawDevCommand === 'activate') {
+      console.info('[chat.js] Developer mode activation confirmed for', clientIp);
+      return json({ devMode: true, reply: DEV_ACTIVATION_BANNER }, 200, undefined, request);
+    }
+
+    // sessionKey targets a single session — save/load need it, list doesn't
+    // (it enumerates everything under the prefix). Gating this on command
+    // name, rather than requiring it unconditionally, is the only structural
+    // change here; the save/load checks below are untouched from v20.
+    const sessionKeyRequired = (rawDevCommand === 'save' || rawDevCommand === 'load');
     const sessionKey = typeof body.sessionKey === 'string' ? body.sessionKey.trim() : '';
-    if (!sessionKey) {
+    if (sessionKeyRequired && !sessionKey) {
       return json(
         { error: 'sessionKey is required for save/load commands.', code: 'SESSION_KEY_REQUIRED' },
         400,
@@ -3714,7 +3968,7 @@ export async function onRequestPost(context) {
         request,
       );
     }
-    if (sessionKey.length > DEV_SESSION_KEY_MAX_LEN) {
+    if (sessionKeyRequired && sessionKey.length > DEV_SESSION_KEY_MAX_LEN) {
       return json(
         { error: `sessionKey must be ${DEV_SESSION_KEY_MAX_LEN} characters or fewer.`, code: 'SESSION_KEY_TOO_LONG' },
         400,
@@ -3738,6 +3992,19 @@ export async function onRequestPost(context) {
     }
 
     if (rawDevCommand === 'save') {
+      // Charset check lives HERE (write path only) — see DEV_SESSION_NAME_PATTERN's
+      // comment above for why load/list must stay permissive.
+      if (!DEV_SESSION_NAME_PATTERN.test(sessionKey)) {
+        return json(
+          {
+            error: 'Session name may only contain letters, numbers, hyphens, and underscores (no spaces or other special characters).',
+            code: 'SESSION_KEY_INVALID',
+          },
+          400,
+          undefined,
+          request,
+        );
+      }
       const historyToSave = Array.isArray(body.history) ? body.history : null;
       if (!historyToSave) {
         return json(
@@ -3784,8 +4051,27 @@ export async function onRequestPost(context) {
       );
     }
 
+    if (rawDevCommand === 'list') {
+      const listResult = await listSessions(env.CES_SESSIONS, DEV_SESSION_KV_PREFIX);
+      if (!listResult.ok) {
+        return json(
+          { error: listResult.error, code: listResult.code },
+          500,
+          undefined,
+          request,
+        );
+      }
+      console.info('[chat.js] Dev session list requested:', listResult.sessions.length, 'sessions, for', clientIp);
+      return json(
+        { ok: true, sessions: listResult.sessions, count: listResult.sessions.length },
+        200,
+        undefined,
+        request,
+      );
+    }
+
     return json(
-      { error: `Unknown devCommand "${rawDevCommand}". Expected "save" or "load".`, code: 'UNKNOWN_DEV_COMMAND' },
+      { error: `Unknown devCommand "${rawDevCommand}". Expected "activate", "save", "load", or "list".`, code: 'UNKNOWN_DEV_COMMAND' },
       400,
       undefined,
       request,
@@ -3841,6 +4127,18 @@ export async function onRequestPost(context) {
     }
     if (extractedName.length > DEV_SESSION_KEY_MAX_LEN) {
       return json({ reply: `Session name must be ${DEV_SESSION_KEY_MAX_LEN} characters or fewer, Engineer.`, devMode: true }, 200, undefined, request);
+    }
+    // Same charset as the /save slash command (DEV_SESSION_NAME_PATTERN) —
+    // multi-word phrases like "خطة اعادة الهيكلة" (which worked before this
+    // check existed) now get rejected with guidance rather than silently
+    // becoming a space-containing KV key. Trade consistency/hygiene for a
+    // small natural-language regression; a single hyphenated word still
+    // works fine ("خطة-اعادة-الهيكلة").
+    if (!DEV_SESSION_NAME_PATTERN.test(extractedName)) {
+      return json({
+        reply: 'Session names can only use letters, numbers, hyphens, and underscores, Engineer — no spaces. Try something like "خطة-اعادة-الهيكلة" or "refactor-plan".',
+        devMode: true,
+      }, 200, undefined, request);
     }
     if (!env.CES_SESSIONS) {
       console.error('[chat.js] CES_SESSIONS KV binding missing — cannot process save-session trigger.');
@@ -3905,6 +4203,49 @@ export async function onRequestPost(context) {
         loadedHistory: loadResult.history,
         loadedTitle: loadResult.title,
       },
+      200,
+      undefined,
+      request,
+    );
+  }
+
+  // 3b-4. Natural-language "list sessions" trigger. [NEW, v25]
+  //     Syntax: "اعرض قائمة السيشنز" / "اعرض الجلسات" or
+  //     "list sessions" — same placement/gating convention as 3b-2/3b-3:
+  //     dev-mode gated, checked against the raw body.message, intercepted
+  //     before any LLM call, RESPONSE SHAPE {reply, devMode} so an
+  //     unmodified client just renders `reply` as a normal bot bubble —
+  //     the actual list is rendered as plain text inside `reply` itself,
+  //     so this needs no frontend change to be usable (same constraint the
+  //     save/load triggers were built against). The explicit /list slash
+  //     command (frontend + devCommand:'list' above) is the structured
+  //     alternative for a client that wants the raw `sessions` array
+  //     instead of pre-formatted text.
+  const rawMessageForListTrigger = typeof body.message === 'string' ? body.message.trim() : '';
+  const listSessionsMatch = isDeveloperMode
+    ? /^(?:(?:اعرض|اظهر)\s+(?:قائمة\s+)?(?:السيشنز|الجلسات)|list\s+sessions)\s*$/i.test(rawMessageForListTrigger)
+    : false;
+  if (listSessionsMatch) {
+    if (!env.CES_SESSIONS) {
+      console.error('[chat.js] CES_SESSIONS KV binding missing — cannot process list-sessions trigger.');
+      return json({ reply: 'Session storage is not configured on the server yet, Engineer.', devMode: true }, 200, undefined, request);
+    }
+    const listTriggerResult = await listSessions(env.CES_SESSIONS, DEV_SESSION_KV_PREFIX);
+    if (!listTriggerResult.ok) {
+      console.error('[chat.js] list-sessions trigger failed:', listTriggerResult.code, listTriggerResult.error);
+      return json({ reply: `Couldn't list sessions, Engineer: ${listTriggerResult.error}`, devMode: true }, 200, undefined, request);
+    }
+    console.info('[chat.js] Session list requested via natural-language trigger:', listTriggerResult.sessions.length, 'sessions, from', clientIp);
+    if (listTriggerResult.sessions.length === 0) {
+      return json({ reply: 'No saved sessions found, Engineer.', devMode: true }, 200, undefined, request);
+    }
+    const listLines = listTriggerResult.sessions.map((s) => {
+      const turns = typeof s.messageCount === 'number' ? `${s.messageCount} turns` : 'turn count unknown';
+      const when  = s.savedAt ? s.savedAt : 'save date unknown';
+      return `• ${s.name} — ${turns}, saved ${when}`;
+    }).join('\n');
+    return json(
+      { reply: `Saved sessions (${listTriggerResult.sessions.length}), Engineer:\n${listLines}`, devMode: true },
       200,
       undefined,
       request,
@@ -4035,17 +4376,20 @@ export async function onRequestPost(context) {
   // v13: rotateStart() — see rotation.mjs for the full rationale. Every
   // concurrent request gets a different starting key instead of every
   // request piling onto geminiKeysIndexed[0] first.
-  const geminiPool = rotateStart(geminiKeysIndexed);
+  const geminiPool = skipDeadKeys(rotateStart(geminiKeysIndexed), 'gemini');
 
   // 6. GEMINI LAYERS — try each key (in rotated order) with PRIMARY then
   //    FALLBACK model. Replaces v10's Layers 1, 2, 6a, and 6b.
-  //    lastGeminiResult carries the final Gemini failure into buildFriendlyError.
-  let lastGeminiResult = { ok: false, httpStatus: 0, errStatus: 'NOT_ATTEMPTED', errBody: '' };
+  //    lastProviderResult carries the final failure from ANY layer (Gemini,
+  //    Workers AI, Groq, OpenRouter — whichever actually ran last) into
+  //    buildFriendlyError. [v25: renamed from lastGeminiResult and now
+  //    updated by every layer below, not just this one — see v25 changelog.]
+  let lastProviderResult = { ok: false, httpStatus: 0, errStatus: 'NOT_ATTEMPTED', errBody: '' };
 
   for (const { key: gKey, originalIndex } of geminiPool) {
     if (budget.remaining() <= 0) {
       console.warn('[chat.js] Subrequest budget exhausted during Gemini layer — stopping early.');
-      lastGeminiResult = { ok: false, httpStatus: 0, errStatus: 'SUBREQUEST_BUDGET_EXHAUSTED', errBody: '' };
+      lastProviderResult = { ok: false, httpStatus: 0, errStatus: 'SUBREQUEST_BUDGET_EXHAUSTED', errBody: '' };
       break;
     }
     const keyTag = keyTagFor(originalIndex);
@@ -4065,8 +4409,16 @@ export async function onRequestPost(context) {
         resA.errStatus, resA.httpStatus,
       );
     }
-    lastGeminiResult = resA;
+    lastProviderResult = resA;
+    markKeyResult('gemini', originalIndex, resA);
     if (budget.remaining() <= 0) break;
+
+    // [v25] A 401/403 on the primary model is a credential/permission
+    // problem for this key's whole account, not a per-model quota — the
+    // fallback model on the SAME key would fail identically. Skip it and
+    // move to the next key instead of spending a second subrequest on a
+    // call that structurally cannot succeed.
+    if (resA.httpStatus === 401 || resA.httpStatus === 403) continue;
 
     const resB = await callGeminiWithRetry(gKey, GEMINI_MODEL_FALLBACK, geminiContents, geminiSystemPrompt, budget);
     if (resB.ok) {
@@ -4083,7 +4435,8 @@ export async function onRequestPost(context) {
         resB.errStatus, resB.httpStatus,
       );
     }
-    lastGeminiResult = resB;
+    lastProviderResult = resB;
+    markKeyResult('gemini', originalIndex, resB);
   }
 
   // 7. WORKERS AI LAYER — unchanged routing from v10 (binding call, not a
@@ -4122,6 +4475,10 @@ export async function onRequestPost(context) {
   }
   if (workersAttempted) {
     console.error('[chat.js] Workers AI failed:', layerWorkers.errStatus);
+    lastProviderResult = layerWorkers; // [v25] only overwrite on a real attempt —
+                                        // NOT_BOUND (binding absent) is less
+                                        // informative than whatever Gemini
+                                        // already reported.
   }
 
   // 8. GROQ LAYERS — try each of up to 13 keys, in rotated order (v13).
@@ -4146,11 +4503,12 @@ export async function onRequestPost(context) {
   ]
     .map((key, originalIndex) => ({ key, originalIndex }))
     .filter(k => k.key);
-  const groqPool = rotateStart(groqKeysIndexed);
+  const groqPool = skipDeadKeys(rotateStart(groqKeysIndexed), 'groq');
 
   for (const { key: gqKey, originalIndex } of groqPool) {
     if (budget.remaining() <= 0) {
       console.warn('[chat.js] Subrequest budget exhausted during Groq layer — stopping early.');
+      lastProviderResult = { ok: false, httpStatus: 0, errStatus: 'SUBREQUEST_BUDGET_EXHAUSTED', errBody: '' };
       break;
     }
     const resG = await callGroqWithRetry(gqKey, workersMsgs, budget);
@@ -4168,6 +4526,8 @@ export async function onRequestPost(context) {
         resG.errStatus, resG.httpStatus,
       );
     }
+    lastProviderResult = resG;
+    markKeyResult('groq', originalIndex, resG);
   }
 
   // 9. OPENROUTER LAYERS — try each of up to 13 keys, in rotated order (v13).
@@ -4192,11 +4552,12 @@ export async function onRequestPost(context) {
   ]
     .map((key, originalIndex) => ({ key, originalIndex }))
     .filter(k => k.key);
-  const openRouterPool = rotateStart(openRouterKeysIndexed);
+  const openRouterPool = skipDeadKeys(rotateStart(openRouterKeysIndexed), 'openrouter');
 
   for (const { key: orKey, originalIndex } of openRouterPool) {
     if (budget.remaining() <= 0) {
       console.warn('[chat.js] Subrequest budget exhausted during OpenRouter layer — stopping early.');
+      lastProviderResult = { ok: false, httpStatus: 0, errStatus: 'SUBREQUEST_BUDGET_EXHAUSTED', errBody: '' };
       break;
     }
     const resOR = await callOpenRouterWithRetry(orKey, workersMsgs, budget);
@@ -4214,14 +4575,23 @@ export async function onRequestPost(context) {
         resOR.errStatus, resOR.httpStatus,
       );
     }
+    lastProviderResult = resOR;
+    markKeyResult('openrouter', originalIndex, resOR);
   }
 
   // 10. All layers exhausted.
-  //    lastGeminiResult = the final callGeminiWithRetry() outcome (last key,
-  //    FALLBACK model) — or the synthetic SUBREQUEST_BUDGET_EXHAUSTED result
-  //    set above if we broke out of the Gemini loop early (v13).
-  //    workersAttempted = whether Workers AI was tried.
-  return json({ error: buildFriendlyError(lastGeminiResult, workersAttempted, userMessage) }, 502, undefined, request);
+  //    [v25 FIX] Previously this always passed lastGeminiResult — the final
+  //    Gemini-layer outcome ONLY — into buildFriendlyError, even though
+  //    Workers AI, Groq, and OpenRouter all run AFTER Gemini and are each
+  //    individually capable of being the layer that actually failed last.
+  //    A real Groq or OpenRouter failure (bad key, model deprecated, 401)
+  //    was silently reported to the user as a Gemini-flavoured error,
+  //    which made server logs the only way to learn what actually broke.
+  //    buildFriendlyError's own error-code table was already provider-
+  //    agnostic in its wording (see its definition) — only the caller was
+  //    wrongly Gemini-only. lastProviderResult now reflects whichever call,
+  //    from any of the four layers, genuinely failed last.
+  return json({ error: buildFriendlyError(lastProviderResult, workersAttempted, userMessage) }, 502, undefined, request);
 }
 
 // ── OPTIONS preflight (required for CORS) ─────────────────────────────────
