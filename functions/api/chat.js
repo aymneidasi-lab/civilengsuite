@@ -3540,6 +3540,73 @@ function isArabicText(str) {
   return /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/.test(str || '');
 }
 
+// v27: deterministic backstop against implementation-disclosure leaks.
+// The prompt-level rule (IMPLEMENTATION CONFIDENTIALITY — see SYSTEM_PROMPT
+// / GEMINI_FOLLOWUP_PROMPT / WORKERS_AI_SYSTEM_PROMPT) is instruction-
+// following on the model's part: probabilistic, not guaranteed — and it has
+// already been observed to fail under a direct, persistent ask. Two
+// incidents: the model confirmed the production domain in a "we're hosted
+// on X" context, confirmed the licensing system specifically uses
+// Cloudflare KV, named the exact Workers AI model family, and gave a
+// working step-by-step guide to cloning the chat backend on Cloudflare
+// Workers — after the user simply stated "I'm talking about YOUR
+// architecture" and asked repeatedly. This function is the layer
+// underneath that: it scans the model's OWN OUTPUT after generation, for
+// terms with no legitimate reason to appear in a standard-mode reply, and
+// replaces the whole reply with a safe deflection if any are found. It
+// does not depend on the model cooperating — it runs regardless of how
+// well the prompt was followed, on every provider layer's success path.
+//
+// Deliberately NOT blocklisting: "server" (constant, legitimate use in
+// approved product messaging — "no license server dependency" is a real
+// selling point, see SYSTEM_PROMPT's licensing section); bare "API" (also
+// legitimate — "API hooking" appears in the anti-piracy section); the
+// civilengsuite.pages.dev domain or ".pages.dev" (this IS the approved
+// download link, said dozens of times in real answers — blocking it would
+// break the actual purchase flow, a worse outcome than the leak this
+// exists to catch). Every term below was checked against the actual
+// approved prompt content for a legitimate use before being added; none
+// were found. Known gap: this catches the Latin spelling "Cloudflare" —
+// both real incidents used it, even mid-Arabic-sentence, but an Arabic
+// transliteration alone ("كلاود فلير" / "كلاودفلير", spelling varies) would
+// not match. Enumerating every informal transliteration is unbounded and
+// wasn't attempted; the prompt-level rule is the (imperfect) coverage for
+// that case, this function is coverage for the Latin-spelling case that's
+// actually been observed twice.
+//
+// Skipped entirely in Developer Mode — full technical disclosure is the
+// explicit, password-gated point of that mode.
+const AI_DISCLOSURE_BLOCKLIST = [
+  'cloudflare',
+  'wrangler',
+  'workers ai',
+  '@cf/meta',
+  'github pages',
+  'system prompt',
+  'system instructions',
+  'chat.js',
+  '__path__.js',
+  'api key',
+  'developer_password',
+  'devpassword',
+];
+
+function sanitizeAiReply(replyText, isDeveloperMode) {
+  if (isDeveloperMode) return replyText; // full disclosure is the point of dev mode
+  const text = typeof replyText === 'string' ? replyText : '';
+  const lower = text.toLowerCase();
+  const hit = AI_DISCLOSURE_BLOCKLIST.find((term) => lower.includes(term));
+  if (!hit) return replyText;
+
+  console.warn(
+    '[chat.js] sanitizeAiReply: blocked a reply containing disclosure term',
+    JSON.stringify(hit), '— first 120 chars:', JSON.stringify(text.slice(0, 120)),
+  );
+  return isArabicText(text)
+    ? 'الموضوع ده متعلق ببنية الموقع الداخلية، وأنا مش بتكلم فيه بره وضع المطور. تحب نرجع لسؤالك الهندسي؟'
+    : "That's about the site's internal setup, which isn't something I discuss outside developer mode. Want to get back to your engineering question?";
+}
+
 // ── Friendly error builder — v10 update, v15 single-language fix, v25 scope fix ──
 // `lastProviderResult` [v25, was `geminiResult`] is the {ok,httpStatus,
 // errStatus,errBody} result from whichever of the four layers — Gemini,
@@ -4419,7 +4486,7 @@ export async function onRequestPost(context) {
     const resA = await callGeminiWithRetry(gKey, GEMINI_MODEL_PRIMARY, geminiContents, geminiSystemPrompt, budget);
     if (resA.ok) {
       return json(
-        { reply: resA.reply, ...(isDeveloperMode && { devMode: true }) },
+        { reply: sanitizeAiReply(resA.reply, isDeveloperMode), ...(isDeveloperMode && { devMode: true }) },
         200,
         { 'X-CES-AI-Source': `gemini-${keyTag}primary` },
         request,
@@ -4445,7 +4512,7 @@ export async function onRequestPost(context) {
     const resB = await callGeminiWithRetry(gKey, GEMINI_MODEL_FALLBACK, geminiContents, geminiSystemPrompt, budget);
     if (resB.ok) {
       return json(
-        { reply: resB.reply, ...(isDeveloperMode && { devMode: true }) },
+        { reply: sanitizeAiReply(resB.reply, isDeveloperMode), ...(isDeveloperMode && { devMode: true }) },
         200,
         { 'X-CES-AI-Source': `gemini-${keyTag}fallback` },
         request,
@@ -4489,7 +4556,7 @@ export async function onRequestPost(context) {
   const layerWorkers = await callWorkersAIWithRetry(env.AI, workersMsgs);
   if (layerWorkers.ok) {
     return json(
-      { reply: layerWorkers.reply, ...(isDeveloperMode && { devMode: true }) },
+      { reply: sanitizeAiReply(layerWorkers.reply, isDeveloperMode), ...(isDeveloperMode && { devMode: true }) },
       200,
       { 'X-CES-AI-Source': 'workers-ai-fallback' },
       request,
@@ -4536,7 +4603,7 @@ export async function onRequestPost(context) {
     const resG = await callGroqWithRetry(gqKey, workersMsgs, budget);
     if (resG.ok) {
       return json(
-        { reply: resG.reply, ...(isDeveloperMode && { devMode: true }) },
+        { reply: sanitizeAiReply(resG.reply, isDeveloperMode), ...(isDeveloperMode && { devMode: true }) },
         200,
         { 'X-CES-AI-Source': originalIndex === 0 ? 'groq-fallback' : `groq-key${originalIndex + 1}-fallback` },
         request,
@@ -4585,7 +4652,7 @@ export async function onRequestPost(context) {
     const resOR = await callOpenRouterWithRetry(orKey, workersMsgs, budget);
     if (resOR.ok) {
       return json(
-        { reply: resOR.reply, ...(isDeveloperMode && { devMode: true }) },
+        { reply: sanitizeAiReply(resOR.reply, isDeveloperMode), ...(isDeveloperMode && { devMode: true }) },
         200,
         { 'X-CES-AI-Source': originalIndex === 0 ? 'openrouter-fallback' : `openrouter-key${originalIndex + 1}-fallback` },
         request,
