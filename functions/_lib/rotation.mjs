@@ -285,22 +285,41 @@ const DEAD_MODEL_ERR_CODES = new Set(['model_decommissioned', 'model_not_found']
 // grows an OpenRouter layer of its own.
 const OPENROUTER_ACCOUNT_CONFIG_PATTERN = /no endpoints found matching your data policy/i;
 
-export function markModelResult(provider, model, result) {
+// [v34] Single source of truth for classifying a provider result. Both the
+// immediate per-request result (chat.js applies this right after each call,
+// so THIS request's own friendly-error message is accurate even before
+// anything is cached) and the dead-model cache write below now read from
+// the same function. Previously chat.js re-implemented part of this
+// inline, per provider, and drifted out of sync (v33: Gemini had no
+// immediate classification at all, Groq's covered only
+// 'model_decommissioned', OpenRouter's covered only the account-config
+// case) -- first request to hit a newly-dead model got a generic error;
+// only the second request onward (once cached) got the specific one.
+export function classifyProviderResult(provider, result) {
   if (
     provider === 'openrouter' &&
     result.httpStatus === 404 &&
     OPENROUTER_ACCOUNT_CONFIG_PATTERN.test(result.errBody || '')
   ) {
-    return; // account-scoped, not model-scoped — must not poison the shared cache
+    return { accountConfigIssue: 'OPENROUTER_DATA_POLICY', deadModelReason: null };
   }
-  const key = `${provider}:${model}`;
   if (result.httpStatus === 404) {
-    deadModelUntil.set(key, Date.now() + DEAD_MODEL_TTL_MS);
-    deadModelReason.set(key, 'MODEL_NOT_FOUND');
-    return;
+    return { accountConfigIssue: null, deadModelReason: 'MODEL_NOT_FOUND' };
   }
   if (result.httpStatus === 400 && DEAD_MODEL_ERR_CODES.has(result.errStatus)) {
-    deadModelUntil.set(key, Date.now() + DEAD_MODEL_TTL_MS);
-    deadModelReason.set(key, 'MODEL_DECOMMISSIONED');
+    return { accountConfigIssue: null, deadModelReason: 'MODEL_DECOMMISSIONED' };
   }
+  return { accountConfigIssue: null, deadModelReason: null };
+}
+
+export function markModelResult(provider, model, result) {
+  // Renamed to `reason` on destructure -- the module-level `deadModelReason`
+  // above (line ~247) is a Map; binding the same name here would shadow it
+  // and break the `.set(...)` call below.
+  const { accountConfigIssue, deadModelReason: reason } = classifyProviderResult(provider, result);
+  if (accountConfigIssue) return; // account-scoped, not model-scoped -- must not poison the shared cache
+  if (!reason) return;
+  const key = `${provider}:${model}`;
+  deadModelUntil.set(key, Date.now() + DEAD_MODEL_TTL_MS);
+  deadModelReason.set(key, reason);
 }

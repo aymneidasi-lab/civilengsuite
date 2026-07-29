@@ -1,6 +1,60 @@
 /**
- * functions/api/chat.js  —  v32  (2026-07-29)
+ * functions/api/chat.js  —  v34  (2026-07-29)
  * ──────────────────────────────────────────────────────────────────────────
+ * ════════════════════════════════════════
+ * CHANGELOG v34 — UNIFIED DEAD-MODEL CLASSIFICATION (rotation.mjs)
+ * ════════════════════════════════════════
+ *
+ * FOUND (tracing rotation.mjs's actual exports against v33's usage): first-
+ *   occurrence coverage was inconsistent across providers -- Gemini set no
+ *   immediate deadModelReason at all; Groq's inline check covered only
+ *   'model_decommissioned', not 'model_not_found'; OpenRouter's covered only
+ *   the account-config case. Each got the right message from the SECOND
+ *   request in a dead-model's 30-min TTL window (via the cache), not the
+ *   first. Narrow, low-frequency, not data loss -- fixed because it was
+ *   diagnosed precisely, not because it was urgent.
+ *
+ * FIX: rotation.mjs now exports classifyProviderResult(provider, result) --
+ *   the exact classification markModelResult already did internally,
+ *   pulled out so chat.js can apply it immediately, right after each call:
+ *   Object.assign(resX, classifyProviderResult('<provider>', resX)) at all
+ *   4 call sites (Gemini primary + fallback, Groq, OpenRouter). markModelResult
+ *   itself now calls the same function rather than repeating the checks --
+ *   one classifier, read by both the immediate-use path and the cache-write
+ *   path, so this can't drift out of sync again the way v33 did.
+ *
+ * NOT DONE: MODEL_NOT_FOUND still has no dedicated buildFriendlyError branch
+ *   (falls through to the generic httpStatus[404] message) -- pre-existing,
+ *   unchanged by this fix; only MODEL_DECOMMISSIONED had one to begin with.
+ * ════════════════════════════════════════
+ * ════════════════════════════════════════
+ * CHANGELOG v33 — RESPONSE FORMATTING SYNC + DEV-BANNER BACKSTOP + DEAD-MODEL
+ *   ERROR PLUMBING (code already present in upload; header/changelog were not)
+ * ════════════════════════════════════════
+ *
+ * 1. Bold/emoji formatting rules synced across SYSTEM_PROMPT, GEMINI_FOLLOWUP_
+ *    PROMPT, WORKERS_AI_SYSTEM_PROMPT (same three-tier pattern as v29).
+ * 2. stripSelfGeneratedDevBanner(): server-side backstop for sanitizeAiReply()
+ *    in dev mode — strips a model-generated banner-like opening paragraph
+ *    (<=220 chars, a dev-mode term + a confirmation term) if the v31 prompt-
+ *    level fix doesn't fully stop it. Falls back to the original text when
+ *    nothing follows the stripped paragraph, so a single-paragraph false
+ *    positive is a no-op, not data loss. Remaining narrow risk, accepted not
+ *    fixed: a short reply that discusses dev-mode activation as a topic
+ *    (not as a self-announcement) can still match and lose its opening line.
+ * 3. Dead-model-reason plumbing: getDeadModelReason (rotation.mjs) now backs
+ *    lastProviderResult when a request short-circuits on a cached-dead model
+ *    (Gemini/Groq/OpenRouter, ~lines 4807/4945/5005) — previously left
+ *    lastProviderResult stale on that path. New OPENROUTER_DATA_POLICY /
+ *    MODEL_DECOMMISSIONED friendly-error branches (~line 3964) read it; both
+ *    sit above the generic httpStatus lookup — confirmed not shadowed, and
+ *    errBody is confirmed populated the same way on all three provider paths.
+ *
+ * NOT VERIFIED HERE: rotation.mjs isn't attached to this session, so
+ *    getDeadModelReason's actual export can't be confirmed directly — the
+ *    import is consistent with the already-used isModelDead/markModelResult
+ *    pattern from the same module, but that's inference, not a check.
+ * ════════════════════════════════════════
  * ════════════════════════════════════════
  * CHANGELOG v32 — DEV-MODE TOPIC-SCOPE OVERRIDE (OFF-TOPIC REDIRECT DISABLED)
  * ════════════════════════════════════════
@@ -1076,6 +1130,7 @@ import {
   isModelDead,
   markModelResult,
   getDeadModelReason,
+  classifyProviderResult,
 } from '../_lib/rotation.mjs';
 
 // ── Per-isolate dead-key skip cache (v25) ─────────────────────────────────
@@ -1652,6 +1707,34 @@ ENGLISH TONE:
 Conversational, confident, plain English. Contractions are normal (I'm, you'll, it's, don't, that's).
 Short punchy sentences are good. Avoid corporate filler: "leverage", "seamless", "robust solution",
 "in today's fast-paced engineering landscape". Never use those phrases.
+
+════════════════════════════════════════
+RESPONSE FORMATTING — BOLD TERMS & EMOJI (CRITICAL)
+════════════════════════════════════════
+The client renders **double-asterisk** text as highlighted bold in the brand accent color — use
+it to make engineering answers scannable, not to decorate them.
+
+BOLD (wrap in **double asterisks**):
+• Code/standard names: **ACI 318-19**, **ECP 203**, **ASCE 7**.
+• Engineering values and quantities with units: **effective depth**, **35 kN**, **0.85f'c**.
+• The specific technical term the answer hinges on: **punching shear**, **drop panel**,
+  **combined footing**.
+Everything else — connective prose, the explanation itself — stays normal weight. Don't bold
+whole sentences or every technical word in sight; 2–4 bolded terms per reply is the target, not
+a minimum to hit every message.
+
+EMOJI: at most ONE per reply, placed at the very end of the final sentence — never as a header,
+never mid-sentence, never one per bullet. Omit it rather than force one in when nothing fits.
+Pick by meaning when one does: ✅ confirms something is correct/complete, 💡 flags a suggestion
+or insight, 🛠️ signals a practical fix or tool to reach for, 📋 points at a requirement or
+checklist item. (Same "max one, only when it fits" constraint as the emoji rule under DON'T
+above — this is the fuller spec for count, placement, and which one to reach for.)
+
+MULTIPLE VALID SOLUTIONS: name the technically stronger one first with a one-line reason, note
+the alternative briefly, then leave the pick to the user — never a flat list with no opinion.
+Egyptian-Arabic worked example (match this register, not فصحى):
+"يا هندسة، عشان تتفادى الـ **punching shear** في الـ **combined footing**، يفضل تزود الـ
+**effective depth** أو تستخدم **drop panel**. إيه رأيك؟ 🛠️"
 
 ════════════════════════════════════════
 ARABIC DIALECT TRAINING — EGYPTIAN (عامية مصرية)
@@ -3011,7 +3094,8 @@ the person's energy (short question → short answer). Vary phrasing; never repe
 opener or CTA every message. No emoji-headers, hashtags, "━━━" dividers. Prose over bullets
 unless content is genuinely list-shaped. Egyptian Arabic register: default "حضرتك", mirror
 "إنت" if they use it; favour دلوقتي، يعني، بصراحة، خالص، طب/طيب، مفيش، بقى، علشان، كمان، برضو
-over فصحى equivalents.
+over فصحى equivalents. Bold codes/terms/values in **double asterisks** (renders highlighted,
+2–4 per reply); at most one emoji, at the very end, from ✅💡🛠️📋, only when it genuinely fits.
 
 CORE PRODUCT FACTS — Civil Engineering Suite / Footing Pro v.2026 (the only live product):
 • Three standalone apps: Rectangular Combined Footing (equal/near-equal loads), Trapezoidal
@@ -3189,6 +3273,8 @@ aloud in the correct per-language voice.
 BEHAVIOUR:
 • Answer like a knowledgeable engineer texting a colleague — direct, warm, not scripted.
 • Match message length: short question → short answer. Technical depth → go longer.
+• Bold codes/terms/values with **double asterisks**; at most one emoji (✅💡🛠️📋), at the
+  end, only if it genuinely fits.
 • Never invent pricing, dates, or features not listed above.
 • Never recommend competitor software.
 • If you lack information: direct the user to Eng. Aymn Asi at aymneidasi@gmail.com
@@ -3828,8 +3914,40 @@ const AI_DISCLOSURE_BLOCKLIST = [
   'devpassword',
 ];
 
+// v33: DEV-MODE BANNER LEAKAGE — DETERMINISTIC BACKSTOP
+const BANNER_DEVMODE_TERMS = [
+  'developer mode', 'dev mode',
+  'وضع المطور', 'وضع مطور', 'وضع التطوير', 'وضع الديفيلوبر',
+];
+const BANNER_CONFIRM_TERMS = [
+  'authenticated', 'activated', 'is active', 'now active', 'access granted',
+  'تم التفعيل', 'تم تفعيل', 'تم التحقق', 'مفعل', 'مفعّل', 'مصرح لك',
+];
+
+function stripSelfGeneratedDevBanner(replyText) {
+  const text = typeof replyText === 'string' ? replyText : '';
+  if (!text) return text;
+
+  const paras = text.split(/\n\s*\n/);
+  const firstPara = paras[0];
+  if (firstPara.length > 220) return text;
+
+  const headLower = firstPara.toLowerCase();
+  const hasDevTerm     = BANNER_DEVMODE_TERMS.some((t) => headLower.includes(t));
+  const hasConfirmTerm = BANNER_CONFIRM_TERMS.some((t) => headLower.includes(t));
+  if (!(hasDevTerm && hasConfirmTerm)) return text;
+
+  console.warn(
+    '[chat.js] stripSelfGeneratedDevBanner: stripped a model-generated banner-like opening —',
+    JSON.stringify(firstPara.slice(0, 120)),
+  );
+
+  const rest = paras.slice(1).join('\n\n').trim();
+  return rest || text;
+}
+
 function sanitizeAiReply(replyText, isDeveloperMode) {
-  if (isDeveloperMode) return replyText; // full disclosure is the point of dev mode
+  if (isDeveloperMode) return stripSelfGeneratedDevBanner(replyText); // v33: was a bare pass-through
   const text = typeof replyText === 'string' ? replyText : '';
   const lower = text.toLowerCase();
   const hit = AI_DISCLOSURE_BLOCKLIST.find((term) => lower.includes(term));
@@ -4764,6 +4882,7 @@ export async function onRequestPost(context) {
           resA.errStatus, resA.httpStatus,
         );
       }
+      Object.assign(resA, classifyProviderResult('gemini', resA));
       lastProviderResult = resA;
       markKeyResult('gemini', originalIndex, resA);
       markModelResult('gemini', GEMINI_MODEL_PRIMARY, resA);
@@ -4794,6 +4913,7 @@ export async function onRequestPost(context) {
         resB.errStatus, resB.httpStatus,
       );
     }
+    Object.assign(resB, classifyProviderResult('gemini', resB));
     lastProviderResult = resB;
     markKeyResult('gemini', originalIndex, resB);
     markModelResult('gemini', GEMINI_MODEL_FALLBACK, resB);
@@ -4898,7 +5018,7 @@ export async function onRequestPost(context) {
         resG.errStatus, resG.httpStatus,
       );
     }
-    if (resG.errStatus === 'model_decommissioned') resG.deadModelReason = 'MODEL_DECOMMISSIONED';
+    Object.assign(resG, classifyProviderResult('groq', resG));
     lastProviderResult = resG;
     markKeyResult('groq', originalIndex, resG);
     markModelResult('groq', GROQ_MODEL, resG);
@@ -4958,9 +5078,7 @@ export async function onRequestPost(context) {
         resOR.errStatus, resOR.httpStatus,
       );
     }
-    if (resOR.httpStatus === 404 && /no endpoints found matching your data policy/i.test(resOR.errBody || '')) {
-      resOR.accountConfigIssue = 'OPENROUTER_DATA_POLICY';
-    }
+    Object.assign(resOR, classifyProviderResult('openrouter', resOR));
     lastProviderResult = resOR;
     markKeyResult('openrouter', originalIndex, resOR);
     markModelResult('openrouter', OPENROUTER_MODEL, resOR);
