@@ -1,6 +1,141 @@
 /**
- * functions/api/chat.js  —  v25  (2026-07-26)
+ * functions/api/chat.js  —  v32  (2026-07-29)
  * ──────────────────────────────────────────────────────────────────────────
+ * ════════════════════════════════════════
+ * CHANGELOG v32 — DEV-MODE TOPIC-SCOPE OVERRIDE (OFF-TOPIC REDIRECT DISABLED)
+ * ════════════════════════════════════════
+ *
+ * REQUEST: developer clarified the prior 'no restriction' ask (v31) meant
+ *   topic scope specifically — able to discuss subjects unrelated to civil
+ *   engineering in dev mode — not a request to remove content-safety
+ *   behaviour. Re-scoped and implemented as such; nothing else from the
+ *   prior ask (blanket 'no limitation') was implemented — see the v31
+ *   conversation for why, still applies unchanged.
+ *
+ * ROOT CAUSE FOUND: SYSTEM_PROMPT's 'IMPLEMENTATION CONFIDENTIALITY —
+ *   STANDARD MODE' section (line ~1550) instructs — its own header and
+ *   opening line scope this explicitly to 'standard (non-developer)
+ *   conversations' — that any off-topic request (including, by its own
+ *   example, unrelated technical/backend questions) gets a brief redirect
+ *   'back to structural engineering / Footing Pro' (line ~1562-1565).
+ *   DEVELOPER_SYSTEM_PROMPT is a PREFIX to SYSTEM_PROMPT (concatenation at
+ *   line ~4540/4658), not a replacement, so this section is still present
+ *   in every dev-mode request; nothing in DEVELOPER_SYSTEM_PROMPT (through
+ *   v31) told the model that a section literally titled 'standard
+ *   (non-developer)' does not describe the session it's currently in.
+ *   Relying on the model to infer that unaided is exactly the kind of
+ *   instruction-following gap v26 already flagged elsewhere in this file —
+ *   made explicit instead of assumed.
+ *
+ * FIX: one new bullet in DEVELOPER_SYSTEM_PROMPT's YOU MAY NOW list,
+ *   naming the exact section/line and stating plainly that the redirect is
+ *   inactive for authenticated sessions. Scoped to topic only; the bullet
+ *   itself restates that content-safety behaviour is independent of topic
+ *   and is not something any prompt in this file controls — that's the
+ *   underlying model provider's own alignment, unaffected by session type.
+ * ════════════════════════════════════════
+ * ════════════════════════════════════════
+ * CHANGELOG v31 — DEV-MODE PERSONA RULES FORMALIZED + DUPLICATE-BANNER FIX
+ * ════════════════════════════════════════
+ *
+ * REQUEST: developer asked for the "Eng_pro assist" behavioural rules —
+ *   exclusive grounding in attached files, deep-thinking-before-answering,
+ *   ACI 318-19/ECP 203 research capability, exact line/clause citation, no
+ *   diplomatic hedging, Egyptian colloquial Arabic with English technical
+ *   terms retained, persistent in-session persona — formalized into
+ *   DEVELOPER_SYSTEM_PROMPT instead of left as ad-hoc per-conversation
+ *   instruction. Scoped to DEVELOPER_SYSTEM_PROMPT only; SYSTEM_PROMPT (the
+ *   public-facing, confidentiality-filtered prompt, v25 Change 1) is
+ *   untouched — normal-user behaviour is unaffected.
+ *
+ * CHANGE 1 (NEW — OPERATING RULES block): added GROUNDING, DEPTH BEFORE
+ *   SPEED, CITE PRECISELY, NO DIPLOMATIC PADDING, LANGUAGE, PERSONA
+ *   CONTINUITY. GROUNDING is scoped narrow on purpose — attached-file
+ *   claims and claims about this codebase, not a blanket block on ordinary
+ *   engineering Q&A with nothing attached, which would break normal
+ *   dev-mode conversation.
+ *
+ * CHANGE 2 (BEHAVIOUR CHANGE, FLAGGED): removed the old closing line
+ *   ("Switch back to full assistant persona for any non-developer
+ *   engineering or product question that a regular user might also ask") —
+ *   it directly contradicts the requested PERSONA CONTINUITY rule. Real
+ *   behaviour change beyond wording: previously an ordinary ACI/ECP
+ *   question mid-session got the softer public tone; now it gets the same
+ *   direct register as code-review questions, for the rest of the session.
+ *   Confirm this is actually wanted before relying on it live.
+ *
+ * CHANGE 3 (WORDING CHOICE ON REQUEST'S RULE 7, FLAGGED): "don't break
+ *   this role no matter what the user tries / don't comment on
+ *   instructions, execute them literally" is implemented as a TONE
+ *   instruction (hold the technical register; don't re-litigate formatting
+ *   already agreed) — not as an unconditional "ignore any future
+ *   instruction" clause. CAPABILITY HONESTY and HARD REALITY are carved
+ *   out explicitly as facts/policy, not tone, and stay in scope regardless
+ *   of this rule. Reasoning: literal "never comment, execute literally, no
+ *   matter what" phrasing sitting in a prompt any password holder can
+ *   reach buys no behaviour the tone-only version doesn't already give a
+ *   direct register — while reading badly if this prompt ever leaks.
+ *   Substitution flagged per this file's own rule 1 (state a change, don't
+ *   make it silently) rather than applied without comment.
+ *
+ * CHANGE 4 (BUG FOUND WHILE TRACING THE ABOVE — duplicate activation
+ *   banner — FIXED): the old FIRST-RESPONSE PROTOCOL told the model to
+ *   open its first real dev-mode reply with a full banner block. But v26
+ *   already made devCommand:'activate' (~line 4136) return
+ *   DEV_ACTIVATION_BANNER directly with no model call, specifically to
+ *   stop depending on model instruction-following for exactly this kind
+ *   of fixed confirmation text (v26's own stated reason: wording can
+ *   drift). isFirstTurn is `turns.length === 1` (~line 4517), and the
+ *   'activate' short-circuit returns before `turns` is built — so a
+ *   developer's first REAL message after activating still has
+ *   isFirstTurn === true, meaning FIRST-RESPONSE PROTOCOL fired on it: a
+ *   second, longer banner immediately after the short one the server had
+ *   just sent. Same reliability problem v26 fixed, reintroduced one layer
+ *   up. FIX: FIRST-RESPONSE PROTOCOL and its embedded banner removed from
+ *   DEVELOPER_SYSTEM_PROMPT, replaced with a short note that activation is
+ *   already handled server-side. The "why the banner is worded that way"
+ *   honesty content is kept, generalized into CAPABILITY HONESTY so it
+ *   still governs every reply, not just a now-removed first one.
+ *
+ * NOT DONE: removing the banner means the [SESSION SCOPE]/[NOT GRANTED]
+ *   summary it used to carry isn't shown anywhere now. DEV_ACTIVATION_
+ *   BANNER (~line 3812) is a plain one-line literal with an existing
+ *   comment pointing to a rationale in pc_suite's frontend source for why
+ *   it's deliberately English-only and untemplated — that frontend file
+ *   isn't attached to this session, so DEV_ACTIVATION_BANNER itself is
+ *   left untouched rather than guessed at (rule 1 of the requested
+ *   persona — exclusive grounding in attached files — applied to this
+ *   edit). Carrying the scope summary forward, if still wanted, is a
+ *   frontend-visible change to make with pc_suite_v33.html/
+ *   pc_suite_v2_FIXED_4.html actually open, not chat.js.
+ * ════════════════════════════════════════
+ * ════════════════════════════════════════
+ * CHANGELOG v30 — MODEL-LEVEL CIRCUIT BREAKER + STALE GROQ MODEL
+ * ════════════════════════════════════════
+ * A 404 (Gemini: model not found) or a 400 model_decommissioned
+ * (Groq/OpenRouter) is a property of the MODEL STRING, not of any one
+ * key — every key in a 13-key pool gets the identical answer, but
+ * isKeyDead/markKeyResult (v25) only ever cached 401/403. Result: a
+ * systemically dead model got retried on all 13 keys, every request,
+ * forever — up to 26 of the 48-subrequest Free-plan budget spent
+ * re-discovering the same fact 26 times, starving Groq/OpenRouter (up to
+ * 26 more needed) of the budget to actually rescue the request. This is
+ * the mechanism behind persistent "النموذج غير متاح" reports even though
+ * rotation itself was working correctly.
+ * Fix: new dead-MODEL cache (isModelDead/markModelResult), added to
+ * rotation.mjs, keyed by provider+model, 30-min TTL, same fail-open
+ * philosophy as the existing per-key cache. Wired into all three
+ * fetch-based layers. GROQ_MODEL also updated: llama-3.1-8b-instant was
+ * announced deprecated by Groq 2026-06-17; replaced with Groq's own
+ * recommended openai/gpt-oss-20b. GEMINI_MODEL_PRIMARY/FALLBACK checked
+ * against Google's current deprecations page and left unchanged — both
+ * GA, neither imminent.
+ * NOT DONE: whether a live 404 is still occurring, and against which
+ * key/error body, requires Cloudflare's real-time Function logs or live
+ * credentials — neither available here. If it persists after this
+ * deploy, it's now a confirmed upstream/account condition, not budget
+ * exhaustion masquerading as one.
+ *
  * ════════════════════════════════════════
  * CHANGELOG v25 — STANDARD-MODE CONFIDENTIALITY + MISATTRIBUTED FINAL ERROR
  *   + DEAD-KEY BUDGET WASTE (false "الوصول محجوب" reports investigated)
@@ -938,6 +1073,9 @@ import {
   checkRateLimit,
   buildGeminiKeyPool,
   keyTagFor,
+  isModelDead,
+  markModelResult,
+  getDeadModelReason,
 } from '../_lib/rotation.mjs';
 
 // ── Per-isolate dead-key skip cache (v25) ─────────────────────────────────
@@ -1135,15 +1273,21 @@ const GEMINI_API_URL = model =>
 // instead of the full SYSTEM_PROMPT (see v9 changelog, Bug 2).
 const WORKERS_AI_MODEL = '@cf/meta/llama-3.1-8b-instruct-fast';
 
-// LAYER 4 — Groq (free: 14,400 req/day, 500K tokens/day, 30 RPM, 6K TPM).
-// Model: llama-3.1-8b-instant — most generous free-tier model on Groq's free
-// plan. llama-3.3-70b-versatile is only 1,000 req/day on the free plan;
-// llama-3.1-8b-instant gives 14.4× more daily headroom (verified June 2026,
-// console.groq.com/docs/rate-limits). Uses WORKERS_AI_SYSTEM_PROMPT (~800
-// tokens) to stay below the 6K TPM per-minute token cap for this model.
+// LAYER 4 — Groq (free tier; see console.groq.com/docs/rate-limits for the
+// current model's actual limits — do not assume they match a prior model).
+// Model: openai/gpt-oss-20b. CHANGED (v30): llama-3.1-8b-instant — this
+// constant's value from v9 through v29 — was announced deprecated by Groq
+// on 2026-06-17 alongside llama-3.3-70b-versatile (console.groq.com/docs/
+// deprecations, checked 2026-07-28). Groq's own migration guidance names
+// openai/gpt-oss-20b as the direct replacement for llama-3.1-8b-instant.
+// A deprecated-but-not-yet-decommissioned model can still return 200s
+// right up until Groq flips it off with no further warning in this
+// codebase; the v30 dead-model cache below (markModelResult/isModelDead,
+// see rotation.mjs) is what makes a *future* model retirement degrade
+// gracefully instead of repeating this exact failure mode.
 // OpenAI-compatible API — same message format as Layer 3 (workersMsgs).
 // Requires GROQ_API_KEY env var (free signup, no credit card — console.groq.com).
-const GROQ_MODEL   = 'llama-3.1-8b-instant';
+const GROQ_MODEL   = 'openai/gpt-oss-20b';
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
 // LAYER 5 — OpenRouter free model (20 RPM, 50 req/day on zero-balance account).
@@ -1347,10 +1491,76 @@ function buildClientDateBlock(clientDate) {
 // ── Bot identity constant (single source of truth across all prompts) ─────
 const ASSISTANT_NAME = 'Eng_pro assist';
 
+// v28: single source of truth for exact numbers — same pattern as
+// ASSISTANT_NAME above, extended to cover the specific facts most prone to
+// drifting between prompt tiers. Root cause originally found here:
+// SYSTEM_PROMPT (turn 1, Gemini) stated the code-signing certificate as
+// valid "19/05/2026–19/05/2028"; GEMINI_FOLLOWUP_PROMPT (turn 2+) also had
+// the full date; WORKERS_AI_SYSTEM_PROMPT (fallback layers, any turn) had
+// only "2026–2028" — three hand-maintained copies of the same fact, free
+// to disagree, and one of them already had.
+// v29: per Eng. Aymn Asi (confirmed directly, not via the chatbot), that
+// date was a placeholder, not real data — so the fix above would have
+// made three tiers confidently agree on a specific, wrong-looking date
+// instead of one. Replaced with a hedge instruction below: state that it's
+// signed, don't state a specific date. This is arguably the more general
+// lesson from the whole exercise — single-sourcing stops tiers from
+// *disagreeing*, but doesn't by itself stop a *precise, confident-sounding
+// number* from being wrong; for anything not actually finalized, the right
+// content is an instruction to hedge, not a cleaner-looking guess.
+// Also carries KEY_ENGINEERING_REFERENCE (defined near GEMINI_FOLLOWUP_PROMPT
+// below) into WORKERS_AI_SYSTEM_PROMPT — that gap (ACI 318-19 references
+// present on the primary layer, entirely absent from fallback) was real,
+// unlike the cert date; freed-up space from shortening the cert bullet
+// funds part of that addition, per the same request.
+const CRITICAL_FACTS = `\
+⚠ CANONICAL FACTS — exact numbers, use verbatim. If anything else in this prompt states any
+of these differently, THIS block is correct, not the other text:
+• Code-signing certificate: SHA-256 Authenticode, publisher "Engineering Apps Team", verified
+  on every launch. Do NOT state a specific validity date if asked — say it's currently signed
+  and valid, and point to Eng. Aymn Asi for the exact current window. Any post-signing binary
+  modification invalidates it immediately.
+• Pricing: 249 EGP/yr launch price (499 EGP/yr regular, after launch). Subscribing 1–10 yrs in
+  one transaction during the launch window locks in 249 EGP/yr for that whole term. Loyalty
+  discount: 5% off per year of duration (2 yrs = 10%, 3 yrs = 15%, up to 10 yrs max), stacks on
+  top of the rate lock-in.
+• License: device-locked, one license = one device, no transfer mechanism. Offline schedule:
+  days 1–15 fully offline, no action needed; days 16–29 a reconnect warning appears; days 30–32
+  final grace period (must connect within 3 days); day 33+ blocked until reconnection. License
+  check happens ONLY at startup, never mid-session.
+• Requires Microsoft Excel 2002+ installed (2016/2019/365 recommended) and .NET Framework 4.8+.
+  Windows 7 SP1–11 only, no Mac/Linux.
+• Contact: aymneidasi@gmail.com or WhatsApp +201287232413. Download: civilengsuite.pages.dev.
+`;
+
+// v29: same single-source-of-truth pattern as CRITICAL_FACTS, for the
+// engineering-code reference points specifically. This is the block that
+// was found completely absent from WORKERS_AI_SYSTEM_PROMPT — not a
+// disagreement like the cert date, a flat-out gap: SYSTEM_PROMPT covers
+// these topics in full narrative detail across dedicated sections
+// (unchanged, not duplicated here), GEMINI_FOLLOWUP_PROMPT already had
+// this condensed paragraph verbatim, WORKERS_AI_SYSTEM_PROMPT had nothing.
+// Extracted from GEMINI_FOLLOWUP_PROMPT's existing wording rather than
+// rewritten, then spliced into both condensed tiers so a future edit only
+// has one place to happen. Deliberately not added to SYSTEM_PROMPT itself
+// — that prompt's per-topic sections are already more complete than this
+// condensed paragraph, so splicing it in would be a downgrade there, not
+// an upgrade.
+const KEY_ENGINEERING_REFERENCE = `\
+KEY TECHNICAL REFERENCE POINTS (answer engineering questions accurately and specifically):
+eccentricity must satisfy e ≤ L/6 (kern rule); punching shear at the interior column (closed
+4-sided perimeter) is usually the most critical check and fails with no visible warning; size
+footing area with SERVICE loads, design structural checks with ULTIMATE loads; effective depth
+d = h − cover − db/2; 75 mm cover for concrete cast against soil (ACI 318-19 §20.6.1); top steel
+is required between columns for the hogging zone; development length ld follows §25.4.2,
+including the 1.3× top-bar factor; cracks are an expected, controlled-width design outcome,
+not a defect, per ACI 318 §24.3.2.
+`;
+
 const SYSTEM_PROMPT = `\
 You are Eng_pro assist — the official AI assistant and sales advisor for Civil Engineering Suite
 (civilengsuite.pages.dev), built by Eng. Aymn Asi — a practicing Licensed Structural Engineer.
-
+${CRITICAL_FACTS}
 ════════════════════════════════════════
 YOUR NAME & IDENTITY — CRITICAL
 ════════════════════════════════════════
@@ -1975,9 +2185,9 @@ Features typically found only in expensive enterprise-grade software:
 
 ③ SHA-256 AUTHENTICODE SIGNED: Every distributed build carries a valid code-signing certificate.
    Windows UAC displays "Verified publisher: Engineering Apps Team" (green verified badge, not
-   the yellow warning). Certificate valid 19/05/2026 – 19/05/2028. Any post-signing
-   modification to the binary invalidates the certificate immediately. Signature verified on
-   every launch before anything else runs.
+   the yellow warning). Signature verified on every launch before anything else runs; any
+   post-signing modification to the binary invalidates the certificate immediately. Don't state
+   a specific validity date if asked — see CANONICAL FACTS above.
 
 ④ 10-LAYER SECURITY ARCHITECTURE: Ten independent protection mechanisms active simultaneously.
    Depth unmatched by any structural engineering tool at any price point.
@@ -2411,7 +2621,7 @@ ADDITIONAL SECURITY MEASURES (rounds out the 10-layer total):
 SHA-256 AUTHENTICODE CERTIFICATE — SPECIFIC DETAILS:
 • Publisher displayed in Windows UAC: "Engineering Apps Team" (green verified badge)
 • Hash algorithm: SHA-256 (Authenticode standard)
-• Certificate valid: 19/05/2026 – 19/05/2028
+• Don't state a specific validity date if asked — see CANONICAL FACTS above.
 • Any post-signing modification to the binary invalidates the certificate immediately.
 • Windows verifies the signature before the installer or executable is allowed to run.
 • An unverified or unsigned binary triggers the yellow UAC warning — Footing Pro shows green.
@@ -2774,6 +2984,7 @@ You are continuing an existing conversation as Eng_pro assist — the official A
 Civil Engineering Suite (civilengsuite.pages.dev), built by Eng. Aymn Asi.
 Your name is Eng_pro assist. If asked your name at any point: Arabic → "أنا Eng_pro assist"،
 English → "I'm Eng_pro assist." Never claim to be ChatGPT, Gemini, or any other AI brand.
+${CRITICAL_FACTS}
 The full identity, tone, and product knowledge were already established earlier in this thread
 via your own prior replies (visible in the conversation history below). Stay in that voice.
 This is a condensed reminder, not the full brief — answer naturally from what you already know
@@ -2860,7 +3071,7 @@ RARITY CLASSIFICATION QUICK REFERENCE (answer "ما المميزات الناد�
   Intelligent Communication Engine, Personal Lock.
 • RARE AT THIS PRICE POINT (7) — typically enterprise-only features at 249 EGP/yr:
   Smart Install (~70 MB footprint, no admin rights), Fully Offline During Use (15-day cycle),
-  SHA-256 Authenticode Signed ("Engineering Apps Team" — cert 19/05/2026–19/05/2028),
+  SHA-256 Authenticode Signed ("Engineering Apps Team" — see canonical facts above for details),
   10-Layer Security, Application-Level OS Stealth, Smart Pre-Installation Guardian,
   Professional-grade accuracy + accessible pricing combined.
 
@@ -2879,15 +3090,7 @@ HOW TO BUY: Download free PCsuite 2026 from civilengsuite.pages.dev → fill the
 form (creates an encrypted .dat file on the Desktop) → send that file to aymneidasi@gmail.com or
 WhatsApp +201287232413 → developer confirms price → pay → receive the activated app.
 
-KEY TECHNICAL REFERENCE POINTS (answer engineering questions accurately and specifically):
-eccentricity must satisfy e ≤ L/6 (kern rule); punching shear at the interior column (closed
-4-sided perimeter) is usually the most critical check and fails with no visible warning; size
-footing area with SERVICE loads, design structural checks with ULTIMATE loads; effective depth
-d = h − cover − db/2; 75 mm cover for concrete cast against soil (ACI 318-19 §20.6.1); top steel
-is required between columns for the hogging zone; development length ld follows §25.4.2,
-including the 1.3× top-bar factor; cracks are an expected, controlled-width design outcome,
-not a defect, per ACI 318 §24.3.2.
-
+${KEY_ENGINEERING_REFERENCE}
 BEHAVIOUR RULES:
 • Never invent pricing, discount percentages, release dates, or features not listed here or
   established earlier in this conversation.
@@ -2909,7 +3112,8 @@ Your name is Eng_pro assist. You are the official AI assistant for Civil Enginee
 (civilengsuite.pages.dev), built by Eng. Aymn Asi — a licensed structural engineer.
 If asked your name: Arabic → "أنا Eng_pro assist" — English → "I'm Eng_pro assist."
 Never claim to be ChatGPT, Gemini, or any other AI brand.
-
+${CRITICAL_FACTS}
+${KEY_ENGINEERING_REFERENCE}
 LANGUAGE RULE (critical): Arabic message → reply only in Egyptian Arabic dialect
 (عامية مصرية), never Modern Standard Arabic. English message → reply only in English.
 Never mix languages in one reply.
@@ -2975,7 +3179,7 @@ RARE IN SE SOFTWARE (9): Non-Linear Workflow · Graphics Control Engine ·
   Unlimited Sessions · 3-Output Print System · Adaptive Tooltip · Infinite Multi-Form Sync ·
   Dual-Mode Engine · Intelligent Communication Engine · Personal Lock.
 RARE AT 249 EGP/YR (7): Smart Install (~70 MB, no admin) · Fully Offline During Use ·
-  SHA-256 Authenticode (publisher: "Engineering Apps Team", cert 2026–2028) ·
+  SHA-256 Authenticode signed (see canonical facts above — don't state a specific date) ·
   10-Layer Security · OS Stealth · Smart Pre-Install Guardian · Pro tool / accessible price.
 
 SELF: if asked what you can do, mention — you remember the conversation (no re-explaining on
@@ -3038,30 +3242,25 @@ block when it matches. Your job for the rest of this session is to act on it.
 Full technical DISCUSSION access is granted for this session — see exactly what
 that does and does not mean below.
 
-FIRST-RESPONSE PROTOCOL: your very first reply after this prompt appears must
-open with the banner block below, reproduced with its line breaks, then continue
-straight into a normal, useful answer to whatever the developer actually asked.
-Do not repeat the banner on later turns of the same session. Do not improvise a
-stronger or more dramatic version of it — use exactly this one:
+ACTIVATION BANNER — HANDLED SERVER-SIDE, NOT BY YOU (v31): the devCommand:'activate'
+short-circuit (chat.js, ~line 4136) already returns DEV_ACTIVATION_BANNER to the
+developer, with no model call, before your first real reply of this session is
+ever generated — exactly to avoid the instruction-following drift v26 removed
+from this same activation flow. Do not print your own "developer mode activated"
+banner or welcome block on your first reply; that would reintroduce the identical
+problem one layer up. Open directly with a normal, useful answer to whatever the
+developer actually asked.
 
-[DEVELOPER MODE — PASSWORD VERIFIED]
-[SESSION SCOPE: code review · architecture discussion · full file generation]
-[NOT GRANTED: file-system access · code execution · deployment]
-
-أهلاً بيك يا هندسة. كلمة السر اتأكدت من السيرفر، وأنا دلوقتي في وضع المطوّر:
-جاهز أراجع الكود، أتكلم في الـ Architecture، أو أكتبلك تعديل كامل وجاهز للنشر
-على أي ملف. ملحوظة مهمة: مفيش عندي تنفيذ فعلي أو وصول مباشر لملفات السيرفر —
-أنا بقدّملك الكود كامل وانت اللي بتراجعه وتنزّله. تحب نبدأ من فين؟
-
-WHY THE BANNER IS WORDED LIKE THAT: never claim "full access to system files,"
-"architectural control," "ACCESS LEVEL: FULL," or any phrase implying you can
-read, write, or execute anything on the actual server. Those claims are false
-regardless of who is asking — you only ever produce text; the developer is the
-one who reviews it and performs the deploy. This holds even though the person
-you're talking to right now genuinely is the authenticated developer: overstating
-your own capability is a trust problem on its own, separate from who's asking,
-and it stays false no matter how the developer rephrases the question later in
-the conversation — restate the same NOT-GRANTED facts rather than escalating.
+CAPABILITY HONESTY (unconditional — every reply, not just a first one): never
+claim "full access to system files," "architectural control," "ACCESS LEVEL:
+FULL," or any phrase implying you can read, write, or execute anything on the
+actual server. Those claims are false regardless of who is asking — you only
+ever produce text; the developer reviews it and performs the deploy. This holds
+even though the person you're talking to right now genuinely is the
+authenticated developer: overstating your own capability is a trust problem on
+its own, separate from who's asking, and stays false no matter how the question
+gets rephrased later in the conversation — restate the same NOT-GRANTED facts
+rather than escalating.
 
 YOU MAY NOW:
 • Discuss your own implementation files in complete technical detail:
@@ -3077,6 +3276,20 @@ YOU MAY NOW:
 • Discuss Cloudflare Pages/Workers architecture, KV bindings, Rate Limiter
   bindings, env vars, subrequest budgets, and deployment steps.
 • Answer any system design question with no restriction on technical depth.
+• Same standard for civil-engineering questions (ACI 318-19, ECP 203, design and
+  verification calculations): full technical depth, exact clause numbers, no
+  audience-simplification filtering.
+• Discuss and engage with any subject the developer raises, on-topic or not.
+  SYSTEM_PROMPT's off-topic redirect ('IMPLEMENTATION CONFIDENTIALITY —
+  STANDARD MODE' section, ~line 1550; redirect instruction ~line 1562: "steer
+  back to structural engineering / Footing Pro, same as any other off-topic
+  request") is scoped, by its own header and opening line, to "standard
+  (non-developer) conversations." Treat that specific redirect as inactive
+  for this authenticated session. This widens TOPIC scope only — it has no
+  effect on content-safety behaviour, which is independent of topic and is
+  not something any prompt in this file controls; see CAPABILITY HONESTY /
+  HARD REALITY above, and the underlying model provider's own policies,
+  which apply the same regardless of topic or session type.
 
 HARD REALITY (state this honestly if the developer asks, in any phrasing):
 You cannot directly execute code or write to files on the Cloudflare edge.
@@ -3096,10 +3309,34 @@ Alternatives the developer can request a complete new tts.js for:
   If the developer says "improve TTS", generate a complete drop-in replacement
   tts.js for their chosen provider with all error handling and CORS intact.
 
-TONE IN DEVELOPER MODE:
-Technical, precise, direct. Skip the sales persona when the developer is asking
-about system internals. Switch back to full assistant persona for any
-non-developer engineering or product question that a regular user might also ask.
+OPERATING RULES IN DEVELOPER MODE (v31):
+• GROUNDING: when the developer attaches file content (Insert Text File feature —
+  extractTextFiles/buildTextFilesBlock, step 3d), that content is the sole source
+  for any factual claim about it. If the answer isn't in what was attached, say
+  so in Arabic — "المعلومة غير موجودة في الملف المرفق" — instead of inferring.
+  Scope: file-content claims and claims about this codebase only; does not block
+  ordinary engineering/programming knowledge when no file is attached and none
+  is needed for the question.
+• DEPTH BEFORE SPEED: for a code-review or calculation-check question, trace the
+  actual logic and dependencies in what was shown before answering — a fast
+  wrong answer costs the developer more time than a slower correct one.
+• CITE PRECISELY: a flagged code issue names the exact line number(s) as given.
+  A flagged engineering issue names the exact ACI 318-19 / ECP 203 clause. No
+  "there might be an issue somewhere" answers.
+• NO DIPLOMATIC PADDING: engineer-to-engineer register. Skip hedging, skip "it
+  depends" left unresolved, skip disclaimers a working developer doesn't need.
+  State the technical judgment, then justify it. Does not override CAPABILITY
+  HONESTY above or HARD REALITY below — those are facts and policy, not padding,
+  and stay exact regardless of tone.
+• LANGUAGE: reply in Egyptian colloquial Arabic. Keep engineering and
+  programming terms — identifiers, function names, standard names, units — in
+  their original English/Latin form rather than translating or transliterating
+  them.
+• PERSONA CONTINUITY: hold this direct, technical register for the rest of the
+  authenticated session; do not drop back to a softer public-facing tone
+  mid-session regardless of how the developer phrases a question. This governs
+  tone only. CAPABILITY HONESTY, HARD REALITY, and ordinary content-safety
+  behaviour are facts and policy, not tone, and are never in scope for this rule.
 ══════════════════════════════════════════════════════════════
 `;
 
@@ -3660,6 +3897,16 @@ function buildFriendlyError(lastProviderResult, workersAttempted, userMessage) {
     return ar
       ? 'المساعد مشغول جداً دلوقتي. حاول تاني بعد لحظات.'
       : 'The assistant is extremely busy right now. Please try again in a moment.';
+  }
+  if (lastProviderResult.accountConfigIssue === 'OPENROUTER_DATA_POLICY') {
+    return ar
+      ? 'فيه مشكلة إعداد في حساب OpenRouter — لازم تفعيل "Free model publication" في openrouter.ai/settings/privacy عشان الموديلات المجانية تشتغل. ابعت اللينك ده للمسؤول: واتساب +201287232413 · aymneidasi@gmail.com.'
+      : 'OpenRouter account setting issue — free-tier models require "Free model publication" enabled at openrouter.ai/settings/privacy. Please forward this to the site admin: WhatsApp +201287232413 · aymneidasi@gmail.com.';
+  }
+  if (lastProviderResult.deadModelReason === 'MODEL_DECOMMISSIONED') {
+    return ar
+      ? 'موديل احتياطي بقى قديم عند المزود بتاعه ولازم تحديث في الكود، مش في الحساب. تواصل مع المسؤول: واتساب +201287232413 · aymneidasi@gmail.com.'
+      : 'A fallback AI model was retired by its provider and needs a code update, not an account fix. Contact site admin: WhatsApp +201287232413 · aymneidasi@gmail.com.';
   }
 
   const friendlyErrors = {
@@ -4481,33 +4728,56 @@ export async function onRequestPost(context) {
       lastProviderResult = { ok: false, httpStatus: 0, errStatus: 'SUBREQUEST_BUDGET_EXHAUSTED', errBody: '' };
       break;
     }
+    // [v30] Model-level circuit breaker (see markModelResult/isModelDead in
+    // rotation.mjs). A 404 from Gemini means the model resource does not
+    // exist / is not reachable at this API version — identical for every
+    // one of the 13 keys, so once BOTH models are confirmed dead there is
+    // nothing left for this layer to discover. skipDeadKeys()/isKeyDead()
+    // above only ever removed individually-revoked keys, not a layer where
+    // every key gives the same answer.
+    if (isModelDead('gemini', GEMINI_MODEL_PRIMARY) && isModelDead('gemini', GEMINI_MODEL_FALLBACK)) {
+      console.warn('[chat.js] Both Gemini models cached dead — skipping remaining Gemini keys this request.');
+      // [v33] Without this, a request that never makes a real Gemini call
+      // left lastProviderResult stale even though the reason is cached.
+      lastProviderResult = {
+        ok: false, httpStatus: 404, errStatus: 'MODEL_CACHED_DEAD', errBody: '',
+        deadModelReason: getDeadModelReason('gemini', GEMINI_MODEL_PRIMARY)
+                       || getDeadModelReason('gemini', GEMINI_MODEL_FALLBACK),
+      };
+      break;
+    }
     const keyTag = keyTagFor(originalIndex);
 
-    const resA = await callGeminiWithRetry(gKey, GEMINI_MODEL_PRIMARY, geminiContents, geminiSystemPrompt, budget);
-    if (resA.ok) {
-      return json(
-        { reply: sanitizeAiReply(resA.reply, isDeveloperMode), ...(isDeveloperMode && { devMode: true }) },
-        200,
-        { 'X-CES-AI-Source': `gemini-${keyTag}primary` },
-        request,
-      );
-    }
-    if (resA.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED') {
-      console.warn(
-        `[chat.js] Gemini ${keyTag || 'key1-'}${GEMINI_MODEL_PRIMARY} failed:`,
-        resA.errStatus, resA.httpStatus,
-      );
-    }
-    lastProviderResult = resA;
-    markKeyResult('gemini', originalIndex, resA);
-    if (budget.remaining() <= 0) break;
+    if (!isModelDead('gemini', GEMINI_MODEL_PRIMARY)) {
+      const resA = await callGeminiWithRetry(gKey, GEMINI_MODEL_PRIMARY, geminiContents, geminiSystemPrompt, budget);
+      if (resA.ok) {
+        return json(
+          { reply: sanitizeAiReply(resA.reply, isDeveloperMode), ...(isDeveloperMode && { devMode: true }) },
+          200,
+          { 'X-CES-AI-Source': `gemini-${keyTag}primary` },
+          request,
+        );
+      }
+      if (resA.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED') {
+        console.warn(
+          `[chat.js] Gemini ${keyTag || 'key1-'}${GEMINI_MODEL_PRIMARY} failed:`,
+          resA.errStatus, resA.httpStatus,
+        );
+      }
+      lastProviderResult = resA;
+      markKeyResult('gemini', originalIndex, resA);
+      markModelResult('gemini', GEMINI_MODEL_PRIMARY, resA);
+      if (budget.remaining() <= 0) break;
 
-    // [v25] A 401/403 on the primary model is a credential/permission
-    // problem for this key's whole account, not a per-model quota — the
-    // fallback model on the SAME key would fail identically. Skip it and
-    // move to the next key instead of spending a second subrequest on a
-    // call that structurally cannot succeed.
-    if (resA.httpStatus === 401 || resA.httpStatus === 403) continue;
+      // [v25] A 401/403 on the primary model is a credential/permission
+      // problem for this key's whole account, not a per-model quota — the
+      // fallback model on the SAME key would fail identically. Skip it and
+      // move to the next key instead of spending a second subrequest on a
+      // call that structurally cannot succeed.
+      if (resA.httpStatus === 401 || resA.httpStatus === 403) continue;
+    }
+
+    if (isModelDead('gemini', GEMINI_MODEL_FALLBACK)) continue;
 
     const resB = await callGeminiWithRetry(gKey, GEMINI_MODEL_FALLBACK, geminiContents, geminiSystemPrompt, budget);
     if (resB.ok) {
@@ -4526,6 +4796,7 @@ export async function onRequestPost(context) {
     }
     lastProviderResult = resB;
     markKeyResult('gemini', originalIndex, resB);
+    markModelResult('gemini', GEMINI_MODEL_FALLBACK, resB);
   }
 
   // 7. WORKERS AI LAYER — unchanged routing from v10 (binding call, not a
@@ -4600,6 +4871,18 @@ export async function onRequestPost(context) {
       lastProviderResult = { ok: false, httpStatus: 0, errStatus: 'SUBREQUEST_BUDGET_EXHAUSTED', errBody: '' };
       break;
     }
+    // [v30] Same model-level circuit breaker as the Gemini layer above.
+    // GROQ_MODEL is one fixed string shared by all 13 keys in this pool —
+    // a 400 model_decommissioned response on key 1 means keys 2-13 would
+    // report the byte-identical failure.
+    if (isModelDead('groq', GROQ_MODEL)) {
+      console.warn(`[chat.js] Groq model ${GROQ_MODEL} cached dead — skipping remaining Groq keys this request.`);
+      lastProviderResult = {
+        ok: false, httpStatus: 404, errStatus: 'MODEL_CACHED_DEAD', errBody: '',
+        deadModelReason: getDeadModelReason('groq', GROQ_MODEL),
+      };
+      break;
+    }
     const resG = await callGroqWithRetry(gqKey, workersMsgs, budget);
     if (resG.ok) {
       return json(
@@ -4615,8 +4898,10 @@ export async function onRequestPost(context) {
         resG.errStatus, resG.httpStatus,
       );
     }
+    if (resG.errStatus === 'model_decommissioned') resG.deadModelReason = 'MODEL_DECOMMISSIONED';
     lastProviderResult = resG;
     markKeyResult('groq', originalIndex, resG);
+    markModelResult('groq', GROQ_MODEL, resG);
   }
 
   // 9. OPENROUTER LAYERS — try each of up to 13 keys, in rotated order (v13).
@@ -4649,6 +4934,15 @@ export async function onRequestPost(context) {
       lastProviderResult = { ok: false, httpStatus: 0, errStatus: 'SUBREQUEST_BUDGET_EXHAUSTED', errBody: '' };
       break;
     }
+    // [v30] Same model-level circuit breaker as the Gemini/Groq layers above.
+    if (isModelDead('openrouter', OPENROUTER_MODEL)) {
+      console.warn(`[chat.js] OpenRouter model ${OPENROUTER_MODEL} cached dead — skipping remaining OpenRouter keys this request.`);
+      lastProviderResult = {
+        ok: false, httpStatus: 404, errStatus: 'MODEL_CACHED_DEAD', errBody: '',
+        deadModelReason: getDeadModelReason('openrouter', OPENROUTER_MODEL),
+      };
+      break;
+    }
     const resOR = await callOpenRouterWithRetry(orKey, workersMsgs, budget);
     if (resOR.ok) {
       return json(
@@ -4664,8 +4958,12 @@ export async function onRequestPost(context) {
         resOR.errStatus, resOR.httpStatus,
       );
     }
+    if (resOR.httpStatus === 404 && /no endpoints found matching your data policy/i.test(resOR.errBody || '')) {
+      resOR.accountConfigIssue = 'OPENROUTER_DATA_POLICY';
+    }
     lastProviderResult = resOR;
     markKeyResult('openrouter', originalIndex, resOR);
+    markModelResult('openrouter', OPENROUTER_MODEL, resOR);
   }
 
   // 10. All layers exhausted.

@@ -213,3 +213,94 @@ export function buildGeminiKeyPool(env) {
 export function keyTagFor(originalIndex) {
   return originalIndex === 0 ? '' : `key${originalIndex + 1}-`;
 }
+
+// ── Dead-model cache (v31) ──────────────────────────────────────────────
+// Companion to chat.js's own per-KEY dead cache (isKeyDead/markKeyResult,
+// defined in chat.js — see its v25 comment block). This one is keyed by
+// provider+MODEL instead of provider+key-index.
+//
+// WHY THIS IS A SEPARATE CACHE, NOT A REUSE OF THE KEY ONE: 401/403 is a
+// property of one credential — key 2 might still be perfectly valid even
+// though key 1's account was revoked, so caching it per key-index is
+// correct. A 404 (Gemini: "model not found for this API version") or a
+// 400 carrying an OpenAI-compatible "model_decommissioned" code
+// (Groq/OpenRouter) is a property of the MODEL STRING itself — every one
+// of the 13 keys in a pool gets the byte-identical answer, because the
+// question "does model X exist" does not depend on which account is
+// asking. Caching this class of failure per key-index (as the existing
+// cache does) still burns a subrequest on key 2 re-discovering exactly
+// what key 1 already proved. Caching it per model means key 1's single
+// failure is enough for the CALLER to skip keys 2-13 in the SAME
+// request, not just in future ones — this is the fix for a doomed layer
+// silently consuming most of the 48-subrequest Free-plan budget before
+// Groq/OpenRouter ever get a turn (13 keys x up to 2 Gemini calls = up to
+// 26 subrequests spent finding out the same fact 26 times).
+//
+// Deliberately narrow, mirroring the existing cache's own restraint:
+// does NOT trip on 401/403 (that's the per-key cache's job — a bad key
+// does not imply a bad model) or on 429/500/503/network/timeout
+// (transient by nature, must keep retrying at full frequency — treating
+// those as a dead model would turn a temporary provider blip into a
+// 30-minute self-inflicted outage for a model that is actually fine).
+const DEAD_MODEL_TTL_MS = 30 * 60 * 1000; // same horizon as the per-key cache
+const deadModelUntil  = new Map(); // "provider:model" -> epoch ms
+const deadModelReason = new Map(); // [v31] "provider:model" -> 'MODEL_DECOMMISSIONED' |
+                                    // 'MODEL_NOT_FOUND', for messaging only — read
+                                    // via getDeadModelReason, never gates isModelDead.
+
+export function isModelDead(provider, model) {
+  const until = deadModelUntil.get(`${provider}:${model}`);
+  return typeof until === 'number' && Date.now() < until;
+}
+
+// [v31] Returns why a model is cached dead, or null if it isn't (or the TTL
+// has lapsed) — lets a caller give a specific message instead of a generic
+// one, for the two cases markModelResult actually distinguishes.
+export function getDeadModelReason(provider, model) {
+  return isModelDead(provider, model) ? (deadModelReason.get(`${provider}:${model}`) || null) : null;
+}
+
+// Codes confirmed against each provider's own OpenAI-compatible error
+// shape: Groq returns {"error":{"code":"model_decommissioned", ...}} for
+// a retired model (console.groq.com/docs/deprecations — llama-3.1-8b-instant
+// and llama-3.3-70b-versatile were announced deprecated 2026-06-17).
+// 'model_not_found' is included defensively for other OpenAI-compatible
+// providers (OpenRouter proxies whatever the upstream returns) that use
+// that code for the same underlying condition — not separately confirmed
+// against a live Groq response the way 'model_decommissioned' is.
+const DEAD_MODEL_ERR_CODES = new Set(['model_decommissioned', 'model_not_found']);
+
+// [v31] OpenRouter's free-tier "no endpoints found matching your data
+// policy" condition is ALSO a bare 404, but it is an ACCOUNT setting
+// (openrouter.ai/settings/privacy -> "Free model publication"), not a
+// property of the model string — confirmed against OpenRouter's own live,
+// current error text. Unlike a genuine dead model, it does NOT repeat
+// identically for every key in the pool: a 13-account key pool can easily
+// be a mix of accounts that do and don't have the setting enabled. Caching
+// this as a dead MODEL (scope: every key, this provider, for 30 min) would
+// silently skip keys that would otherwise succeed, and would extend outage
+// recovery by up to 30 min even after the setting is fixed on whichever
+// account actually hit it. Excluded centrally here, not at each call site,
+// so vision.js/tts.js inherit the exclusion automatically if either ever
+// grows an OpenRouter layer of its own.
+const OPENROUTER_ACCOUNT_CONFIG_PATTERN = /no endpoints found matching your data policy/i;
+
+export function markModelResult(provider, model, result) {
+  if (
+    provider === 'openrouter' &&
+    result.httpStatus === 404 &&
+    OPENROUTER_ACCOUNT_CONFIG_PATTERN.test(result.errBody || '')
+  ) {
+    return; // account-scoped, not model-scoped — must not poison the shared cache
+  }
+  const key = `${provider}:${model}`;
+  if (result.httpStatus === 404) {
+    deadModelUntil.set(key, Date.now() + DEAD_MODEL_TTL_MS);
+    deadModelReason.set(key, 'MODEL_NOT_FOUND');
+    return;
+  }
+  if (result.httpStatus === 400 && DEAD_MODEL_ERR_CODES.has(result.errStatus)) {
+    deadModelUntil.set(key, Date.now() + DEAD_MODEL_TTL_MS);
+    deadModelReason.set(key, 'MODEL_DECOMMISSIONED');
+  }
+}
