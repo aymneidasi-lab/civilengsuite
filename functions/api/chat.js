@@ -1,60 +1,6 @@
 /**
- * functions/api/chat.js  —  v34  (2026-07-29)
+ * functions/api/chat.js  —  v32  (2026-07-29)
  * ──────────────────────────────────────────────────────────────────────────
- * ════════════════════════════════════════
- * CHANGELOG v34 — UNIFIED DEAD-MODEL CLASSIFICATION (rotation.mjs)
- * ════════════════════════════════════════
- *
- * FOUND (tracing rotation.mjs's actual exports against v33's usage): first-
- *   occurrence coverage was inconsistent across providers -- Gemini set no
- *   immediate deadModelReason at all; Groq's inline check covered only
- *   'model_decommissioned', not 'model_not_found'; OpenRouter's covered only
- *   the account-config case. Each got the right message from the SECOND
- *   request in a dead-model's 30-min TTL window (via the cache), not the
- *   first. Narrow, low-frequency, not data loss -- fixed because it was
- *   diagnosed precisely, not because it was urgent.
- *
- * FIX: rotation.mjs now exports classifyProviderResult(provider, result) --
- *   the exact classification markModelResult already did internally,
- *   pulled out so chat.js can apply it immediately, right after each call:
- *   Object.assign(resX, classifyProviderResult('<provider>', resX)) at all
- *   4 call sites (Gemini primary + fallback, Groq, OpenRouter). markModelResult
- *   itself now calls the same function rather than repeating the checks --
- *   one classifier, read by both the immediate-use path and the cache-write
- *   path, so this can't drift out of sync again the way v33 did.
- *
- * NOT DONE: MODEL_NOT_FOUND still has no dedicated buildFriendlyError branch
- *   (falls through to the generic httpStatus[404] message) -- pre-existing,
- *   unchanged by this fix; only MODEL_DECOMMISSIONED had one to begin with.
- * ════════════════════════════════════════
- * ════════════════════════════════════════
- * CHANGELOG v33 — RESPONSE FORMATTING SYNC + DEV-BANNER BACKSTOP + DEAD-MODEL
- *   ERROR PLUMBING (code already present in upload; header/changelog were not)
- * ════════════════════════════════════════
- *
- * 1. Bold/emoji formatting rules synced across SYSTEM_PROMPT, GEMINI_FOLLOWUP_
- *    PROMPT, WORKERS_AI_SYSTEM_PROMPT (same three-tier pattern as v29).
- * 2. stripSelfGeneratedDevBanner(): server-side backstop for sanitizeAiReply()
- *    in dev mode — strips a model-generated banner-like opening paragraph
- *    (<=220 chars, a dev-mode term + a confirmation term) if the v31 prompt-
- *    level fix doesn't fully stop it. Falls back to the original text when
- *    nothing follows the stripped paragraph, so a single-paragraph false
- *    positive is a no-op, not data loss. Remaining narrow risk, accepted not
- *    fixed: a short reply that discusses dev-mode activation as a topic
- *    (not as a self-announcement) can still match and lose its opening line.
- * 3. Dead-model-reason plumbing: getDeadModelReason (rotation.mjs) now backs
- *    lastProviderResult when a request short-circuits on a cached-dead model
- *    (Gemini/Groq/OpenRouter, ~lines 4807/4945/5005) — previously left
- *    lastProviderResult stale on that path. New OPENROUTER_DATA_POLICY /
- *    MODEL_DECOMMISSIONED friendly-error branches (~line 3964) read it; both
- *    sit above the generic httpStatus lookup — confirmed not shadowed, and
- *    errBody is confirmed populated the same way on all three provider paths.
- *
- * NOT VERIFIED HERE: rotation.mjs isn't attached to this session, so
- *    getDeadModelReason's actual export can't be confirmed directly — the
- *    import is consistent with the already-used isModelDead/markModelResult
- *    pattern from the same module, but that's inference, not a check.
- * ════════════════════════════════════════
  * ════════════════════════════════════════
  * CHANGELOG v32 — DEV-MODE TOPIC-SCOPE OVERRIDE (OFF-TOPIC REDIRECT DISABLED)
  * ════════════════════════════════════════
@@ -1114,6 +1060,7 @@
  */
 
 import { KB_CHUNKS } from './kb-data.js';
+import { assertFactsRegistrySynced, scanForFactDrift, logFactDrift } from './factGuard.mjs';
 // v_vision: extracted to functions/_lib/rotation.mjs so chat.js and
 // vision.js share one implementation instead of two hand-copies. Logic is
 // byte-identical to what was here before — see rotation.mjs for full
@@ -1130,8 +1077,24 @@ import {
   isModelDead,
   markModelResult,
   getDeadModelReason,
-  classifyProviderResult,
 } from '../_lib/rotation.mjs';
+
+// [v27] Session save/load/list/delete logic — extracted to
+// functions/_lib/sessions.mjs so chat.js and the dedicated
+// functions/delete/[sessionName].js + functions/delete/all.js endpoints
+// share one implementation (same reasoning as the rotation.mjs import above).
+import {
+  DEV_SESSION_KV_PREFIX,
+  DEV_SESSION_KEY_MAX_LEN,
+  DEV_SESSION_NAME_PATTERN,
+  DEV_SESSION_RESERVED_NAMES,
+  DEV_ACTIVATION_BANNER,
+  saveConversation,
+  loadConversation,
+  listSessions,
+  deleteConversation,
+  deleteAllConversations,
+} from '../_lib/sessions.mjs';
 
 // ── Per-isolate dead-key skip cache (v25) ─────────────────────────────────
 // Module scope — persists for the lifetime of a warm Worker isolate, reset
@@ -1586,7 +1549,12 @@ of these differently, THIS block is correct, not the other text:
 • Requires Microsoft Excel 2002+ installed (2016/2019/365 recommended) and .NET Framework 4.8+.
   Windows 7 SP1–11 only, no Mac/Linux.
 • Contact: aymneidasi@gmail.com or WhatsApp +201287232413. Download: civilengsuite.pages.dev.
+• If any earlier reply of yours in this same conversation conflicts with a fact above, this
+  block still wins — restate the correct fact plainly and move on, without dwelling on or
+  repeating the earlier error.
 `;
+
+assertFactsRegistrySynced(CRITICAL_FACTS); // throws at cold-start on any drift — see factGuard.mjs
 
 // v29: same single-source-of-truth pattern as CRITICAL_FACTS, for the
 // engineering-code reference points specifically. This is the block that
@@ -3197,6 +3165,9 @@ Your name is Eng_pro assist. You are the official AI assistant for Civil Enginee
 If asked your name: Arabic → "أنا Eng_pro assist" — English → "I'm Eng_pro assist."
 Never claim to be ChatGPT, Gemini, or any other AI brand.
 ${CRITICAL_FACTS}
+EXAMPLE — price question, match this exact phrasing pattern:
+User: "بكام الاشتراك؟"
+You: "السعر دلوقتي 249 جنيه في السنة (سعر الإطلاق)، وبعد الإطلاق هيبقى 499 جنيه في السنة."
 ${KEY_ENGINEERING_REFERENCE}
 LANGUAGE RULE (critical): Arabic message → reply only in Egyptian Arabic dialect
 (عامية مصرية), never Modern Standard Arabic. English message → reply only in English.
@@ -4057,181 +4028,6 @@ function buildFriendlyError(lastProviderResult, workersAttempted, userMessage) {
 // separate allowance. See rotation.mjs for the full rationale that used to
 // live in this comment block.
 
-// ── Persistent Developer Sessions (v20) — save/load via KV ─────────────────
-// See CHANGELOG v20 at the top of this file for the full design rationale
-// (binding choice, body-vs-headers, sessionKey-vs-devPassword, ordering).
-const DEV_SESSION_KV_PREFIX      = 'dev_chat:';
-const DEV_SESSION_KEY_MAX_LEN    = 128;        // sessionKey length cap
-const DEV_SESSION_MAX_SERIALIZED = 1_000_000;  // ~1MB guard on stored JSON size
-// v26: charset enforced on WRITE (save) only, never on read (load/list).
-// Enforcing it on load too would lock the developer out of any session
-// saved before this validation existed (spaces, punctuation, etc. were
-// previously unrestricted) — those must stay loadable. New saves are
-// restricted to Latin letters/digits, the Arabic block (U+0600-U+06FF,
-// which also covers Arabic-Indic digits), underscore, and hyphen — this
-// app is Arabic/English only (see cesGetSttLang()), so this isn't a
-// narrower charset than the product actually needs. No \p{L}/u-flag
-// property escapes here on purpose, so the identical pattern can be
-// reused verbatim on the frontend without depending on a modern regex
-// engine in whatever browser/webview embeds the chat widget.
-const DEV_SESSION_NAME_PATTERN   = /^[A-Za-z0-9\u0600-\u06FF_-]+$/;
-// v26: the exact, deterministic confirmation devCommand:'activate' returns.
-// Kept as a single literal (not templated per-language) — see the /dev
-// handler's rationale comment in the frontend for why English-only is the
-// right call here despite the app being bilingual elsewhere.
-const DEV_ACTIVATION_BANNER      = '🔒 Developer mode active — Eng. Aymn Asi authenticated.';
-
-// saveConversation() — writes { history, title, savedAt, messageCount } to
-// `${DEV_SESSION_KV_PREFIX}${sessionKey}` in the given KV binding. No
-// expirationTtl is set: unlike checkRateLimit()'s counters, session data is
-// meant to persist until explicitly overwritten by a later save under the
-// same sessionKey. `kv` is env.CES_SESSIONS, injected by the caller (never
-// read from `env` directly in here — keeps this testable with a mock KV).
-// `title` is optional (v21) — omit it or pass ''/null/undefined and the
-// stored record gets title: null; existing 3-arg call sites are unaffected.
-async function saveConversation(kv, sessionKey, history, title) {
-  const payload = {
-    history,
-    title: (typeof title === 'string' && title) ? title : null,
-    savedAt: new Date().toISOString(),
-    messageCount: history.length,
-  };
-  let serialized;
-  try {
-    serialized = JSON.stringify(payload);
-  } catch (err) {
-    console.error('[chat.js] saveConversation JSON.stringify error:', err.message);
-    return { ok: false, error: 'Conversation history could not be serialized.', code: 'SERIALIZE_ERROR' };
-  }
-  if (serialized.length > DEV_SESSION_MAX_SERIALIZED) {
-    return {
-      ok: false,
-      error: `Conversation too large to save (${serialized.length} chars, limit ${DEV_SESSION_MAX_SERIALIZED}).`,
-      code: 'SESSION_TOO_LARGE',
-    };
-  }
-  // v25: metadata mirrors {title, savedAt, messageCount} onto the KV key
-  // entry itself (KV metadata cap is 1024 bytes serialized — this object is
-  // a few dozen bytes, nowhere close). This is what makes listSessions()
-  // below cheap: namespace.list() returns metadata inline with each key
-  // name, so the list command never has to kv.get() every session just to
-  // show the developer what's in it. Existing keys written before this
-  // change have no metadata — listSessions() treats that as "unknown", not
-  // an error (see the fallback there).
-  try {
-    await kv.put(DEV_SESSION_KV_PREFIX + sessionKey, serialized, {
-      metadata: {
-        title: payload.title,
-        savedAt: payload.savedAt,
-        messageCount: payload.messageCount,
-      },
-    });
-    return { ok: true, savedAt: payload.savedAt, messageCount: payload.messageCount };
-  } catch (err) {
-    console.error('[chat.js] saveConversation KV put error:', err.message);
-    return { ok: false, error: 'Failed to save conversation to storage.', code: 'KV_WRITE_ERROR' };
-  }
-}
-
-// loadConversation() — reads `${DEV_SESSION_KV_PREFIX}${sessionKey}` back
-// from the given KV binding and returns the stored history array. Three
-// distinct failure modes are reported with distinct `code` values so the
-// client can render each correctly (missing vs corrupted vs KV outage):
-//   SESSION_NOT_FOUND — kv.get() returned null (key never saved, or a typo
-//     in sessionKey — Cloudflare KV has no "did you mean" for this).
-//   SESSION_CORRUPTED — a value exists but isn't valid JSON, or doesn't
-//     contain a `history` array (should only happen from external tampering
-//     with the KV namespace directly, since saveConversation() above is the
-//     only writer and always writes valid, matching JSON).
-//   KV_READ_ERROR — the kv.get() call itself threw (KV outage/binding issue).
-async function loadConversation(kv, sessionKey) {
-  let raw;
-  try {
-    raw = await kv.get(DEV_SESSION_KV_PREFIX + sessionKey);
-  } catch (err) {
-    console.error('[chat.js] loadConversation KV get error:', err.message);
-    return { ok: false, error: 'Failed to read conversation from storage.', code: 'KV_READ_ERROR' };
-  }
-  if (raw === null) {
-    return { ok: false, error: 'No saved session found for this key.', code: 'SESSION_NOT_FOUND' };
-  }
-  let payload;
-  try {
-    payload = JSON.parse(raw);
-  } catch (err) {
-    console.error('[chat.js] loadConversation JSON.parse error (corrupted KV value):', err.message);
-    return { ok: false, error: 'Saved session data is corrupted.', code: 'SESSION_CORRUPTED' };
-  }
-  if (!payload || !Array.isArray(payload.history)) {
-    return { ok: false, error: 'Saved session data is corrupted.', code: 'SESSION_CORRUPTED' };
-  }
-  return {
-    ok: true,
-    history: payload.history,
-    title: typeof payload.title === 'string' ? payload.title : null,
-    savedAt: typeof payload.savedAt === 'string' ? payload.savedAt : null,
-    messageCount: typeof payload.messageCount === 'number' ? payload.messageCount : payload.history.length,
-  };
-}
-
-// listSessions() — enumerates every key under DEV_SESSION_KV_PREFIX via the
-// KV binding's native list({prefix}) call. This is the actual fix for the
-// problem the request was written to solve: KV has no query/index layer, so
-// naming keys with a shared prefix and using list({prefix}) is the
-// documented way to get "just the names" without a full-namespace scan
-// (list() only ever walks keys under the prefix, not the whole namespace)
-// and without reading each value (list() returns metadata, not the value —
-// see saveConversation()'s kv.put(..., {metadata}) above, which is what
-// populates title/savedAt/messageCount here for free).
-//
-// Pagination: the binding caps each list() call at 1000 keys and signals
-// more with list_complete === false + a cursor. A single developer's
-// session count will never approach that, but the loop below still drains
-// the cursor correctly rather than silently truncating at 1000 — anything
-// else is a latent bug waiting for a user who saves a lot of sessions.
-// MAX_PAGES is a hard stop (100 pages = up to 100,000 keys) purely as a
-// runaway-loop guard against a corrupted or unexpectedly huge cursor chain;
-// it is not expected to ever bind in practice.
-//
-// Like saveConversation()/loadConversation(), `kv` is injected by the
-// caller (env.CES_SESSIONS) rather than read from `env` in here.
-const DEV_SESSION_LIST_MAX_PAGES = 100;
-
-async function listSessions(kv, prefix) {
-  const sessions = [];
-  let cursor;
-  let pages = 0;
-  try {
-    do {
-      const page = await kv.list({ prefix, cursor });
-      for (const key of page.keys) {
-        const meta = key.metadata && typeof key.metadata === 'object' ? key.metadata : null;
-        sessions.push({
-          name: key.name.slice(prefix.length),
-          title: meta && typeof meta.title === 'string' ? meta.title : null,
-          savedAt: meta && typeof meta.savedAt === 'string' ? meta.savedAt : null,
-          messageCount: meta && typeof meta.messageCount === 'number' ? meta.messageCount : null,
-        });
-      }
-      cursor = page.list_complete ? undefined : page.cursor;
-      pages += 1;
-    } while (cursor && pages < DEV_SESSION_LIST_MAX_PAGES);
-  } catch (err) {
-    console.error('[chat.js] listSessions KV list error:', err.message);
-    return { ok: false, error: 'Failed to list saved sessions from storage.', code: 'KV_LIST_ERROR' };
-  }
-
-  // Most-recently-saved first. Sessions with no savedAt (pre-v25 keys with
-  // no metadata) sort to the end rather than being placed arbitrarily.
-  sessions.sort((a, b) => {
-    if (a.savedAt && b.savedAt) return b.savedAt.localeCompare(a.savedAt);
-    if (a.savedAt) return -1;
-    if (b.savedAt) return 1;
-    return a.name.localeCompare(b.name);
-  });
-
-  return { ok: true, sessions };
-}
 
 // ── POST handler ───────────────────────────────────────────────────────────
 // v8 FIX — ROOT-CAUSE ANALYSIS OF ALL BUGS IN v7's onRequestPost:
@@ -4264,6 +4060,17 @@ async function listSessions(kv, prefix) {
 //
 // ALL SIX BUGS fixed below. Helper functions (callGeminiWithRetry,
 // callWorkersAIWithRetry, buildFriendlyError) were already correct and unchanged.
+function buildAiReply(rawReply, providerSource, isDeveloperMode, isFirstTurn, request) {
+  const reply = sanitizeAiReply(rawReply, isDeveloperMode);
+  logFactDrift(scanForFactDrift(reply), { provider: providerSource, isFirstTurn, isDeveloperMode });
+  return json(
+    { reply, ...(isDeveloperMode && { devMode: true }) },
+    200,
+    { 'X-CES-AI-Source': providerSource },
+    request,
+  );
+}
+
 export async function onRequestPost(context) {
   const { request, env } = context;
 
@@ -4408,15 +4215,14 @@ export async function onRequestPost(context) {
       return json({ devMode: true, reply: DEV_ACTIVATION_BANNER }, 200, undefined, request);
     }
 
-    // sessionKey targets a single session — save/load need it, list doesn't
-    // (it enumerates everything under the prefix). Gating this on command
-    // name, rather than requiring it unconditionally, is the only structural
-    // change here; the save/load checks below are untouched from v20.
-    const sessionKeyRequired = (rawDevCommand === 'save' || rawDevCommand === 'load');
+    // sessionKey targets a single session — save/load/delete need it, list
+    // and delete_all don't (they act on everything under the prefix).
+    // [v27: added 'delete' to this gate.]
+    const sessionKeyRequired = (rawDevCommand === 'save' || rawDevCommand === 'load' || rawDevCommand === 'delete');
     const sessionKey = typeof body.sessionKey === 'string' ? body.sessionKey.trim() : '';
     if (sessionKeyRequired && !sessionKey) {
       return json(
-        { error: 'sessionKey is required for save/load commands.', code: 'SESSION_KEY_REQUIRED' },
+        { error: 'sessionKey is required for save/load/delete commands.', code: 'SESSION_KEY_REQUIRED' },
         400,
         undefined,
         request,
@@ -4459,6 +4265,15 @@ export async function onRequestPost(context) {
           request,
         );
       }
+      // v27: reserved-name check — see DEV_SESSION_RESERVED_NAMES.
+      if (DEV_SESSION_RESERVED_NAMES.has(sessionKey.toLowerCase())) {
+        return json(
+          { error: `"${sessionKey}" is a reserved session name and can't be used. Choose another name.`, code: 'SESSION_KEY_RESERVED' },
+          400,
+          undefined,
+          request,
+        );
+      }
       const historyToSave = Array.isArray(body.history) ? body.history : null;
       if (!historyToSave) {
         return json(
@@ -4468,16 +4283,24 @@ export async function onRequestPost(context) {
           request,
         );
       }
-      const result = await saveConversation(env.CES_SESSIONS, sessionKey, historyToSave);
+      // v27: `overwrite` (default false) — absent/falsy means "refuse if a
+      // session with this name already exists" (SESSION_EXISTS/409), safe
+      // for every pre-v27 client that doesn't send this field at all.
+      const overwrite = body.overwrite === true;
+      const result = await saveConversation(env.CES_SESSIONS, sessionKey, historyToSave, undefined, { overwrite });
       if (!result.ok) {
+        const status =
+          result.code === 'SESSION_TOO_LARGE' ? 413 :
+          result.code === 'SESSION_EXISTS'    ? 409 :
+          500;
         return json(
-          { error: result.error, code: result.code },
-          result.code === 'SESSION_TOO_LARGE' ? 413 : 500,
+          { error: result.error, code: result.code, existing: result.existing },
+          status,
           undefined,
           request,
         );
       }
-      console.info('[chat.js] Dev session saved:', sessionKey, '-', result.messageCount, 'turns, from', clientIp);
+      console.info('[chat.js] Dev session saved:', sessionKey, '-', result.messageCount, 'turns, from', clientIp, overwrite ? '(overwrite)' : '(new)');
       return json(
         { ok: true, sessionKey, savedAt: result.savedAt, messageCount: result.messageCount },
         200,
@@ -4524,8 +4347,58 @@ export async function onRequestPost(context) {
       );
     }
 
+    // v27: 'delete' — single-session delete. sessionKey already validated by
+    // the sessionKeyRequired gate above; no charset check (mirrors 'load').
+    if (rawDevCommand === 'delete') {
+      const result = await deleteConversation(env.CES_SESSIONS, sessionKey);
+      if (!result.ok) {
+        return json(
+          { error: result.error, code: result.code },
+          result.code === 'SESSION_NOT_FOUND' ? 404 : 500,
+          undefined,
+          request,
+        );
+      }
+      console.warn('[chat.js] Dev session deleted:', sessionKey, 'by', clientIp);
+      return json({ ok: true, sessionKey }, 200, undefined, request);
+    }
+
+    // v27: 'delete_all' — wipes every saved session. Requires an exact-match
+    // confirmation phrase on top of the devPassword check already gating
+    // this whole block — a single mistyped/misclicked request must not be
+    // able to erase everything.
+    if (rawDevCommand === 'delete_all') {
+      const DELETE_ALL_CONFIRM_PHRASE = 'DELETE ALL SESSIONS';
+      const confirmText = typeof body.confirm === 'string' ? body.confirm : '';
+      if (confirmText !== DELETE_ALL_CONFIRM_PHRASE) {
+        return json(
+          {
+            error: `Send { "confirm": "${DELETE_ALL_CONFIRM_PHRASE}" } to delete all sessions. This is deliberately not a single click.`,
+            code: 'DELETE_ALL_CONFIRMATION_REQUIRED',
+          },
+          400,
+          undefined,
+          request,
+        );
+      }
+      const result = await deleteAllConversations(env.CES_SESSIONS, DEV_SESSION_KV_PREFIX);
+      if (!result.ok) {
+        return json(
+          { error: result.error, code: result.code, deletedCount: result.deletedCount, failures: result.failures },
+          500,
+          undefined,
+          request,
+        );
+      }
+      console.warn('[chat.js] ALL dev sessions deleted:', result.deletedCount, 'by', clientIp);
+      return json({ ok: true, deletedCount: result.deletedCount }, 200, undefined, request);
+    }
+
     return json(
-      { error: `Unknown devCommand "${rawDevCommand}". Expected "activate", "save", "load", or "list".`, code: 'UNKNOWN_DEV_COMMAND' },
+      {
+        error: `Unknown devCommand "${rawDevCommand}". Expected "activate", "save", "load", "list", "delete", or "delete_all".`,
+        code: 'UNKNOWN_DEV_COMMAND',
+      },
       400,
       undefined,
       request,
@@ -4594,13 +4467,27 @@ export async function onRequestPost(context) {
         devMode: true,
       }, 200, undefined, request);
     }
+    // v27: reserved-name check — see DEV_SESSION_RESERVED_NAMES.
+    if (DEV_SESSION_RESERVED_NAMES.has(extractedName.toLowerCase())) {
+      return json({ reply: `"${extractedName}" is a reserved session name, Engineer — pick another one.`, devMode: true }, 200, undefined, request);
+    }
     if (!env.CES_SESSIONS) {
       console.error('[chat.js] CES_SESSIONS KV binding missing — cannot process save-session trigger.');
       return json({ reply: 'Session storage is not configured on the server yet, Engineer.', devMode: true }, 200, undefined, request);
     }
+    // v27: this trigger has no confirm/overwrite UI (bare chat phrase, not
+    // the interactive /save command) — overwrite is always false, so a
+    // name collision refuses rather than silently overwriting.
     const historyToSaveViaTrigger = Array.isArray(body.history) ? body.history : [];
-    const triggerResult = await saveConversation(env.CES_SESSIONS, extractedName, historyToSaveViaTrigger, extractedName);
+    const triggerResult = await saveConversation(env.CES_SESSIONS, extractedName, historyToSaveViaTrigger, extractedName, { overwrite: false });
     if (!triggerResult.ok) {
+      if (triggerResult.code === 'SESSION_EXISTS') {
+        const when = (triggerResult.existing && triggerResult.existing.savedAt) || 'earlier';
+        return json({
+          reply: `A session named "${extractedName}" already exists (saved ${when}), Engineer. Natural-language save won't overwrite it — use the /save ${extractedName} command in the widget if you want to choose overwrite or a different name.`,
+          devMode: true,
+        }, 200, undefined, request);
+      }
       console.error('[chat.js] save-session trigger failed:', triggerResult.code, triggerResult.error);
       return json({ reply: `Save failed, Engineer: ${triggerResult.error}`, devMode: true }, 200, undefined, request);
     }
@@ -4869,12 +4756,7 @@ export async function onRequestPost(context) {
     if (!isModelDead('gemini', GEMINI_MODEL_PRIMARY)) {
       const resA = await callGeminiWithRetry(gKey, GEMINI_MODEL_PRIMARY, geminiContents, geminiSystemPrompt, budget);
       if (resA.ok) {
-        return json(
-          { reply: sanitizeAiReply(resA.reply, isDeveloperMode), ...(isDeveloperMode && { devMode: true }) },
-          200,
-          { 'X-CES-AI-Source': `gemini-${keyTag}primary` },
-          request,
-        );
+        return buildAiReply(resA.reply, `gemini-${keyTag}primary`, isDeveloperMode, isFirstTurn, request);
       }
       if (resA.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED') {
         console.warn(
@@ -4882,7 +4764,6 @@ export async function onRequestPost(context) {
           resA.errStatus, resA.httpStatus,
         );
       }
-      Object.assign(resA, classifyProviderResult('gemini', resA));
       lastProviderResult = resA;
       markKeyResult('gemini', originalIndex, resA);
       markModelResult('gemini', GEMINI_MODEL_PRIMARY, resA);
@@ -4900,12 +4781,7 @@ export async function onRequestPost(context) {
 
     const resB = await callGeminiWithRetry(gKey, GEMINI_MODEL_FALLBACK, geminiContents, geminiSystemPrompt, budget);
     if (resB.ok) {
-      return json(
-        { reply: sanitizeAiReply(resB.reply, isDeveloperMode), ...(isDeveloperMode && { devMode: true }) },
-        200,
-        { 'X-CES-AI-Source': `gemini-${keyTag}fallback` },
-        request,
-      );
+      return buildAiReply(resB.reply, `gemini-${keyTag}fallback`, isDeveloperMode, isFirstTurn, request);
     }
     if (resB.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED') {
       console.warn(
@@ -4913,7 +4789,6 @@ export async function onRequestPost(context) {
         resB.errStatus, resB.httpStatus,
       );
     }
-    Object.assign(resB, classifyProviderResult('gemini', resB));
     lastProviderResult = resB;
     markKeyResult('gemini', originalIndex, resB);
     markModelResult('gemini', GEMINI_MODEL_FALLBACK, resB);
@@ -4946,12 +4821,7 @@ export async function onRequestPost(context) {
   const workersAttempted = !!env.AI;
   const layerWorkers = await callWorkersAIWithRetry(env.AI, workersMsgs);
   if (layerWorkers.ok) {
-    return json(
-      { reply: sanitizeAiReply(layerWorkers.reply, isDeveloperMode), ...(isDeveloperMode && { devMode: true }) },
-      200,
-      { 'X-CES-AI-Source': 'workers-ai-fallback' },
-      request,
-    );
+    return buildAiReply(layerWorkers.reply, 'workers-ai-fallback', isDeveloperMode, isFirstTurn, request);
   }
   if (workersAttempted) {
     console.error('[chat.js] Workers AI failed:', layerWorkers.errStatus);
@@ -5005,12 +4875,8 @@ export async function onRequestPost(context) {
     }
     const resG = await callGroqWithRetry(gqKey, workersMsgs, budget);
     if (resG.ok) {
-      return json(
-        { reply: sanitizeAiReply(resG.reply, isDeveloperMode), ...(isDeveloperMode && { devMode: true }) },
-        200,
-        { 'X-CES-AI-Source': originalIndex === 0 ? 'groq-fallback' : `groq-key${originalIndex + 1}-fallback` },
-        request,
-      );
+      const groqSource = originalIndex === 0 ? 'groq-fallback' : `groq-key${originalIndex + 1}-fallback`;
+      return buildAiReply(resG.reply, groqSource, isDeveloperMode, isFirstTurn, request);
     }
     if (resG.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED') {
       console.warn(
@@ -5018,7 +4884,7 @@ export async function onRequestPost(context) {
         resG.errStatus, resG.httpStatus,
       );
     }
-    Object.assign(resG, classifyProviderResult('groq', resG));
+    if (resG.errStatus === 'model_decommissioned') resG.deadModelReason = 'MODEL_DECOMMISSIONED';
     lastProviderResult = resG;
     markKeyResult('groq', originalIndex, resG);
     markModelResult('groq', GROQ_MODEL, resG);
@@ -5065,12 +4931,8 @@ export async function onRequestPost(context) {
     }
     const resOR = await callOpenRouterWithRetry(orKey, workersMsgs, budget);
     if (resOR.ok) {
-      return json(
-        { reply: sanitizeAiReply(resOR.reply, isDeveloperMode), ...(isDeveloperMode && { devMode: true }) },
-        200,
-        { 'X-CES-AI-Source': originalIndex === 0 ? 'openrouter-fallback' : `openrouter-key${originalIndex + 1}-fallback` },
-        request,
-      );
+      const orSource = originalIndex === 0 ? 'openrouter-fallback' : `openrouter-key${originalIndex + 1}-fallback`;
+      return buildAiReply(resOR.reply, orSource, isDeveloperMode, isFirstTurn, request);
     }
     if (resOR.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED') {
       console.warn(
@@ -5078,7 +4940,9 @@ export async function onRequestPost(context) {
         resOR.errStatus, resOR.httpStatus,
       );
     }
-    Object.assign(resOR, classifyProviderResult('openrouter', resOR));
+    if (resOR.httpStatus === 404 && /no endpoints found matching your data policy/i.test(resOR.errBody || '')) {
+      resOR.accountConfigIssue = 'OPENROUTER_DATA_POLICY';
+    }
     lastProviderResult = resOR;
     markKeyResult('openrouter', originalIndex, resOR);
     markModelResult('openrouter', OPENROUTER_MODEL, resOR);

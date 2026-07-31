@@ -1,5 +1,5 @@
 /**
- * functions/api/tts.js  —  v11  (2026-07-22)
+ * functions/api/tts.js  —  v12  (2026-07-29)
  * ──────────────────────────────────────────────────────────────────────────
  * Cloudflare Pages Function — TTS Proxy
  * Routes: GET  /api/tts?text=...&lang=ar-EG[&voice=female|male][&speed=1.0]
@@ -429,6 +429,109 @@
  *      so renderedDialectFor correctly keeps labeling this tier "ar (MSA),
  *      robotic" for every Arabic dialect, unchanged.
  *
+ * ── HOW v12 GOT HERE ─────────────────────────────────────────────────────────
+ * Requested: emotionally expressive prosody ("إنفعالية") to reduce the
+ * flat/robotic quality of replies, at zero added cost. Per-item:
+ *
+ *   1. [ROOT CAUSE] Neither Edge TTS's buildEdgeSsml nor ElevenLabs'
+ *      voice_settings varied AT ALL by message content prior to this pass
+ *      -- Edge TTS's <prosody> always emitted the literal strings
+ *      pitch='+0Hz' and volume='+0%' regardless of text, and `style` in
+ *      the ElevenLabs body was a hardcoded 0.0 (see v11 point 5 -- a
+ *      deliberate, well-reasoned choice for a DIFFERENT problem, dialect-
+ *      neutral "naturalness," not this one). Separately, the front-end's
+ *      splitForProxy() already chunks every reply into ~200-char pieces
+ *      before this endpoint ever sees them and its browser-TTS fallback
+ *      (speakChunks) hardcodes utt.pitch=1.0 unconditionally -- so the
+ *      flatness this pass addresses existed on both the primary proxy path
+ *      and the last-resort browser path, in three independent hardcoded
+ *      spots, not one.
+ *   2. [ADDED] inferProsody(): a small, zero-dependency, zero-latency
+ *      lexicon+punctuation classifier (see its own doc-comment for the
+ *      full rationale, including why substring match over \b-word-boundary
+ *      regex, and the explicit false-negative on negation e.g. "لا يوجد
+ *      خطأ"). Categorizes into neutral/excited/empathetic/warning plus an
+ *      additive question modifier, each mapped to small, individually-
+ *      justified pitch/rate/volume/style/stability deltas in
+ *      PROSODY_PROFILES -- `neutral` is the exact zero vector, so text
+ *      matching no lexicon entry reproduces today's flat output exactly,
+ *      not an approximation of it.
+ *   3. [VERIFIED, sourced against live upstream -- same standard as v11
+ *      points 2-3] Edge TTS's <prosody> pitch/volume string format was NOT
+ *      assumed: fetched data_classes.py from rany2/edge-tts's master
+ *      branch directly (raw.githubusercontent.com, allowlisted) and read
+ *      TTSConfig.__post_init__'s actual validation regexes --
+ *      rate/volume: ^[+-]\d+%$, pitch: ^[+-]\d+Hz$, all three always
+ *      signed integers, matching exactly what hzToEdgeProsody/
+ *      pctToEdgeProsody now emit. communicate.py's mkssml() confirms the
+ *      accepted SSML shape is still exactly one <voice>/<prosody> pair
+ *      with all three attributes on it (pitch/rate/volume together) --
+ *      the reference client never emits <break>/<emphasis>/multiple
+ *      <prosody> runs, so this pass does not add them either: extending
+ *      the one already-verified-accepted element with two more attributes
+ *      is a materially smaller, more defensible bet than adding new SSML
+ *      element types this codebase has zero evidence Microsoft's consumer
+ *      endpoint (as opposed to full Azure Cognitive Services SSML) accepts.
+ *      What is NOT verified, same standing caveat as v11 point 4: an
+ *      actual network round trip, still unreachable from this sandbox
+ *      (speech.platform.bing.com is not on the egress allowlist here
+ *      either). First real verification is a preview deploy with a
+ *      before/after audio diff on a few chunks per PROSODY_PROFILES
+ *      category, same standard as every prior Edge TTS pass.
+ *   4. [SAFETY CEILINGS] PROSODY_*_MAX consts bound inferProsody()'s output
+ *      independent of the authored PROSODY_PROFILES values -- worked
+ *      arithmetic: worst case is `excited` + question modifier + jitter =
+ *      pitch 14+6+3=23Hz (ceiling 30), rate 8+2=10% (ceiling 20, and this
+ *      composes ADDITIVELY with any caller-supplied `speed` inside
+ *      speedToEdgeRate's pre-existing ±50% ceiling, so an adversarial
+ *      speed+excited combination still can't exceed what this function
+ *      already enforced pre-v12), volume 6+2=8% (ceiling 15). All four
+ *      ceilings are env-overridable (nonNegFloatFromEnv, new in this pass,
+ *      generalizes floatFromEnv beyond its hardcoded [0,1] band) for the
+ *      same "A/B without a redeploy" reason v11 point 5 made stability/
+ *      similarity_boost env-overridable.
+ *   5. [ELEVENLABS] style is no longer hardcoded 0.0; it now receives
+ *      PROSODY_PROFILES[emotion].elevenStyle, capped at PROSODY_STYLE_MAX
+ *      (0.30 default). This does not contradict v11 point 5's "leave it
+ *      near-zero outside deliberately theatrical delivery" -- the default
+ *      (neutral) path is still exactly 0.0; style only rises for text this
+ *      pass's lexicon actually classifies as excited (0.18) or empathetic
+ *      (0.05), and 0.30 stays well short of ElevenLabs' own "theatrical"
+ *      framing. stability is now nudged by a small per-category delta
+ *      (±0.05-0.08) that keeps the effective value inside [0.35, 0.55] --
+ *      entirely inside ElevenLabs' own cited 0.3-0.5 "natural" band from
+ *      v11 point 5, never approaching their cited 0.75 "monotonous" one.
+ *      NOTE: ElevenLabs is Tier 1 (after Edge TTS), so in the now-typical
+ *      case where Group 0 answers, this tier's prosody handling is a
+ *      fallback safety net, not the primary experience -- see point 6.
+ *   6. [CONSIDERED, NOT ADOPTED] ElevenLabs' eleven_v3 model supports
+ *      inline bracketed audio tags ([excited], [whispers], [sighs]) with
+ *      confirmed Arabic support -- a materially richer expressiveness
+ *      mechanism than voice_settings alone. Not adopted this pass: (a) it
+ *      is a different model from this file's ELEVEN_MODEL
+ *      ('eleven_multilingual_v2', explicitly documented elsewhere as ElevenLabs'
+ *      "most stable" option vs v3's expressiveness-first, still-maturing
+ *      positioning), a model swap on the PAID/quota-metered fallback tier
+ *      is a bigger decision than this zero-cost prosody pass scoped for;
+ *      (b) audio tags are additional characters billed against the same
+ *      10k-char/month free allowance this file already carefully guards
+ *      (isElevenLabsMonthlyExhausted et al.) -- "zero marginal cost" stops
+ *      being true once tags meaningfully inflate character counts; (c) no
+ *      live-request verification of latency/quality on THIS file's stock
+ *      voice IDs was possible from this sandbox. Left as a flagged,
+ *      deliberately-not-taken option -- see the response accompanying this
+ *      revision -- rather than silently adopted or silently ignored.
+ *   7. [FRONT-END, pc_suite_v35-4-1-2.html, companion change] Ported a
+ *      same-logic prosody classifier into the browser-TTS fallback
+ *      (speakChunks) so utt.pitch/utt.rate vary the same way the proxy
+ *      path's SSML does, and made playChunksViaProxy's fixed 130ms
+ *      inter-chunk pause vary slightly by the JUST-FINISHED chunk's
+ *      trailing punctuation (longer after ./؟/!, shorter after ،/,).
+ *      Zero new network calls either way. chat-17_fixed.js was checked and
+ *      contains no /api/tts call site (it is the /api/chat reply-generation
+ *      function, not the TTS client) -- correctly out of scope, left
+ *      untouched. stt.js is speech-to-text, unrelated, also untouched.
+ *
  * ── SETUP ─────────────────────────────────────────────────────────────────
  *   ELEVEN_API_KEY(_1..12), DEEPGRAM_API_KEY(_1..12) — case-insensitive.
  *   Optional: ELEVEN_VOICE_ID_F / ELEVEN_VOICE_ID_M
@@ -445,6 +548,20 @@
  *   Optional, v11 — ElevenLabs voice_settings, see point 5, defaults shown:
  *     ELEVEN_STABILITY=0.45
  *     ELEVEN_SIMILARITY_BOOST=0.75
+ *   Optional, v12 -- prosody-inference safety ceilings, see "HOW v12 GOT
+ *     HERE" point 4, defaults shown (tightening these is always safe;
+ *     loosening past the authored PROSODY_PROFILES deltas has no further
+ *     effect since the ceiling would no longer be the binding constraint):
+ *     TTS_PROSODY_PITCH_MAX_HZ=30
+ *     TTS_PROSODY_RATE_MAX_PCT=20
+ *     TTS_PROSODY_VOLUME_MAX_PCT=15
+ *     TTS_PROSODY_STYLE_MAX=0.30
+ *     TTS_PROSODY_STABILITY_DELTA_MAX=0.10
+ *   Optional, v12 -- POST body field / GET query param, both default "auto":
+ *     emotion=neutral|excited|empathetic|warning|auto -- forces
+ *     inferProsody()'s category instead of running the lexicon scorer; an
+ *     unrecognized value silently falls back to "auto" (see inferProsody's
+ *     forcedEmotion guard).
  *   Optional, all env-overridable, defaults shown:
  *     TTS_TIER0_TIMEOUT_MS=4000   (Edge TTS handshake+stream)
  *     TTS_TIER1_TIMEOUT_MS=6000   (ElevenLabs)
@@ -477,6 +594,9 @@
  *   X-TTS-Guaranteed-Fallback : "true", v10, present ONLY when Tier 4 served
  *                               the response — the signal worth alerting on
  *   X-TTS-Request-Id, X-TTS-Latency-Ms : every response
+ *   X-TTS-Prosody-Emotion/-Pitch/-Rate/-Volume/-Style : v12, every response
+ *                              from edge_tts or elevenlabs (ASCII-only
+ *                              values -- see v8 changelog point 5)
  *
  * ── CSP NOTE ───────────────────────────────────────────────────────────────
  *   Audio served from /api/tts (same origin). media-src 'self' is correct.
@@ -579,6 +699,71 @@ const ELEVEN_SPEED_MAX = 1.2;
 // Env-overridable via floatFromEnv (ELEVEN_STABILITY / ELEVEN_SIMILARITY_BOOST).
 const ELEVEN_STABILITY_DEFAULT = 0.45;
 const ELEVEN_SIMILARITY_BOOST_DEFAULT = 0.75;
+
+// ── v12: Prosody-inference constants ────────────────────────────────────────
+// Ceilings on how far inferProsody() is allowed to push any one request away
+// from today's flat baseline (pitch/rate/volume delta magnitude, ElevenLabs
+// style, ElevenLabs stability delta). Deliberately conservative and
+// independent of any single category's authored values below (see
+// PROSODY_PROFILES) -- these exist so a bad lexicon edit or a mis-set env
+// override fails closed into "slightly off" rather than "audibly broken."
+// Same idiom as ELEVEN_SPEED_MIN/MAX: a safe band, not a hard technical
+// ceiling (Edge TTS's own validator -- confirmed directly against
+// rany2/edge-tts's data_classes.py TTSConfig.__post_init__ in this pass,
+// not assumed -- accepts any integer Hz/percent with a sign, e.g. "+999Hz"
+// would pass ITS regex; the tighter numbers below are this file's own
+// quality judgment, not Microsoft's ceiling).
+const PROSODY_PITCH_MAX_HZ    = 30;   // env: TTS_PROSODY_PITCH_MAX_HZ
+const PROSODY_RATE_MAX_PCT    = 20;   // env: TTS_PROSODY_RATE_MAX_PCT (additive with `speed`, pre-existing ±50% Edge ceiling in speedToEdgeRate still applies after combining)
+const PROSODY_VOLUME_MAX_PCT  = 15;   // env: TTS_PROSODY_VOLUME_MAX_PCT
+const PROSODY_STYLE_MAX       = 0.30; // env: TTS_PROSODY_STYLE_MAX -- ElevenLabs' own guidance (see v11 point 5 above) is near-zero outside deliberately theatrical delivery; 0.30 stays well short of "theatrical," see PROSODY_PROFILES.excited below (0.18) for the actual authored ceiling this cap is guarding against a bad override.
+const PROSODY_STABILITY_DELTA_MAX = 0.10; // keeps stability inside [0.35, 0.55] given the 0.45 default -- entirely inside ElevenLabs' own cited 0.3-0.5 "natural, non-monotonous" band, never approaching the 0.75 "monotonous" band their docs flag.
+
+/**
+ * Per-category authored deltas. Values are *deltas* added to today's flat
+ * baseline (pitch +0Hz, volume +0%, style 0.0, stability unchanged), not
+ * replacement values, so text matching no lexicon entry (`neutral`)
+ * reproduces exactly today's output -- the zero-regression case is the
+ * literal zero vector, not a fifth code path.
+ */
+const PROSODY_PROFILES = Object.freeze({
+  neutral: {
+    pitchHz: 0, ratePct: 0, volumePct: 0, elevenStyle: 0.0, stabilityDelta: 0,
+  },
+  // Good news, confirmations, congratulations. Pitch is the dominant
+  // arousal cue in vocal-emotion-acoustics literature (more than loudness),
+  // so it carries most of this profile's weight; rate/volume move less.
+  excited: {
+    pitchHz: 14, ratePct: 8, volumePct: 6, elevenStyle: 0.18, stabilityDelta: -0.05,
+  },
+  // Apologies, delays, bad news, expressions of understanding. Softer and
+  // slower reads as sincerity; stability moves UP (steadier), not down --
+  // an unstable "sorry" reads as nervous, not warm.
+  empathetic: {
+    pitchHz: -8, ratePct: -6, volumePct: -4, elevenStyle: 0.05, stabilityDelta: 0.05,
+  },
+  // Warnings, error text, "must/required" language, safety-relevant civil-
+  // engineering caveats. Slower and marginally firmer, explicitly NOT
+  // exaggerated (style stays at today's 0.0) -- a theatrical warning reads
+  // as less credible, not more.
+  warning: {
+    pitchHz: -4, ratePct: -8, volumePct: 3, elevenStyle: 0.0, stabilityDelta: 0.08,
+  },
+});
+// Additive modifier, not a fifth exclusive category -- a question can also
+// be excited/empathetic/warning-flavored. Approximates the rising terminal
+// contour of an Arabic/English yes-no or wh-question with a whole-utterance
+// pitch nudge (see inferProsody's own comment for why a true per-word
+// rising SSML <prosody contour=...> was rejected for this pass).
+const PROSODY_QUESTION_PITCH_HZ = 6;
+// Per-request cosmetic jitter -- NOT emotion-derived, purely anti-monotony
+// (two consecutive `neutral` chunks should not sound bit-for-bit identical).
+// Small enough that the PROSODY_*_MAX headroom above always has margin left
+// even at max(|category delta|) + question + jitter combined -- see the
+// worked arithmetic in the v12 changelog entry.
+const PROSODY_JITTER_PITCH_HZ = 3;
+const PROSODY_JITTER_RATE_PCT = 2;
+const PROSODY_JITTER_VOLUME_PCT = 2;
 
 // ── Deepgram constants ──────────────────────────────────────────────────────
 const DEEPGRAM_SPEAK_URL = 'https://api.deepgram.com/v1/speak';
@@ -691,6 +876,121 @@ function escapeSsmlText(text) {
     .replace(/'/g, '&apos;');
 }
 
+/**
+ * v12: generalized sibling of floatFromEnv (above) for values whose valid
+ * range isn't ElevenLabs' fixed [0,1] -- prosody ceilings go up to tens of
+ * Hz/percent. Same fail-closed idiom: non-numeric or out-of-[0,max] env
+ * input is ignored in favor of `fallback`, never forwarded as-is.
+ */
+function nonNegFloatFromEnv(env, name, fallback, max) {
+  const raw = env?.[name];
+  const n = raw !== undefined ? parseFloat(raw) : NaN;
+  return Number.isFinite(n) && n >= 0 && n <= max ? n : fallback;
+}
+
+// ── v12: Rule-based emotional-prosody inference ────────────────────────────
+// Zero-cost (pure string ops -- no model call, no extra network round trip,
+// no added latency worth measuring), Egyptian-Arabic-weighted lexicon
+// (substring match, see rationale below). Deliberately NOT a sentiment
+// model: no dependency, no inference cost, fully auditable in a code
+// review, and its only effect is a bounded nudge to pitch/rate/volume/style
+// -- never content, never routing, never which provider tier is tried.
+//
+// Substring match, not \b-word-boundary regex: Arabic attaches prefixes/
+// conjunctions/possessives directly onto stems (و-, ف-, ب-, ال-, -ها, -كم,
+// -ين...), so a boundary-anchored match on "مبروك" misses "ومبروك" ("and
+// congratulations") constantly. Substring matching trades a small, bounded
+// false-positive rate for materially better recall -- acceptable because a
+// false positive here costs a few Hz/percent of prosody drift, never a
+// wrong transcription or a wrong routing decision.
+//
+// Lexicon curation note (v12): earlier drafts of this list included تمام
+// ("OK/fine," near-universal as a bare neutral acknowledgment in Egyptian
+// Arabic), الحمد لله (frequently just a formulaic "I'm well, thanks" filler,
+// not an excitement marker), and يجب/ضروري ("must/necessary" -- appears in
+// nearly every routine input-requirement sentence this specific tool
+// produces, e.g. footing-pro/beam-pro unit instructions). All four were
+// dropped: each fires on genuinely neutral, high-frequency sentences for
+// THIS deployment's actual content, which would have made "excited" and
+// "warning" the default rather than the exception. What remains below is
+// deliberately precision-leaning over recall-leaning.
+//
+// Known limitation, stated plainly rather than silently: no negation
+// handling. "لا يوجد خطأ" ("no error found" -- reassuring) still matches
+// the warning-lexicon stem "خطأ" and gets the slower/firmer warning
+// profile. Accepted for this pass: the failure mode is a few Hz/percent of
+// mismatched tone, not a content or safety error, and real negation
+// detection (scope, multi-word "لا...إطلاقاً" patterns, etc.) is a
+// meaningfully bigger, not-zero-cost feature in its own right.
+const PROSODY_LEXICON = Object.freeze({
+  excited: ['رائع', 'ممتاز', 'مبروك', 'تهانين', 'برافو', 'يا سلام', 'جامد', 'حلو أوي', 'بنجاح', 'فخم'],
+  empathetic: ['آسف', 'اسف', 'معلش', 'للأسف', 'نعتذر', 'نأسف', 'مضايق', 'حزين', 'تعبان'],
+  warning: ['تنبيه', 'تحذير', 'احترس', 'خطأ', 'ممنوع', 'خطر'],
+});
+
+/**
+ * Classify one already-preprocessText()-ed chunk into a prosody profile.
+ * Pure function of its three arguments -- no I/O, no Date.now(), no shared
+ * mutable state beyond Math.random() for jitter -- see __inferProsodyForTests.
+ *
+ * @param {string} text
+ * @param {{pitchMaxHz:number, rateMaxPct:number, volumeMaxPct:number, styleMax:number, stabilityDeltaMax:number}} limits
+ * @param {string} [forcedEmotion] one of PROSODY_PROFILES's keys, or
+ *   'auto'/undefined/anything unrecognized to run the lexicon scorer --
+ *   an unrecognized value degrades to today's inference, never a 400.
+ * @returns {{
+ *   emotion: string, isQuestion: boolean,
+ *   pitchHz: number, ratePct: number, volumePct: number,
+ *   elevenStyle: number, stabilityDelta: number,
+ * }}
+ */
+function inferProsody(text, limits, forcedEmotion) {
+  const isQuestion = /[؟?]\s*$/.test(text);
+
+  let emotion;
+  if (forcedEmotion && forcedEmotion !== 'auto' && PROSODY_PROFILES[forcedEmotion]) {
+    emotion = forcedEmotion;
+  } else {
+    const bangCount = (text.match(/!/g) || []).length;
+    const scores = { excited: bangCount >= 2 ? 1 : 0, empathetic: 0, warning: 0 };
+    for (const category of Object.keys(PROSODY_LEXICON)) {
+      for (const stem of PROSODY_LEXICON[category]) {
+        if (text.includes(stem)) scores[category] += 1;
+      }
+    }
+    // Fixed tie-break priority when multiple categories score >0:
+    // empathetic (sincerity/safety-adjacent) > warning (safety-relevant) >
+    // excited (cosmetic upside only) > neutral.
+    const priority = ['empathetic', 'warning', 'excited'];
+    emotion = 'neutral';
+    let best = 0;
+    for (const category of priority) {
+      if (scores[category] > best) { best = scores[category]; emotion = category; }
+    }
+  }
+
+  const base = PROSODY_PROFILES[emotion] || PROSODY_PROFILES.neutral;
+  const questionPitch = isQuestion ? PROSODY_QUESTION_PITCH_HZ : 0;
+  // Math.random(): cosmetic jitter only, never a security- or fairness-
+  // relevant draw, so the platform's non-CSPRNG RNG is the right, simplest
+  // tool -- crypto.getRandomValues would be pointless overhead here.
+  const jitterPitch  = (Math.random() * 2 - 1) * PROSODY_JITTER_PITCH_HZ;
+  const jitterRate   = (Math.random() * 2 - 1) * PROSODY_JITTER_RATE_PCT;
+  const jitterVolume = (Math.random() * 2 - 1) * PROSODY_JITTER_VOLUME_PCT;
+
+  const clamp = (n, max) => Math.max(-max, Math.min(max, n));
+
+  return {
+    emotion,
+    isQuestion,
+    pitchHz   : Math.round(clamp(base.pitchHz + questionPitch + jitterPitch, limits.pitchMaxHz)),
+    ratePct   : Math.round(clamp(base.ratePct + jitterRate, limits.rateMaxPct)),
+    volumePct : Math.round(clamp(base.volumePct + jitterVolume, limits.volumeMaxPct)),
+    elevenStyle    : Math.max(0, Math.min(limits.styleMax, base.elevenStyle)),
+    stabilityDelta : clamp(base.stabilityDelta, limits.stabilityDeltaMax),
+  };
+}
+
 function resolveVoiceId(genderKey, env) {
   if (genderKey === 'male') {
     return (env?.ELEVEN_VOICE_ID_M?.trim() || '') || ELEVEN_DEFAULT_M;
@@ -711,11 +1011,43 @@ function clampSpeed(speed) {
   return Math.min(2.0, Math.max(0.5, n));
 }
 
-/** speed float (0.5-2.0, 1.0=normal) -> Edge TTS's SSML prosody rate string ("+N%"/"-N%"). */
-function speedToEdgeRate(speed) {
-  const pct = Math.round((clampSpeed(speed) - 1) * 100);
+/**
+ * speed float (0.5-2.0, 1.0=normal) + optional additive prosody-derived
+ * percent -> Edge TTS's SSML prosody rate string ("+N%"/"-N%").
+ * v12: `extraPct` param added (default 0, fully backward compatible with
+ * every existing call site) -- composes inferProsody()'s ratePct with the
+ * pre-existing speed-derived rate in the same percent-delta unit space
+ * before the combined value hits the ORIGINAL ±50% ceiling below, so a
+ * caller-supplied `speed` extreme plus an `excited` chunk still can't
+ * exceed the ceiling this function already enforced pre-v12.
+ */
+function speedToEdgeRate(speed, extraPct) {
+  const pct = Math.round((clampSpeed(speed) - 1) * 100) + Math.round(extraPct || 0);
   const clamped = Math.min(50, Math.max(-50, pct));
   return `${clamped >= 0 ? '+' : ''}${clamped}%`;
+}
+
+/**
+ * v12: integer Hz delta -> Edge TTS's SSML prosody pitch string.
+ * Format verified directly against rany2/edge-tts's data_classes.py
+ * TTSConfig.__post_init__ validator in this pass: `^[+-]\d+Hz$`, always
+ * signed (including zero -- the reference default is the literal string
+ * "+0Hz", not "0Hz"), always an integer (no decimal point permitted by
+ * that pattern).
+ */
+function hzToEdgeProsody(deltaHz) {
+  const n = Math.round(deltaHz || 0);
+  return `${n >= 0 ? '+' : ''}${n}Hz`;
+}
+
+/**
+ * v12: integer percent delta -> Edge TTS's SSML prosody volume string.
+ * Same verified pattern family as hzToEdgeProsody: `^[+-]\d+%$`, always
+ * signed, always an integer.
+ */
+function pctToEdgeProsody(deltaPct) {
+  const n = Math.round(deltaPct || 0);
+  return `${n >= 0 ? '+' : ''}${n}%`;
 }
 
 /** speed float -> ElevenLabs voice_settings.speed (clamped 0.7-1.2, see const comment above). */
@@ -1045,8 +1377,20 @@ function recordDeepgramFirstUseIfAbsent(context) {
 }
 
 // ── TIER 1 — ElevenLabs ──────────────────────────────────────────────────
-async function fetchElevenTTS(text, apiKey, voiceId, speed, timeoutMs, stability, similarityBoost) {
+/**
+ * v12: `style` and `stabilityDelta` params added (both default 0 if the
+ * caller omits them -- an old-style 6-arg call reproduces the pre-v12
+ * request body byte-for-byte, since style:0.0 was this function's hardcoded
+ * value already and +0 leaves `stability` unchanged).
+ */
+async function fetchElevenTTS(text, apiKey, voiceId, speed, timeoutMs, stability, similarityBoost, style, stabilityDelta) {
   const url = `${ELEVEN_API_URL}/${voiceId}?output_format=${ELEVEN_OUT_FORMAT}`;
+  // Defensive re-clamp to ElevenLabs' documented [0,1] field range even
+  // though inferProsody() already bounds stabilityDelta to
+  // ±PROSODY_STABILITY_DELTA_MAX (0.10) -- two independent authors of the
+  // 0.45 base and the delta should never be able to jointly walk this
+  // outside [0,1] and reach ElevenLabs at all, cost-free to guard twice.
+  const effectiveStability = Math.min(1, Math.max(0, stability + (stabilityDelta || 0)));
 
   const elRes = await fetchWithTimeout(url, {
     method : 'POST',
@@ -1061,9 +1405,15 @@ async function fetchElevenTTS(text, apiKey, voiceId, speed, timeoutMs, stability
       voice_settings: {
         // v11 point 5: env-overridable, evidence-based defaults -- see the
         // ELEVEN_STABILITY_DEFAULT/ELEVEN_SIMILARITY_BOOST_DEFAULT comment.
-        stability        : stability,
+        // v12: stability now additionally nudged per-request by
+        // inferProsody()'s stabilityDelta (see PROSODY_PROFILES); style is
+        // no longer hardcoded to 0.0 -- see PROSODY_STYLE_MAX and the v12
+        // changelog entry for why this doesn't contradict v11 point 5's
+        // "leave it near-zero outside deliberately theatrical delivery"
+        // guidance.
+        stability        : effectiveStability,
         similarity_boost : similarityBoost,
-        style            : 0.0,
+        style            : style || 0.0,
         use_speaker_boost: true,
         speed            : speedToElevenSpeed(speed),
       },
@@ -1289,12 +1639,12 @@ function edgeVoiceLocale(voiceName) {
  * exactly one <voice> wrapping one <prosody> — the only shape currently
  * accepted — so this only tightens conformance, it doesn't add capability.
  */
-function buildEdgeSsml(voiceName, escapedText, rate) {
+function buildEdgeSsml(voiceName, escapedText, rate, pitch, volume) {
   return (
     "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' " +
     `xmlns:mstts='https://www.w3.org/2001/mstts' xml:lang='${edgeVoiceLocale(voiceName)}'>` +
     `<voice name='${voiceName}'>` +
-    `<prosody pitch='+0Hz' rate='${rate}' volume='+0%'>` +
+    `<prosody pitch='${pitch}' rate='${rate}' volume='${volume}'>` +
     escapedText +
     '</prosody></voice></speak>'
   );
@@ -1340,7 +1690,14 @@ function parseEdgeBinaryFrame(buf) {
 /**
  * @returns {Promise<{ bytes: Uint8Array, contentType: string }>}
  */
-async function fetchEdgeTTS(text, lang, genderKey, speed, timeoutMs, budget) {
+/**
+ * v12: `prosody` param added (default {} -- every field optional, missing
+ * fields resolve to today's flat 0/0/0 via the `|| 0` in the formatters
+ * below, so an old call site omitting it entirely still produces the
+ * pre-v12 SSML byte-for-byte).
+ * @returns {Promise<{ bytes: Uint8Array, contentType: string }>}
+ */
+async function fetchEdgeTTS(text, lang, genderKey, speed, timeoutMs, budget, prosody) {
   if (budget && !budget.take()) {
     const err = new Error('Edge TTS: subrequest budget exhausted');
     err.category = 'subrequest budget exhausted';
@@ -1348,8 +1705,11 @@ async function fetchEdgeTTS(text, lang, genderKey, speed, timeoutMs, budget) {
     throw err;
   }
 
+  const p = prosody || {};
   const voiceName = resolveEdgeVoice(lang, genderKey);
-  const rate = speedToEdgeRate(speed);
+  const rate = speedToEdgeRate(speed, p.ratePct);
+  const pitch = hzToEdgeProsody(p.pitchHz);
+  const volume = pctToEdgeProsody(p.volumePct);
   const escapedText = escapeSsmlText(text);
 
   const connectionId = crypto.randomUUID().replace(/-/g, '');
@@ -1468,7 +1828,7 @@ async function fetchEdgeTTS(text, lang, genderKey, speed, timeoutMs, budget) {
         'Content-Type:application/ssml+xml\r\n' +
         `X-Timestamp:${jsStyleDateString()}Z\r\n` +
         'Path:ssml\r\n\r\n' +
-        buildEdgeSsml(voiceName, escapedText, rate),
+        buildEdgeSsml(voiceName, escapedText, rate, pitch, volume),
       );
     });
 
@@ -1490,6 +1850,16 @@ export {
   generateEdgeSecMsGec as __generateEdgeSecMsGecForTests,
   edgeVoiceLocale as __edgeVoiceLocaleForTests,
   buildEdgeSsml as __buildEdgeSsmlForTests,
+};
+
+// Test-only exports (v12) -- inferProsody is pure and the highest-value
+// thing in this revision to pin with real regression coverage: a silent
+// lexicon/weight change six months from now should fail a test, not just
+// quietly retune production tone.
+export {
+  inferProsody as __inferProsodyForTests,
+  hzToEdgeProsody as __hzToEdgeProsodyForTests,
+  pctToEdgeProsody as __pctToEdgeProsodyForTests,
 };
 
 // Test-only export (v9). isDeepgramExpired's new DEEPGRAM_CREDIT_EXPIRES
@@ -1640,7 +2010,7 @@ export {
  * point 8. A thrown error here is now an unexpected internal fault, not a
  * routine outcome.
  */
-async function runTtsCascade({ text, lang, genderKey, speed, env, context, timeouts }) {
+async function runTtsCascade({ text, lang, genderKey, speed, emotion, env, context, timeouts }) {
   const devMode = isDevMode(env);
   const englishOnly = isEnglish(lang);
   const budget = makeFetchBudget(SUBREQUEST_BUDGET_FREE_PLAN);
@@ -1658,6 +2028,28 @@ async function runTtsCascade({ text, lang, genderKey, speed, env, context, timeo
   // (any case) is the only way to turn it back off.
   const edgeEnabled = (env?.EDGE_TTS_ENABLED ?? 'true').trim().toLowerCase() !== 'false';
 
+  // v12: computed once per request, reused by both Group 0 and Tier 1 below
+  // -- the SAME classification should not silently differ between a Tier-0
+  // attempt and a Tier-1 fallback for the identical input text.
+  const prosodyLimits = {
+    pitchMaxHz       : nonNegFloatFromEnv(env, 'TTS_PROSODY_PITCH_MAX_HZ', PROSODY_PITCH_MAX_HZ, 200),
+    rateMaxPct       : nonNegFloatFromEnv(env, 'TTS_PROSODY_RATE_MAX_PCT', PROSODY_RATE_MAX_PCT, 50),
+    volumeMaxPct     : nonNegFloatFromEnv(env, 'TTS_PROSODY_VOLUME_MAX_PCT', PROSODY_VOLUME_MAX_PCT, 50),
+    styleMax         : nonNegFloatFromEnv(env, 'TTS_PROSODY_STYLE_MAX', PROSODY_STYLE_MAX, 1),
+    stabilityDeltaMax: nonNegFloatFromEnv(env, 'TTS_PROSODY_STABILITY_DELTA_MAX', PROSODY_STABILITY_DELTA_MAX, 1),
+  };
+  const prosody = inferProsody(text, prosodyLimits, emotion);
+  // ASCII-only values throughout (emotion is one of PROSODY_PROFILES's
+  // English keys, the rest are signed integers/floats) -- see v8 changelog
+  // point 5 on why a non-Latin-1 header value throws at the Fetch API layer.
+  const prosodyHeaders = {
+    'X-TTS-Prosody-Emotion': prosody.emotion + (prosody.isQuestion ? '+question' : ''),
+    'X-TTS-Prosody-Pitch'  : hzToEdgeProsody(prosody.pitchHz),
+    'X-TTS-Prosody-Rate'   : pctToEdgeProsody(prosody.ratePct),
+    'X-TTS-Prosody-Volume' : pctToEdgeProsody(prosody.volumePct),
+    'X-TTS-Prosody-Style'  : String(prosody.elevenStyle),
+  };
+
   const keyCountHeaders = {
     'X-TTS-Eleven-KeysAvailable'  : String(eleven.keys.length),
     'X-TTS-Deepgram-KeysAvailable': String(deepgram.keys.length),
@@ -1670,11 +2062,11 @@ async function runTtsCascade({ text, lang, genderKey, speed, env, context, timeo
   // requested 1-4 numbering; see PROVIDER_TIERS label.
   if (edgeEnabled && !(await isCircuitOpen(env, 'edge_tts'))) {
     try {
-      const { bytes, contentType } = await fetchEdgeTTS(text, lang, genderKey, speed, timeouts.tier0, budget);
+      const { bytes, contentType } = await fetchEdgeTTS(text, lang, genderKey, speed, timeouts.tier0, budget, prosody);
       recordOutcome(context, 'edge_tts', true);
       return {
         bytes, contentType, provider: 'edge_tts', providerOfficial: false,
-        engineHeaders: {}, attempts, budgetRemaining: budget.remaining(),
+        engineHeaders: { ...prosodyHeaders }, attempts, budgetRemaining: budget.remaining(),
       };
     } catch (err) {
       recordOutcome(context, 'edge_tts', false);
@@ -1697,13 +2089,13 @@ async function runTtsCascade({ text, lang, genderKey, speed, env, context, timeo
       const voiceId = resolveVoiceId(genderKey, env);
       const { response: result, keyIndex, keysTried } = await rotateAndFetchTTS(
         ringPointers.eleven, eleven.keys,
-        (key) => fetchElevenTTS(text, key, voiceId, speed, timeouts.tier1, elevenStability, elevenSimilarityBoost),
+        (key) => fetchElevenTTS(text, key, voiceId, speed, timeouts.tier1, elevenStability, elevenSimilarityBoost, prosody.elevenStyle, prosody.stabilityDelta),
         'ElevenLabs', budget,
       );
       recordOutcome(context, 'elevenlabs', true);
       return {
         bytes: result.bytes, contentType: result.contentType, provider: 'elevenlabs', providerOfficial: true,
-        engineHeaders: { 'X-TTS-Voice': voiceId, 'X-TTS-KeyIndex': String(keyIndex), 'X-TTS-KeysTried': String(keysTried), ...keyCountHeaders },
+        engineHeaders: { 'X-TTS-Voice': voiceId, 'X-TTS-KeyIndex': String(keyIndex), 'X-TTS-KeysTried': String(keysTried), ...keyCountHeaders, ...prosodyHeaders },
         attempts, budgetRemaining: budget.remaining(),
       };
     } catch (err) {
@@ -1917,6 +2309,10 @@ export async function onRequestGet(context) {
   const langParam  = (url.searchParams.get('lang')  || 'ar-EG').trim();
   const voiceParam = (url.searchParams.get('voice') || 'female').toLowerCase().trim();
   const speedParam = url.searchParams.has('speed') ? Number(url.searchParams.get('speed')) : 1.0;
+  // v12: optional, additive-only param -- absent/unrecognized both mean
+  // "auto" (run the lexicon scorer). See inferProsody's forcedEmotion guard
+  // for why an invalid value here degrades rather than 400s.
+  const emotionParam = (url.searchParams.get('emotion') || 'auto').toLowerCase().trim();
 
   const text = preprocessText(rawText);
   if (!text) {
@@ -1939,7 +2335,7 @@ export async function onRequestGet(context) {
 
   try {
     const result = await runTtsCascade({
-      text, lang: safeLang, genderKey, speed: speedParam, env, context,
+      text, lang: safeLang, genderKey, speed: speedParam, emotion: emotionParam, env, context,
       timeouts: resolveTimeouts(env),
     });
     logTtsEvent({ requestId, route: 'GET', lang: safeLang, provider: result.provider, fallback: result.attempts.length > 0, attempts: result.attempts, budgetRemaining: result.budgetRemaining });
@@ -1985,6 +2381,8 @@ export async function onRequestPost(context) {
   const genderRaw = typeof body.voice_gender === 'string' ? body.voice_gender.toLowerCase().trim() : 'female';
   const speedParam = body.speed !== undefined ? Number(body.speed) : 1.0;
   const formatParam = typeof body.format === 'string' ? body.format.toLowerCase().trim() : 'mp3';
+  // v12: optional, additive-only field -- see GET handler's matching comment.
+  const emotionParam = typeof body.emotion === 'string' ? body.emotion.toLowerCase().trim() : 'auto';
 
   const text = preprocessText(rawText);
   if (!text) {
@@ -2007,7 +2405,7 @@ export async function onRequestPost(context) {
 
   try {
     const result = await runTtsCascade({
-      text, lang: safeLang, genderKey, speed: speedParam, env, context,
+      text, lang: safeLang, genderKey, speed: speedParam, emotion: emotionParam, env, context,
       timeouts: resolveTimeouts(env),
     });
     logTtsEvent({ requestId, route: 'POST', lang: safeLang, provider: result.provider, fallback: result.attempts.length > 0, attempts: result.attempts, budgetRemaining: result.budgetRemaining });
