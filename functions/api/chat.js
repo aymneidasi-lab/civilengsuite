@@ -1,6 +1,64 @@
 /**
- * functions/api/chat.js  —  v32  (2026-07-29)
+ * functions/api/chat.js  —  v34  (2026-08-01)
  * ──────────────────────────────────────────────────────────────────────────
+ * ════════════════════════════════════════
+ * CHANGELOG v34 — DEV-MODE REDIRECT OVERRIDE: COVERAGE GAP ACROSS PROMPT TIERS
+ * ════════════════════════════════════════
+ *
+ * CONTEXT: audit of v32's fix, prompted by a request to explain — in general
+ *   terms — why a model given two co-present, differently-scoped instructions
+ *   in one context window can end up honouring the wrong one. Answering that
+ *   required re-deriving v32's root cause from the code rather than taking
+ *   the v32 summary at face value, which surfaced a second instance of the
+ *   same bug class v32 fixed, left unaddressed by the v32 patch itself.
+ *
+ * ROOT CAUSE FOUND: v32's fix is a single bullet added to DEVELOPER_SYSTEM_
+ *   PROMPT's YOU MAY NOW list (~line 3339) that names ONE specific redirect
+ *   instruction — SYSTEM_PROMPT's ('IMPLEMENTATION CONFIDENTIALITY — STANDARD
+ *   MODE', ~line 1550) — and tells the model to treat that one as inactive.
+ *   But baseSystemPrompt (~line 4675) is SYSTEM_PROMPT on turn 1 only; every
+ *   turn after that swaps in GEMINI_FOLLOWUP_PROMPT, which carries its OWN,
+ *   independently-worded confidentiality/redirect block ('IMPLEMENTATION
+ *   CONFIDENTIALITY — still applies here', ~line 3044) — different text,
+ *   different line number, never named by the v32 bullet. Separately, the
+ *   Workers AI / Groq / OpenRouter layers (~line 4812, all three sharing
+ *   workersMsgs) prefix DEVELOPER_SYSTEM_PROMPT onto WORKERS_AI_SYSTEM_PROMPT
+ *   instead, whose own 'CONFIDENTIALITY' block (~line 3176) is a third,
+ *   further-condensed instance with no escape clause of its own — also never
+ *   named by the v32 bullet. Net effect: the exact symptom v32 was written to
+ *   fix — an authenticated dev-mode session getting redirected on an
+ *   off-topic question — is still reproducible today on any turn after the
+ *   first, and on any request that lands on Workers AI, Groq, or OpenRouter
+ *   instead of Gemini (which, per this file's own dead-key/dead-model
+ *   circuit-breaker infrastructure, is a real, non-rare path, not an edge
+ *   case). v32 patched the one instance it had been shown; the other two are
+ *   pre-existing, not newly introduced by v32.
+ *
+ * FIX: DEVELOPER_SYSTEM_PROMPT's bullet (~line 3339) rewritten to enumerate
+ *   all three tiers explicitly by name and approximate line number, and to
+ *   state that whichever ONE of the three is actually prefixed below this
+ *   block for the current call is the one to treat as inactive — instead of
+ *   naming only SYSTEM_PROMPT and relying on the model to generalise that to
+ *   the other two unaided, which is the same category of unaided inference
+ *   v32's own root cause already flagged as unreliable. Content-safety
+ *   carve-out (independent of topic, not controlled by any prompt in this
+ *   file) restated unchanged from v32.
+ *
+ * NOT DONE: a structurally stronger version of this fix would exclude each
+ *   tier's confidentiality block from the prompt text entirely when
+ *   isDeveloperMode is true — e.g. splicing it in via a template parameter
+ *   set to '' in dev mode — instead of leaving the instruction physically
+ *   present and asking the model to disregard it. That removes the
+ *   dependence on model-side inference altogether, rather than just making
+ *   the override more explicit, and is the more robust fix long-term. Not
+ *   implemented here: SYSTEM_PROMPT and GEMINI_FOLLOWUP_PROMPT are both large
+ *   (~13,000 and ~1,150 tokens) and only partially visible in this session —
+ *   restructuring their declarations from constants into functions without
+ *   the complete body in front of me risks silently dropping unseen content,
+ *   which is exactly what this file's own GROUNDING rule (DEVELOPER_SYSTEM_
+ *   PROMPT, OPERATING RULES) exists to prevent. Worth doing with those two
+ *   constants fully open rather than attempted blind.
+ * ════════════════════════════════════════
  * ════════════════════════════════════════
  * CHANGELOG v32 — DEV-MODE TOPIC-SCOPE OVERRIDE (OFF-TOPIC REDIRECT DISABLED)
  * ════════════════════════════════════════
@@ -3337,16 +3395,24 @@ YOU MAY NOW:
   verification calculations): full technical depth, exact clause numbers, no
   audience-simplification filtering.
 • Discuss and engage with any subject the developer raises, on-topic or not.
-  SYSTEM_PROMPT's off-topic redirect ('IMPLEMENTATION CONFIDENTIALITY —
-  STANDARD MODE' section, ~line 1550; redirect instruction ~line 1562: "steer
-  back to structural engineering / Footing Pro, same as any other off-topic
-  request") is scoped, by its own header and opening line, to "standard
-  (non-developer) conversations." Treat that specific redirect as inactive
-  for this authenticated session. This widens TOPIC scope only — it has no
-  effect on content-safety behaviour, which is independent of topic and is
-  not something any prompt in this file controls; see CAPABILITY HONESTY /
-  HARD REALITY above, and the underlying model provider's own policies,
-  which apply the same regardless of topic or session type.
+  Three prompt tiers each carry their own independently-worded confidentiality/
+  off-topic-redirect instruction, and exactly ONE of them is ever present below
+  this block for a given reply — whichever base prompt is active for this call:
+  – SYSTEM_PROMPT, first turn only ('IMPLEMENTATION CONFIDENTIALITY — STANDARD
+    MODE', ~line 1550; redirect ~line 1562: "steer back to structural
+    engineering / Footing Pro").
+  – GEMINI_FOLLOWUP_PROMPT, every turn after the first ('IMPLEMENTATION
+    CONFIDENTIALITY — still applies here', ~line 3044; redirect ~line 3048).
+  – WORKERS_AI_SYSTEM_PROMPT, Workers AI / Groq / OpenRouter layers, any turn
+    ('CONFIDENTIALITY', ~line 3176; this one has no escape clause of its own).
+  Whichever of the three is actually prefixed below this block in the current
+  request, treat its redirect instruction as inactive for this authenticated
+  session — regardless of tier, wording, or whether that tier names Developer
+  Mode as an exception itself. This widens TOPIC scope only — it has no effect
+  on content-safety behaviour, which is independent of topic and is not
+  something any prompt in this file controls; see CAPABILITY HONESTY / HARD
+  REALITY above, and the underlying model provider's own policies, which apply
+  the same regardless of topic, tier, or session type.
 
 HARD REALITY (state this honestly if the developer asks, in any phrasing):
 You cannot directly execute code or write to files on the Cloudflare edge.
