@@ -1447,6 +1447,19 @@ const MAX_TEXT_FILES            = 3;
 const MAX_CHARS_PER_TEXT_FILE   = 6000;
 const MAX_TOTAL_TEXT_FILE_CHARS = 12000;
 
+// Elevated caps, applied only when isDeveloperMode is true (HMAC-verified
+// devPassword — see isDeveloperMode computation, step 2b/CHANGE 5 above).
+// Mirrors the client's DEV_MAX_* constants in pc_suite_*.html /
+// footing_pro_*.html — same no-shared-constant caveat as MAX_TEXT_FILES
+// itself. Finite, not Infinity: this Worker still runs on the Free plan's
+// 10ms CPU-time budget and 50-external-subrequest ceiling per invocation
+// (developers.cloudflare.com/changelog/2026-02-11-subrequests-limit), both
+// shared across every provider-rotation attempt in this same request —
+// a much larger payload here still has to fit inside that, devMode or not.
+const DEV_MAX_TEXT_FILES            = 8;
+const DEV_MAX_CHARS_PER_TEXT_FILE   = 20000;
+const DEV_MAX_TOTAL_TEXT_FILE_CHARS = 40000;
+
 // Cheap heuristic, not a MIME sniff — body.files[].content always arrives as
 // an already-decoded JS string (JSON.parse output), never raw bytes, so
 // there is no header/magic-number to check here. A renamed .docx/.pdf/.exe
@@ -1481,16 +1494,19 @@ function looksLikeBinaryContent(str) {
 // userMessage-length hard-reject) and are flagged inline by
 // buildTextFilesBlock() below so the model never treats truncated content
 // as complete.
-function extractTextFiles(body, likelyArabicMsg) {
+function extractTextFiles(body, likelyArabicMsg, isDeveloperMode) {
   if (!Array.isArray(body?.files) || body.files.length === 0) {
     return { ok: true, files: [] };
   }
-  if (body.files.length > MAX_TEXT_FILES) {
+  const maxFiles      = isDeveloperMode ? DEV_MAX_TEXT_FILES            : MAX_TEXT_FILES;
+  const maxCharsPer   = isDeveloperMode ? DEV_MAX_CHARS_PER_TEXT_FILE   : MAX_CHARS_PER_TEXT_FILE;
+  const maxCharsTotal = isDeveloperMode ? DEV_MAX_TOTAL_TEXT_FILE_CHARS : MAX_TOTAL_TEXT_FILE_CHARS;
+  if (body.files.length > maxFiles) {
     return {
       ok: false,
       error: likelyArabicMsg
-        ? `الحد الأقصى ${MAX_TEXT_FILES} ملفات في الرسالة الواحدة.`
-        : `Maximum ${MAX_TEXT_FILES} files per message.`,
+        ? `الحد الأقصى ${maxFiles} ملفات في الرسالة الواحدة.`
+        : `Maximum ${maxFiles} files per message.`,
     };
   }
   const files = [];
@@ -1502,11 +1518,11 @@ function extractTextFiles(body, likelyArabicMsg) {
     let content = typeof raw?.content === 'string' ? raw.content : '';
     if (!content.trim()) continue; // empty file — skip, not a rejection reason
     let truncated = false;
-    if (content.length > MAX_CHARS_PER_TEXT_FILE) {
-      content = content.slice(0, MAX_CHARS_PER_TEXT_FILE);
+    if (content.length > maxCharsPer) {
+      content = content.slice(0, maxCharsPer);
       truncated = true;
     }
-    const roomLeft = MAX_TOTAL_TEXT_FILE_CHARS - totalChars;
+    const roomLeft = maxCharsTotal - totalChars;
     if (roomLeft <= 0) break; // combined cap already reached — drop remaining files silently
     if (content.length > roomLeft) {
       content = content.slice(0, roomLeft);
@@ -1514,9 +1530,10 @@ function extractTextFiles(body, likelyArabicMsg) {
     }
     if (!content) continue;
     // Binary-check runs AFTER both truncation steps, never on raw
-    // pre-truncation content — bounds the scan to at most
-    // MAX_CHARS_PER_TEXT_FILE chars regardless of how large the caller's
-    // raw content string is. Matters more here than it would elsewhere:
+    // pre-truncation content — bounds the scan to at most maxCharsPer
+    // chars (MAX_ or DEV_MAX_CHARS_PER_TEXT_FILE, per isDeveloperMode)
+    // regardless of how large the caller's raw content string is. Matters
+    // more here than it would elsewhere:
     // this file has no MAX_BODY_BYTES-style overall request-size cap
     // (confirmed absent — grep for MAX_BODY_BYTES/readBodyWithCap/
     // Content-Length returns nothing in this file), so this ordering is
@@ -4756,7 +4773,7 @@ export async function onRequestPost(context) {
   //     injection into the turns.push() call below is sufficient; there is
   //     no second place downstream that reconstructs a message from
   //     userMessage independently.
-  const textFilesResult = extractTextFiles(body, isArabicText(userMessage));
+  const textFilesResult = extractTextFiles(body, isArabicText(userMessage), isDeveloperMode);
   if (!textFilesResult.ok) {
     return json({ error: textFilesResult.error }, 400, undefined, request);
   }
