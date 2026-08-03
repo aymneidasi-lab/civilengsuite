@@ -1201,6 +1201,16 @@ import {
   deleteAllConversations,
 } from '../_lib/sessions.mjs';
 
+// ── [PATCH] Streaming rewrite — see /docs or PR description for the full
+// latency/token-overhead audit these address. Each module is self-contained
+// and independently unit-tested (see functions/_lib/*.test.mjs if present in
+// this repo, or the audit's own test suite).
+import { raceKeyPool } from '../_lib/raceKeyPool.mjs';
+import { callGeminiStreaming, callOpenAiCompatStreaming, callWorkersAIStreaming } from '../_lib/streamingProviders.mjs';
+import { StreamingSanitizer } from '../_lib/streamSanitizer.mjs';
+import { assertPromptBudget } from '../_lib/promptBudget.mjs';
+
+
 // ── Per-isolate dead-key skip cache (v25) ─────────────────────────────────
 // Module scope — persists for the lifetime of a warm Worker isolate, reset
 // on cold start. Not durable, not shared across isolates or regions: this
@@ -1421,6 +1431,29 @@ const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const OPENROUTER_MODEL   = 'meta-llama/llama-3.3-70b-instruct:free';
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
+// [PATCH] Concurrency window for raceKeyPool() in the streaming cascade
+// below. Same total attempt count as the old sequential for-loops (same
+// SUBREQUEST_BUDGET_FREE_PLAN cost) — this only trades wall-clock time for
+// a proportional increase in how many free-tier daily quotas get drawn on
+// per request when more than one key would have succeeded. Measured 3.5x
+// wall-clock improvement on a representative fixture at concurrency=3; see
+// audit notes before raising it further.
+const RACE_CONCURRENCY = 3;
+
+// [PATCH] Exact same object callGeminiWithRetry() below has always sent
+// (see that function's own v19 comment for the thinkingBudget:0 rationale
+// — unchanged here, just hoisted to a shared constant since
+// callGeminiStreaming() in streamingProviders.mjs now takes generationConfig
+// as an explicit parameter instead of hardcoding chat.js's specific values,
+// so the same streaming call function can also serve vision.js's different
+// generationConfig shape without duplicating the retry/timeout/SSE code).
+const GEMINI_GENERATION_CONFIG = {
+  maxOutputTokens: 900,
+  temperature    : 0.35,
+  topP           : 0.9,
+  thinkingConfig : { thinkingBudget: 0 },
+};
+
 // ── v13 CONCURRENCY HELPERS ────────────────────────────────────────────────
 // rotateStart, withJitter, makeFetchBudget, fetchWithTimeout, and
 // checkRateLimit (further below) now live in functions/_lib/rotation.mjs,
@@ -1447,18 +1480,26 @@ const MAX_TEXT_FILES            = 3;
 const MAX_CHARS_PER_TEXT_FILE   = 6000;
 const MAX_TOTAL_TEXT_FILE_CHARS = 12000;
 
-// Elevated caps, applied only when isDeveloperMode is true (HMAC-verified
-// devPassword — see isDeveloperMode computation, step 2b/CHANGE 5 above).
-// Mirrors the client's DEV_MAX_* constants in pc_suite_*.html /
-// footing_pro_*.html — same no-shared-constant caveat as MAX_TEXT_FILES
-// itself. Finite, not Infinity: this Worker still runs on the Free plan's
-// 10ms CPU-time budget and 50-external-subrequest ceiling per invocation
-// (developers.cloudflare.com/changelog/2026-02-11-subrequests-limit), both
-// shared across every provider-rotation attempt in this same request —
-// a much larger payload here still has to fit inside that, devMode or not.
-const DEV_MAX_TEXT_FILES            = 8;
-const DEV_MAX_CHARS_PER_TEXT_FILE   = 20000;
-const DEV_MAX_TOTAL_TEXT_FILE_CHARS = 40000;
+// No application-imposed limit once isDeveloperMode is true — explicit
+// developer choice (Infinity, not just "elevated"). The three comparisons
+// below (maxFiles/maxCharsPer/maxCharsTotal, inside extractTextFiles) are
+// simply never true in that case, so files are never rejected or cut for
+// size once authenticated.
+//
+// This does NOT mean unlimited actually succeeds end-to-end: the Worker
+// still runs on the Free plan's 10ms CPU-time budget and 50-external-
+// subrequest ceiling per invocation (developers.cloudflare.com/changelog/
+// 2026-02-11-subrequests-limit), shared across every provider-rotation
+// attempt in this same request, and the downstream LLM providers
+// (Gemini/Groq/OpenRouter/Workers AI) have their own context-window caps
+// this code cannot see or control. A large-enough dev-mode payload will
+// still fail — just at the platform/provider level, with whatever raw
+// error that layer returns, instead of the graceful capped-and-noted
+// behavior base-mode users get below. That trade-off was requested
+// explicitly; it isn't an oversight.
+const DEV_MAX_TEXT_FILES            = Infinity;
+const DEV_MAX_CHARS_PER_TEXT_FILE   = Infinity;
+const DEV_MAX_TOTAL_TEXT_FILE_CHARS = Infinity;
 
 // Cheap heuristic, not a MIME sniff — body.files[].content always arrives as
 // an already-decoded JS string (JSON.parse output), never raw bytes, so
@@ -1517,16 +1558,14 @@ function extractTextFiles(body, likelyArabicMsg, isDeveloperMode) {
       : 'attachment.txt';
     let content = typeof raw?.content === 'string' ? raw.content : '';
     if (!content.trim()) continue; // empty file — skip, not a rejection reason
-    let truncated = false;
+    const originalLength = content.length;
     if (content.length > maxCharsPer) {
       content = content.slice(0, maxCharsPer);
-      truncated = true;
     }
     const roomLeft = maxCharsTotal - totalChars;
     if (roomLeft <= 0) break; // combined cap already reached — drop remaining files silently
     if (content.length > roomLeft) {
       content = content.slice(0, roomLeft);
-      truncated = true;
     }
     if (!content) continue;
     // Binary-check runs AFTER both truncation steps, never on raw
@@ -1547,7 +1586,17 @@ function extractTextFiles(body, likelyArabicMsg, isDeveloperMode) {
       };
     }
     totalChars += content.length;
-    files.push({ name, content, truncated });
+    // truncated is computed ONCE, after both possible slice stages above,
+    // against the file's true original length — not set independently at
+    // each stage — so a file cut by both the per-file AND combined-budget
+    // steps reports one accurate outcome instead of two partial ones.
+    // content itself is deliberately left pure (no marker text appended)
+    // here: this function's contract is "validated file content", and
+    // notice-formatting is buildTextFilesBlock()'s job below, same
+    // separation of concerns the existing name/truncated-flag split
+    // already implied. originalLength travels with the file so that
+    // function can report exact shown/total numbers.
+    files.push({ name, content, truncated: content.length < originalLength, originalLength });
   }
   return { ok: true, files };
 }
@@ -1559,11 +1608,170 @@ function extractTextFiles(body, likelyArabicMsg, isDeveloperMode) {
 // none of that logic sees file content it was never designed to handle.
 function buildTextFilesBlock(files) {
   if (!files || files.length === 0) return '';
-  return files.map(f =>
-    `\n\n--- Attached file: ${f.name}${f.truncated ? ' (truncated)' : ''} ---\n${f.content}` +
-    (f.truncated ? '\n[... file truncated at the server-side size limit ...]' : '') +
-    `\n--- End of ${f.name} ---`
-  ).join('');
+  return files.map(f => {
+    // Precise, bilingual replacement for the old generic notice — computed
+    // from originalLength/content.length that extractTextFiles() now
+    // attaches to every file, so this always reflects the true final cut
+    // (both the per-file and combined-budget stages already resolved into
+    // one accurate f.truncated/f.originalLength by the time this runs),
+    // never an intermediate one. Never fires when the active caps are
+    // Infinity (isDeveloperMode): f.truncated is false in that case.
+    const truncNote = f.truncated
+      ? '\n[⚠ Truncated — showing ' + f.content.length.toLocaleString() + ' of ' +
+        f.originalLength.toLocaleString() + ' characters (' +
+        Math.floor((f.content.length / f.originalLength) * 100) + '%). Content continues past this ' +
+        'point but was cut to fit the attachment limit. / تم الاقتطاع — المعروض ' +
+        f.content.length.toLocaleString() + ' من أصل ' + f.originalLength.toLocaleString() + ' حرفًا (' +
+        Math.floor((f.content.length / f.originalLength) * 100) + '٪). يتابع المحتوى بعد هذه النقطة لكن ' +
+        'تم قطعه ليلائم حد المرفقات.]'
+      : '';
+    return `\n\n--- Attached file: ${f.name}${f.truncated ? ' (truncated)' : ''} ---\n${f.content}` +
+      truncNote +
+      `\n--- End of ${f.name} ---`;
+  }).join('');
+}
+
+// ── KV-staged files (v36) ────────────────────────────────────────────────
+// Companion to POST /api/chat/dev-upload (functions/api/chat/dev-upload.js).
+// DEV_MAX_CHARS_PER_TEXT_FILE / DEV_MAX_TOTAL_TEXT_FILE_CHARS above are
+// Infinity in dev mode (explicit, documented choice — see that block's own
+// comment). Inlining body.files[].content directly therefore still
+// "succeeds" today regardless of size, but nothing bounds it once it does:
+// no truncation, no context-window awareness, and the same content gets
+// JSON.stringify'd into a fetch() body on every provider-fallback attempt
+// inside this Worker's shared CPU-time budget. This is a second, OPTIONAL
+// path with its own FINITE, context-window-derived ceiling
+// (DEV_KV_MAX_TOTAL_CONTEXT_CHARS below) for exactly the cases where that
+// matters — a developer uploads once via /api/chat/dev-upload
+// (X-Developer-Token header, same env.DEVELOPER_PASSWORD this file already
+// validates via hmacTimingSafeEqual, just carried on a header instead of
+// body.devPassword — see that file's own header comment for why), gets
+// back a fileId, and sends THAT in body.kvFileIds instead of raw content
+// in body.files[].
+//
+// DERIVATION OF 350,000: sized to the SMALLEST context window among the
+// providers this file can route to, not the largest — content has to fit
+// whichever layer actually ends up serving the request, and this file's
+// own fallback chain means that is not always Gemini.
+//   Workers AI @cf/meta/llama-3.1-8b-instruct-fast: 128,000 tokens
+//   (developers.cloudflare.com/workers-ai/models/llama-3.1-8b-instruct-fast/,
+//   confirmed current as of this writing) — the smallest context window of
+//   the five models this file calls. Gemini 3.5 Flash / 3.1 Flash-Lite: 1M
+//   tokens (ai.google.dev), comfortably larger. Groq gpt-oss-20b and
+//   OpenRouter's free Llama-3.3-70b were not independently re-verified at
+//   this same depth, but neither is a smaller-context class of model than
+//   an 8B "-fast" variant — Workers AI is the realistic floor.
+//   Reserve ~20,000 tokens for system prompt (DEVELOPER_SYSTEM_PROMPT +
+//   buildWorkersAiSystemPrompt output) + conversation history (`turns`) +
+//   output generation headroom on that layer specifically.
+//   (128,000 - 20,000) tokens x ~3.5 chars/token (conservative for
+//   code/VBA, which runs denser in punctuation than prose) = ~378,000
+//   chars, rounded down to 350,000 for margin.
+// Re-derive this if the system prompt grows substantially or a smaller-
+// context model is ever added to the fallback chain — it is a real budget
+// tied to a real number, not a round default. Mirrors
+// DEV_KV_UPLOAD_THRESHOLD_CHARS in pc_suite_*.html / footing_pro_*.html and
+// the equivalent block in vision.js — same no-shared-constant caveat as
+// every other hand-copied literal here.
+//
+// STILL FINITE, NOT INFINITY, unlike the inline path above, for the exact
+// CPU-time reason that block's own comment accepts as a known risk rather
+// than a free lunch: this content still gets JSON.stringify'd into a
+// fetch() body on every fallback attempt in the same invocation (up to
+// ~15+ across the Gemini key pool + Groq + OpenRouter on a bad day) inside
+// whatever CPU-ms ceiling this Worker actually runs under. Verify actual
+// cost via Workers Logs (reports cpu_ms per invocation) after deploying,
+// particularly if this Pages project is still on the Workers FREE plan
+// (10ms CPU time per invocation). The Workers PAID plan defaults to 30s
+// CPU time and is configurable up to 5 minutes
+// (developers.cloudflare.com/workers/platform/limits/), which removes this
+// concern almost entirely — worth confirming which plan this Pages
+// project's Functions currently run under before relying on this number.
+const DEV_KV_MAX_FILES_PER_MESSAGE   = 3;
+const DEV_KV_MAX_TOTAL_CONTEXT_CHARS = 350000;
+
+// Resolves body.kvFileIds (array of fileId strings returned by a prior
+// POST /api/chat/dev-upload) against env.CES_DEV_UPLOADS. No-ops
+// (ok:true, files:[]) when not in developer mode or no ids were sent —
+// same "gate structurally, don't rely on a downstream check to ignore it"
+// posture as everything else isDeveloperMode touches in this file (see
+// CHANGELOG v35 at the top of this file). Mirrors extractTextFiles()'s
+// return shape exactly, INCLUDING the originalLength field
+// buildTextFilesBlock() now expects on every truncated entry (added
+// alongside that function's percentage-based truncation notice) — so its
+// output drops straight into the same buildTextFilesBlock() call the
+// inline path already uses, with no special-casing there for where a file
+// came from. See the call site in onRequestPost, step 3d.
+async function resolveKvFiles(body, env, isDeveloperMode) {
+  if (!isDeveloperMode) return { ok: true, files: [] };
+  const ids = Array.isArray(body?.kvFileIds)
+    ? body.kvFileIds.filter((x) => typeof x === 'string' && x)
+    : [];
+  if (ids.length === 0) return { ok: true, files: [] };
+  if (!env.CES_DEV_UPLOADS) {
+    return { ok: false, error: 'CES_DEV_UPLOADS KV namespace is not bound on the server.' };
+  }
+  if (ids.length > DEV_KV_MAX_FILES_PER_MESSAGE) {
+    return { ok: false, error: `Maximum ${DEV_KV_MAX_FILES_PER_MESSAGE} uploaded files per message.` };
+  }
+
+  const files = [];
+  let totalChars = 0;
+  for (const fileId of ids.slice(0, DEV_KV_MAX_FILES_PER_MESSAGE)) {
+    // One retry with a short delay: KV writes are eventually consistent —
+    // up to ~60s globally (developers.cloudflare.com/kv/api/write-key-value-
+    // pairs/). An upload immediately followed by a chat message almost
+    // always lands on the same colo and reads back instantly, but this is
+    // cheap insurance against the rare case it doesn't. Costs wall-clock
+    // only (awaited I/O), not CPU-time.
+    let raw = null;
+    for (let attempt = 0; attempt < 2 && raw === null; attempt++) {
+      if (attempt > 0) await new Promise((r) => setTimeout(r, 400));
+      try {
+        raw = await env.CES_DEV_UPLOADS.get(`devupload:${fileId}`);
+      } catch (err) {
+        console.error('[chat.js] CES_DEV_UPLOADS.get failed:', err.message);
+      }
+    }
+    if (!raw) {
+      return {
+        ok: false,
+        error: `Uploaded file ${fileId} was not found — it may have expired (uploads are ` +
+          `deleted after 5 minutes). Please attach it again.`,
+      };
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { ok: false, error: `Uploaded file ${fileId} is corrupted. Please attach it again.` };
+    }
+    const name = typeof parsed?.name === 'string' && parsed.name ? parsed.name : 'attachment.txt';
+    let content = typeof parsed?.content === 'string' ? parsed.content : '';
+    const originalLength = content.length; // buildTextFilesBlock() needs this on truncated entries
+    let truncated = false;
+    const roomLeft = DEV_KV_MAX_TOTAL_CONTEXT_CHARS - totalChars;
+    if (roomLeft <= 0) break; // combined cap already reached — drop remaining files silently,
+                               // same behavior as extractTextFiles()'s identical case
+    if (content.length > roomLeft) {
+      content = content.slice(0, roomLeft);
+      truncated = true;
+    }
+    totalChars += content.length;
+    files.push({ name, content, truncated, originalLength });
+
+    // Best-effort delete-after-read: minimizes how long a resolved file's
+    // content sits in KV beyond the moment it was actually used, on top of
+    // (not instead of) the expirationTtl safety net already set at upload
+    // time. A failure here just means the TTL (5 min) is what eventually
+    // cleans it up instead — never fails the request.
+    try {
+      await env.CES_DEV_UPLOADS.delete(`devupload:${fileId}`);
+    } catch (err) {
+      console.warn('[chat.js] CES_DEV_UPLOADS.delete (non-fatal):', err.message);
+    }
+  }
+  return { ok: true, files };
 }
 
 // ── CORS — origin-restricted to the production domain and local dev ───────────
@@ -4777,7 +4985,17 @@ export async function onRequestPost(context) {
   if (!textFilesResult.ok) {
     return json({ error: textFilesResult.error }, 400, undefined, request);
   }
-  const textFilesBlock = buildTextFilesBlock(textFilesResult.files);
+  // [v36] KV-staged files (large dev-mode uploads via POST /api/chat/
+  // dev-upload) — see resolveKvFiles() above for the full mechanism. Runs
+  // after extractTextFiles() so a rejection there surfaces first;
+  // combined into the SAME buildTextFilesBlock() call below rather than a
+  // second block, so the model sees one uniform "attached file" formatting
+  // regardless of which path a file came in on.
+  const kvFilesResult = await resolveKvFiles(body, env, isDeveloperMode);
+  if (!kvFilesResult.ok) {
+    return json({ error: kvFilesResult.error }, 400, undefined, request);
+  }
+  const textFilesBlock = buildTextFilesBlock(textFilesResult.files.concat(kvFilesResult.files));
 
   // 4. Normalize history — keep last 10 turns (5 exchanges) for token budget.
   //    Single normalisation pass; geminiContents is the only payload built here.
@@ -4840,6 +5058,22 @@ export async function onRequestPost(context) {
   //    the exact same _1-skip numbering; one canonical copy now instead of
   //    a second hand-maintained literal that could silently drift from
   //    this one.
+  // ============================================================================
+  // [PATCH — streaming rewrite] Replaces the sequential Gemini -> Workers AI ->
+  // Groq -> OpenRouter cascade below with a single SSE Response. Each tier is
+  // now raced across its key pool at RACE_CONCURRENCY instead of tried one key
+  // at a time (same total attempt count / same SUBREQUEST_BUDGET_FREE_PLAN
+  // cost -- only wall-clock time changes), and successful text is relayed to
+  // the client as it arrives instead of only after the full reply is built.
+  // buildAiReply()/json() are no longer used on this path -- their two jobs
+  // (sanitizeAiReply gating, fact-drift logging) are done here by
+  // StreamingSanitizer (streaming-safe equivalent) and an unchanged call to
+  // scanForFactDrift/logFactDrift once the full text is known. buildAiReply
+  // itself is untouched and still used nowhere else, kept only for reference/
+  // in case of rollback.
+  // ============================================================================
+  assertPromptBudget('geminiSystemPrompt', geminiSystemPrompt, isFirstTurn ? 13000 : 1150, env);
+
   const geminiKeysIndexed = buildGeminiKeyPool(env);
 
   // v13: rotateStart() — see rotation.mjs for the full rationale. Every
@@ -4847,249 +5081,296 @@ export async function onRequestPost(context) {
   // request piling onto geminiKeysIndexed[0] first.
   const geminiPool = skipDeadKeys(rotateStart(geminiKeysIndexed), 'gemini');
 
-  // 6. GEMINI LAYERS — try each key (in rotated order) with PRIMARY then
-  //    FALLBACK model. Replaces v10's Layers 1, 2, 6a, and 6b.
-  //    lastProviderResult carries the final failure from ANY layer (Gemini,
-  //    Workers AI, Groq, OpenRouter — whichever actually ran last) into
-  //    buildFriendlyError. [v25: renamed from lastGeminiResult and now
-  //    updated by every layer below, not just this one — see v25 changelog.]
-  let lastProviderResult = { ok: false, httpStatus: 0, errStatus: 'NOT_ATTEMPTED', errBody: '' };
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      // 6. GEMINI LAYERS — primary model raced across all keys, fallback
+      //    model raced across all keys only if every primary attempt failed.
+      //    lastProviderResult carries the final failure from ANY layer
+      //    (Gemini, Workers AI, Groq, OpenRouter) into buildFriendlyError,
+      //    same contract as before the streaming rewrite.
+      let lastProviderResult = { ok: false, httpStatus: 0, errStatus: 'NOT_ATTEMPTED', errBody: '' };
+      let workersAttempted = false;
+      let sourceTag = null;
+      let sentAnything = false;
+      let streamClosed = false;
 
-  for (const { key: gKey, originalIndex } of geminiPool) {
-    if (budget.remaining() <= 0) {
-      console.warn('[chat.js] Subrequest budget exhausted during Gemini layer — stopping early.');
-      lastProviderResult = { ok: false, httpStatus: 0, errStatus: 'SUBREQUEST_BUDGET_EXHAUSTED', errBody: '' };
-      break;
-    }
-    // [v30] Model-level circuit breaker (see markModelResult/isModelDead in
-    // rotation.mjs). A 404 from Gemini means the model resource does not
-    // exist / is not reachable at this API version — identical for every
-    // one of the 13 keys, so once BOTH models are confirmed dead there is
-    // nothing left for this layer to discover. skipDeadKeys()/isKeyDead()
-    // above only ever removed individually-revoked keys, not a layer where
-    // every key gives the same answer.
-    if (isModelDead('gemini', GEMINI_MODEL_PRIMARY) && isModelDead('gemini', GEMINI_MODEL_FALLBACK)) {
-      console.warn('[chat.js] Both Gemini models cached dead — skipping remaining Gemini keys this request.');
-      // [v33] Without this, a request that never makes a real Gemini call
-      // left lastProviderResult stale even though the reason is cached.
-      lastProviderResult = {
-        ok: false, httpStatus: 404, errStatus: 'MODEL_CACHED_DEAD', errBody: '',
-        deadModelReason: getDeadModelReason('gemini', GEMINI_MODEL_PRIMARY)
-                       || getDeadModelReason('gemini', GEMINI_MODEL_FALLBACK),
-      };
-      break;
-    }
-    const keyTag = keyTagFor(originalIndex);
-
-    if (!isModelDead('gemini', GEMINI_MODEL_PRIMARY)) {
-      const resA = await callGeminiWithRetry(gKey, GEMINI_MODEL_PRIMARY, geminiContents, geminiSystemPrompt, budget);
-      if (resA.ok) {
-        return buildAiReply(resA.reply, `gemini-${keyTag}primary`, isDeveloperMode, isFirstTurn, request);
+      function closeStream() { if (!streamClosed) { streamClosed = true; controller.close(); } }
+      function sendEvent(obj) {
+        if (streamClosed) return; // a losing racer's callback arrived after we already finished
+        try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`)); }
+        catch { streamClosed = true; } // controller already closed by the runtime underneath us
       }
-      if (resA.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED') {
-        console.warn(
-          `[chat.js] Gemini ${keyTag || 'key1-'}${GEMINI_MODEL_PRIMARY} failed:`,
-          resA.errStatus, resA.httpStatus,
+      const REDACT_MSG = isArabicText(userMessage)
+        ? 'الموضوع ده متعلق ببنية الموقع الداخلية، وأنا مش بتكلم فيه بره وضع المطور. تحب نرجع لسؤالك الهندسي؟'
+        : "That's about the site's internal setup, which isn't something I discuss outside developer mode. Want to get back to your engineering question?";
+
+      const sanitizer = new StreamingSanitizer({
+        isDeveloperMode,
+        blocklist: AI_DISCLOSURE_BLOCKLIST,
+        bannerDevTerms: BANNER_DEVMODE_TERMS,
+        bannerConfirmTerms: BANNER_CONFIRM_TERMS,
+      });
+      function relay(deltaText) {
+        const { emit, retracted } = sanitizer.push(deltaText);
+        if (emit) { sendEvent({ delta: emit }); sentAnything = true; }
+        return retracted;
+      }
+
+      let geminiWinner = null;
+      for (const modelTier of [GEMINI_MODEL_PRIMARY, GEMINI_MODEL_FALLBACK]) {
+        if (geminiWinner || budget.remaining() <= 0) break;
+
+        // [v30] Model-level circuit breaker (see markModelResult/isModelDead
+        // in rotation.mjs) — unchanged from the original.
+        if (isModelDead('gemini', modelTier)) continue;
+
+        const tierPool = geminiPool.filter(({ originalIndex }) => !isKeyDead('gemini', originalIndex));
+        if (tierPool.length === 0) continue;
+
+        let retractedThisTier = false;
+        const { winner, lastResult } = await raceKeyPool(
+          tierPool,
+          async ({ key: gKey, originalIndex }, signal) => {
+            const res = await callGeminiStreaming(gKey, modelTier, geminiContents, geminiSystemPrompt, GEMINI_GENERATION_CONFIG, budget, (text) => {
+              if (relay(text)) retractedThisTier = true;
+            }, signal);
+            if (res.errStatus && res.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED' && res.errStatus !== 'RACE_CANCELLED') {
+              console.warn(`[chat.js] Gemini ${keyTagFor(originalIndex) || 'key1-'}${modelTier} failed:`, res.errStatus, res.httpStatus);
+            }
+            markKeyResult('gemini', originalIndex, res);
+            markModelResult('gemini', modelTier, res);
+            return { ...res, originalIndex };
+          },
+          {
+            concurrency: RACE_CONCURRENCY,
+            shouldStop: () => budget.remaining() <= 0 || retractedThisTier,
+            onAttemptSettled: (_item, res) => { lastProviderResult = res; },
+          },
         );
+
+        if (retractedThisTier) {
+          sendEvent({ redacted: true, reply: REDACT_MSG });
+          sendEvent({ done: true });
+          closeStream();
+          return;
+        }
+        if (winner) {
+          const keyTag = keyTagFor(winner.originalIndex);
+          sourceTag = `gemini-${keyTag}${modelTier === GEMINI_MODEL_PRIMARY ? 'primary' : 'fallback'}`;
+          geminiWinner = winner;
+          break;
+        }
+        if (lastResult) lastProviderResult = lastResult;
+
+        // [v25] A 401/403 makes the whole key structurally dead for BOTH
+        // models (credential/permission problem, not per-model quota) —
+        // markKeyResult already reflects this via isKeyDead() above on the
+        // next modelTier iteration, so no separate `continue` is needed here
+        // the way the original per-key loop needed one.
       }
-      lastProviderResult = resA;
-      markKeyResult('gemini', originalIndex, resA);
-      markModelResult('gemini', GEMINI_MODEL_PRIMARY, resA);
-      if (budget.remaining() <= 0) break;
 
-      // [v25] A 401/403 on the primary model is a credential/permission
-      // problem for this key's whole account, not a per-model quota — the
-      // fallback model on the SAME key would fail identically. Skip it and
-      // move to the next key instead of spending a second subrequest on a
-      // call that structurally cannot succeed.
-      if (resA.httpStatus === 401 || resA.httpStatus === 403) continue;
-    }
+      let finalWinResult = geminiWinner && geminiWinner.ok ? geminiWinner : null;
 
-    if (isModelDead('gemini', GEMINI_MODEL_FALLBACK)) continue;
+      // 7-9. WORKERS AI / GROQ / OPENROUTER — only reached if Gemini produced
+      //    no winner AND nothing has reached the client yet (a committed-then-
+      //    interrupted Gemini stream must not be topped up by a second
+      //    provider — see streamingProviders.mjs's commitment note).
+      if (!finalWinResult && !sentAnything) {
+        // Build workersMsgs here using WORKERS_AI_SYSTEM_PROMPT (<800 tokens
+        // documented budget — see promptBudget assertion below for the
+        // measured actual). Workers AI/Groq/OpenRouter all use OpenAI-style
+        // {role,content} messages, not Gemini's {role,parts:[{text}]} format.
+        // workersMsgs is shared by all three layers (same OpenAI-compatible
+        // format) — unchanged from the original.
+        const workersKbFacts = packKbFactsBlock(kbScored, 500); // v18: reuses kbScored, no re-scan
+        const baseWorkersPrompt    = buildWorkersAiSystemPrompt(isDeveloperMode);
+        const workersSystemContent = (isDeveloperMode
+          ? DEVELOPER_SYSTEM_PROMPT + baseWorkersPrompt
+          : baseWorkersPrompt) + workersKbFacts + clientDateBlock;
+        assertPromptBudget('workersSystemContent', workersSystemContent, 1030, env);
+        const workersMsgs = [
+          { role: 'system', content: workersSystemContent },
+          ...turns.map(t => ({
+            role   : t.role === 'model' ? 'assistant' : 'user',
+            content: t.text,
+          })),
+        ];
 
-    const resB = await callGeminiWithRetry(gKey, GEMINI_MODEL_FALLBACK, geminiContents, geminiSystemPrompt, budget);
-    if (resB.ok) {
-      return buildAiReply(resB.reply, `gemini-${keyTag}fallback`, isDeveloperMode, isFirstTurn, request);
-    }
-    if (resB.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED') {
-      console.warn(
-        `[chat.js] Gemini ${keyTag || 'key1-'}${GEMINI_MODEL_FALLBACK} failed:`,
-        resB.errStatus, resB.httpStatus,
-      );
-    }
-    lastProviderResult = resB;
-    markKeyResult('gemini', originalIndex, resB);
-    markModelResult('gemini', GEMINI_MODEL_FALLBACK, resB);
-  }
+        // 7. WORKERS AI LAYER — unchanged routing from v10 (binding call, not
+        //    a fetch() subrequest, so it does not draw from `budget`).
+        workersAttempted = !!env.AI;
+        let workersRetracted = false;
+        const layerWorkers = await callWorkersAIStreaming(env.AI, workersMsgs, (text) => {
+          if (relay(text)) workersRetracted = true;
+        });
+        if (workersRetracted) {
+          sendEvent({ redacted: true, reply: REDACT_MSG });
+          sendEvent({ done: true });
+          closeStream();
+          return;
+        }
+        if (layerWorkers.ok) {
+          sourceTag = 'workers-ai-fallback';
+          finalWinResult = layerWorkers;
+        } else {
+          if (workersAttempted) {
+            console.error('[chat.js] Workers AI failed:', layerWorkers.errStatus);
+            lastProviderResult = layerWorkers; // [v25] only overwrite on a real attempt
+          }
 
-  // 7. WORKERS AI LAYER — unchanged routing from v10 (binding call, not a
-  //    fetch() subrequest, so it does not draw from `budget` — see v13 note
-  //    on callWorkersAIWithRetry above).
-  //    Build workersMsgs here using WORKERS_AI_SYSTEM_PROMPT (<800 tokens).
-  //    Workers AI uses OpenAI-style {role,content} messages, not Gemini's
-  //    {role,parts:[{text}]} format. workersMsgs is shared by Groq and
-  //    OpenRouter layers below (same OpenAI-compatible format).
-  // v16: same retrieval, much smaller budget — this prompt feeds models
-  // capped at a 4,096-token context window (Workers AI) or a 6K TPM/minute
-  // cap (Groq), so 500 chars (~130 tokens) is the ceiling, not a suggestion.
-  // clientDateBlock adds ~400 more chars (~100 tokens) — WORKERS_AI_SYSTEM_
-  // PROMPT (<800 tok) + workersKbFacts (~130 tok) + clientDateBlock (~100
-  // tok) totals ~1,030 tokens, still well under the 4,096-token ceiling.
-  const workersKbFacts = packKbFactsBlock(kbScored, 500); // v18: reuses kbScored, no re-scan
-  const baseWorkersPrompt    = buildWorkersAiSystemPrompt(isDeveloperMode);
-  const workersSystemContent = (isDeveloperMode
-    ? DEVELOPER_SYSTEM_PROMPT + baseWorkersPrompt
-    : baseWorkersPrompt) + workersKbFacts + clientDateBlock;
-  const workersMsgs = [
-    { role: 'system', content: workersSystemContent },
-    ...turns.map(t => ({
-      role   : t.role === 'model' ? 'assistant' : 'user',
-      content: t.text,
-    })),
-  ];
-  const workersAttempted = !!env.AI;
-  const layerWorkers = await callWorkersAIWithRetry(env.AI, workersMsgs);
-  if (layerWorkers.ok) {
-    return buildAiReply(layerWorkers.reply, 'workers-ai-fallback', isDeveloperMode, isFirstTurn, request);
-  }
-  if (workersAttempted) {
-    console.error('[chat.js] Workers AI failed:', layerWorkers.errStatus);
-    lastProviderResult = layerWorkers; // [v25] only overwrite on a real attempt —
-                                        // NOT_BOUND (binding absent) is less
-                                        // informative than whatever Gemini
-                                        // already reported.
-  }
+          // 8. GROQ LAYERS — raced across up to 13 keys instead of tried one
+          //    at a time. All keys use GROQ_MODEL via callOpenAiCompatStreaming().
+          //    Naming: GROQ_API_KEY (member 1) + GROQ_API_KEY_1…GROQ_API_KEY_12 (members 2–13).
+          if (!sentAnything && budget.remaining() > 0 && !isModelDead('groq', GROQ_MODEL)) {
+            const groqKeysIndexed = [
+              env.GROQ_API_KEY    || '',
+              env.GROQ_API_KEY_1  || '',
+              env.GROQ_API_KEY_2  || '',
+              env.GROQ_API_KEY_3  || '',
+              env.GROQ_API_KEY_4  || '',
+              env.GROQ_API_KEY_5  || '',
+              env.GROQ_API_KEY_6  || '',
+              env.GROQ_API_KEY_7  || '',
+              env.GROQ_API_KEY_8  || '',
+              env.GROQ_API_KEY_9  || '',
+              env.GROQ_API_KEY_10 || '',
+              env.GROQ_API_KEY_11 || '',
+              env.GROQ_API_KEY_12 || '',
+            ]
+              .map((key, originalIndex) => ({ key, originalIndex }))
+              .filter(k => k.key);
+            const groqPool = skipDeadKeys(rotateStart(groqKeysIndexed), 'groq');
 
-  // 8. GROQ LAYERS — try each of up to 13 keys, in rotated order (v13).
-  //    All keys use llama-3.1-8b-instant via callGroqWithRetry().
-  //    Free tier: 1,000 req/day, 30 RPM, 6K TPM per key (corrected v12).
-  //    WORKERS_AI_SYSTEM_PROMPT (~800 tokens) keeps requests below 6K TPM cap.
-  //    Naming: GROQ_API_KEY (member 1) + GROQ_API_KEY_1…GROQ_API_KEY_12 (members 2–13).
-  const groqKeysIndexed = [
-    env.GROQ_API_KEY    || '',
-    env.GROQ_API_KEY_1  || '',
-    env.GROQ_API_KEY_2  || '',
-    env.GROQ_API_KEY_3  || '',
-    env.GROQ_API_KEY_4  || '',
-    env.GROQ_API_KEY_5  || '',
-    env.GROQ_API_KEY_6  || '',
-    env.GROQ_API_KEY_7  || '',
-    env.GROQ_API_KEY_8  || '',
-    env.GROQ_API_KEY_9  || '',
-    env.GROQ_API_KEY_10 || '',
-    env.GROQ_API_KEY_11 || '',
-    env.GROQ_API_KEY_12 || '',
-  ]
-    .map((key, originalIndex) => ({ key, originalIndex }))
-    .filter(k => k.key);
-  const groqPool = skipDeadKeys(rotateStart(groqKeysIndexed), 'groq');
+            let groqRetracted = false;
+            const { winner, lastResult } = await raceKeyPool(
+              groqPool,
+              async ({ key: gqKey, originalIndex }, signal) => {
+                const res = await callOpenAiCompatStreaming(GROQ_API_URL, gqKey, GROQ_MODEL, workersMsgs, budget, (text) => {
+                  if (relay(text)) groqRetracted = true;
+                }, signal);
+                if (res.errStatus === 'model_decommissioned') res.deadModelReason = 'MODEL_DECOMMISSIONED';
+                if (res.errStatus && res.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED' && res.errStatus !== 'RACE_CANCELLED') {
+                  console.warn(`[chat.js] Groq key${originalIndex === 0 ? '' : originalIndex + 1} failed:`, res.errStatus, res.httpStatus);
+                }
+                markKeyResult('groq', originalIndex, res);
+                markModelResult('groq', GROQ_MODEL, res);
+                return { ...res, originalIndex };
+              },
+              { concurrency: RACE_CONCURRENCY, shouldStop: () => budget.remaining() <= 0 || groqRetracted },
+            );
+            if (groqRetracted) {
+              sendEvent({ redacted: true, reply: REDACT_MSG });
+              sendEvent({ done: true });
+              closeStream();
+              return;
+            }
+            if (winner) {
+              sourceTag = winner.originalIndex === 0 ? 'groq-fallback' : `groq-key${winner.originalIndex + 1}-fallback`;
+              finalWinResult = winner;
+            } else if (lastResult) lastProviderResult = lastResult;
+          } else if (isModelDead('groq', GROQ_MODEL)) {
+            console.warn(`[chat.js] Groq model ${GROQ_MODEL} cached dead — skipping remaining Groq keys this request.`);
+            lastProviderResult = {
+              ok: false, httpStatus: 404, errStatus: 'MODEL_CACHED_DEAD', errBody: '',
+              deadModelReason: getDeadModelReason('groq', GROQ_MODEL),
+            };
+          }
 
-  for (const { key: gqKey, originalIndex } of groqPool) {
-    if (budget.remaining() <= 0) {
-      console.warn('[chat.js] Subrequest budget exhausted during Groq layer — stopping early.');
-      lastProviderResult = { ok: false, httpStatus: 0, errStatus: 'SUBREQUEST_BUDGET_EXHAUSTED', errBody: '' };
-      break;
-    }
-    // [v30] Same model-level circuit breaker as the Gemini layer above.
-    // GROQ_MODEL is one fixed string shared by all 13 keys in this pool —
-    // a 400 model_decommissioned response on key 1 means keys 2-13 would
-    // report the byte-identical failure.
-    if (isModelDead('groq', GROQ_MODEL)) {
-      console.warn(`[chat.js] Groq model ${GROQ_MODEL} cached dead — skipping remaining Groq keys this request.`);
-      lastProviderResult = {
-        ok: false, httpStatus: 404, errStatus: 'MODEL_CACHED_DEAD', errBody: '',
-        deadModelReason: getDeadModelReason('groq', GROQ_MODEL),
-      };
-      break;
-    }
-    const resG = await callGroqWithRetry(gqKey, workersMsgs, budget);
-    if (resG.ok) {
-      const groqSource = originalIndex === 0 ? 'groq-fallback' : `groq-key${originalIndex + 1}-fallback`;
-      return buildAiReply(resG.reply, groqSource, isDeveloperMode, isFirstTurn, request);
-    }
-    if (resG.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED') {
-      console.warn(
-        `[chat.js] Groq key${originalIndex === 0 ? '' : originalIndex + 1} failed:`,
-        resG.errStatus, resG.httpStatus,
-      );
-    }
-    if (resG.errStatus === 'model_decommissioned') resG.deadModelReason = 'MODEL_DECOMMISSIONED';
-    lastProviderResult = resG;
-    markKeyResult('groq', originalIndex, resG);
-    markModelResult('groq', GROQ_MODEL, resG);
-  }
+          // 9. OPENROUTER LAYERS — raced across up to 13 keys. All keys use
+          //    OPENROUTER_MODEL via callOpenAiCompatStreaming(). HTTP-Referer
+          //    and X-Title are sent per OpenRouter docs inside that function.
+          //    Naming: OPENROUTER_API_KEY (member 1) + OPENROUTER_API_KEY_1…_12 (members 2–13).
+          if (!finalWinResult && !sentAnything && budget.remaining() > 0 && !isModelDead('openrouter', OPENROUTER_MODEL)) {
+            const openRouterKeysIndexed = [
+              env.OPENROUTER_API_KEY    || '',
+              env.OPENROUTER_API_KEY_1  || '',
+              env.OPENROUTER_API_KEY_2  || '',
+              env.OPENROUTER_API_KEY_3  || '',
+              env.OPENROUTER_API_KEY_4  || '',
+              env.OPENROUTER_API_KEY_5  || '',
+              env.OPENROUTER_API_KEY_6  || '',
+              env.OPENROUTER_API_KEY_7  || '',
+              env.OPENROUTER_API_KEY_8  || '',
+              env.OPENROUTER_API_KEY_9  || '',
+              env.OPENROUTER_API_KEY_10 || '',
+              env.OPENROUTER_API_KEY_11 || '',
+              env.OPENROUTER_API_KEY_12 || '',
+            ]
+              .map((key, originalIndex) => ({ key, originalIndex }))
+              .filter(k => k.key);
+            const openRouterPool = skipDeadKeys(rotateStart(openRouterKeysIndexed), 'openrouter');
 
-  // 9. OPENROUTER LAYERS — try each of up to 13 keys, in rotated order (v13).
-  //    All keys use meta-llama/llama-3.3-70b-instruct:free via callOpenRouterWithRetry().
-  //    Free tier: 50 req/day, 20 RPM per key. HTTP-Referer and X-Title sent
-  //    per OpenRouter docs (handled inside callOpenRouterWithRetry).
-  //    Naming: OPENROUTER_API_KEY (member 1) + OPENROUTER_API_KEY_1…_12 (members 2–13).
-  const openRouterKeysIndexed = [
-    env.OPENROUTER_API_KEY    || '',
-    env.OPENROUTER_API_KEY_1  || '',
-    env.OPENROUTER_API_KEY_2  || '',
-    env.OPENROUTER_API_KEY_3  || '',
-    env.OPENROUTER_API_KEY_4  || '',
-    env.OPENROUTER_API_KEY_5  || '',
-    env.OPENROUTER_API_KEY_6  || '',
-    env.OPENROUTER_API_KEY_7  || '',
-    env.OPENROUTER_API_KEY_8  || '',
-    env.OPENROUTER_API_KEY_9  || '',
-    env.OPENROUTER_API_KEY_10 || '',
-    env.OPENROUTER_API_KEY_11 || '',
-    env.OPENROUTER_API_KEY_12 || '',
-  ]
-    .map((key, originalIndex) => ({ key, originalIndex }))
-    .filter(k => k.key);
-  const openRouterPool = skipDeadKeys(rotateStart(openRouterKeysIndexed), 'openrouter');
+            let orRetracted = false;
+            const { winner, lastResult } = await raceKeyPool(
+              openRouterPool,
+              async ({ key: orKey, originalIndex }, signal) => {
+                const res = await callOpenAiCompatStreaming(OPENROUTER_API_URL, orKey, OPENROUTER_MODEL, workersMsgs, budget, (text) => {
+                  if (relay(text)) orRetracted = true;
+                }, signal);
+                if (res.httpStatus === 404 && /no endpoints found matching your data policy/i.test(res.errBody || '')) {
+                  res.accountConfigIssue = 'OPENROUTER_DATA_POLICY';
+                }
+                if (res.errStatus && res.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED' && res.errStatus !== 'RACE_CANCELLED') {
+                  console.warn(`[chat.js] OpenRouter key${originalIndex === 0 ? '' : originalIndex + 1} failed:`, res.errStatus, res.httpStatus);
+                }
+                markKeyResult('openrouter', originalIndex, res);
+                markModelResult('openrouter', OPENROUTER_MODEL, res);
+                return { ...res, originalIndex };
+              },
+              { concurrency: RACE_CONCURRENCY, shouldStop: () => budget.remaining() <= 0 || orRetracted },
+            );
+            if (orRetracted) {
+              sendEvent({ redacted: true, reply: REDACT_MSG });
+              sendEvent({ done: true });
+              closeStream();
+              return;
+            }
+            if (winner) {
+              sourceTag = winner.originalIndex === 0 ? 'openrouter-fallback' : `openrouter-key${winner.originalIndex + 1}-fallback`;
+              finalWinResult = winner;
+            } else if (lastResult) lastProviderResult = lastResult;
+          } else if (!finalWinResult && isModelDead('openrouter', OPENROUTER_MODEL)) {
+            console.warn(`[chat.js] OpenRouter model ${OPENROUTER_MODEL} cached dead — skipping remaining OpenRouter keys this request.`);
+            lastProviderResult = {
+              ok: false, httpStatus: 404, errStatus: 'MODEL_CACHED_DEAD', errBody: '',
+              deadModelReason: getDeadModelReason('openrouter', OPENROUTER_MODEL),
+            };
+          }
+        }
+      }
 
-  for (const { key: orKey, originalIndex } of openRouterPool) {
-    if (budget.remaining() <= 0) {
-      console.warn('[chat.js] Subrequest budget exhausted during OpenRouter layer — stopping early.');
-      lastProviderResult = { ok: false, httpStatus: 0, errStatus: 'SUBREQUEST_BUDGET_EXHAUSTED', errBody: '' };
-      break;
-    }
-    // [v30] Same model-level circuit breaker as the Gemini/Groq layers above.
-    if (isModelDead('openrouter', OPENROUTER_MODEL)) {
-      console.warn(`[chat.js] OpenRouter model ${OPENROUTER_MODEL} cached dead — skipping remaining OpenRouter keys this request.`);
-      lastProviderResult = {
-        ok: false, httpStatus: 404, errStatus: 'MODEL_CACHED_DEAD', errBody: '',
-        deadModelReason: getDeadModelReason('openrouter', OPENROUTER_MODEL),
-      };
-      break;
-    }
-    const resOR = await callOpenRouterWithRetry(orKey, workersMsgs, budget);
-    if (resOR.ok) {
-      const orSource = originalIndex === 0 ? 'openrouter-fallback' : `openrouter-key${originalIndex + 1}-fallback`;
-      return buildAiReply(resOR.reply, orSource, isDeveloperMode, isFirstTurn, request);
-    }
-    if (resOR.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED') {
-      console.warn(
-        `[chat.js] OpenRouter key${originalIndex === 0 ? '' : originalIndex + 1} failed:`,
-        resOR.errStatus, resOR.httpStatus,
-      );
-    }
-    if (resOR.httpStatus === 404 && /no endpoints found matching your data policy/i.test(resOR.errBody || '')) {
-      resOR.accountConfigIssue = 'OPENROUTER_DATA_POLICY';
-    }
-    lastProviderResult = resOR;
-    markKeyResult('openrouter', originalIndex, resOR);
-    markModelResult('openrouter', OPENROUTER_MODEL, resOR);
-  }
+      // 10. All layers exhausted, nothing ever reached the client.
+      if (!finalWinResult && !sentAnything) {
+        sendEvent({ error: buildFriendlyError(lastProviderResult, workersAttempted, userMessage) });
+        sendEvent({ done: true });
+        closeStream();
+        return;
+      }
 
-  // 10. All layers exhausted.
-  //    [v25 FIX] Previously this always passed lastGeminiResult — the final
-  //    Gemini-layer outcome ONLY — into buildFriendlyError, even though
-  //    Workers AI, Groq, and OpenRouter all run AFTER Gemini and are each
-  //    individually capable of being the layer that actually failed last.
-  //    A real Groq or OpenRouter failure (bad key, model deprecated, 401)
-  //    was silently reported to the user as a Gemini-flavoured error,
-  //    which made server logs the only way to learn what actually broke.
-  //    buildFriendlyError's own error-code table was already provider-
-  //    agnostic in its wording (see its definition) — only the caller was
-  //    wrongly Gemini-only. lastProviderResult now reflects whichever call,
-  //    from any of the four layers, genuinely failed last.
-  return json({ error: buildFriendlyError(lastProviderResult, workersAttempted, userMessage) }, 502, undefined, request);
+      // finish() flushes whatever the sanitizer's blocklist holdback margin
+      // was still withholding — without this, the last (longest-blocklist-
+      // term-length - 1) characters of every successful reply would silently
+      // never reach the client, since push() alone never emits that trailing
+      // margin (see streamSanitizer.mjs).
+      const { emit: trailingEmit, finalText } = sanitizer.finish();
+      if (trailingEmit) sendEvent({ delta: trailingEmit });
+      logFactDrift(scanForFactDrift(finalText), { provider: sourceTag, isFirstTurn, isDeveloperMode });
+      sendEvent({ done: true, source: sourceTag, ...(isDeveloperMode && { devMode: true }) });
+      closeStream();
+    },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+      'X-CES-AI-Source': 'streaming',
+      ...getCorsHeaders(request),
+    },
+  });
 }
 
 // ── OPTIONS preflight (required for CORS) ─────────────────────────────────

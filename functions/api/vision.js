@@ -344,6 +344,8 @@ import {
   buildGeminiKeyPool,
   keyTagFor,
 } from '../_lib/rotation.mjs';
+import { raceKeyPool } from '../_lib/raceKeyPool.mjs';
+import { callGeminiStreaming } from '../_lib/streamingProviders.mjs';
 
 // ── Models — same pair chat.js uses. gemini-3.5-flash confirmed current
 // GA/multimodal (ai.google.dev, 2026-07). gemini-2.5-flash is NOT used here
@@ -353,6 +355,12 @@ const GEMINI_MODEL_FALLBACK = 'gemini-3.1-flash-lite';
 const GEMINI_API_URL = model =>
   `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 const GEMINI_MAX_OUTPUT_TOKENS = 1536; // vision replies run longer than chat's FAQ turns
+
+// [PATCH] Same concurrency rationale as chat.js's identical constant — see
+// that file's own comment. Kept as a separate local constant rather than a
+// shared _lib export since it's a single primitive value, not worth a
+// module just to avoid one line of duplication.
+const RACE_CONCURRENCY = 3;
 
 // ── Size / MIME guards ──────────────────────────────────────────────────
 // ~1.8MB JSON-body ceiling (base64 image(s) + small text fields), TOTAL —
@@ -521,6 +529,112 @@ function buildTextFilesBlock(files) {
     (f.truncated ? '\n[... file truncated at the server-side size limit ...]' : '') +
     `\n--- End of ${f.name} ---`
   ).join('');
+}
+
+// ── KV-staged files (v36) ────────────────────────────────────────────────
+// Companion to POST /api/chat/dev-upload (functions/api/chat/dev-upload.js)
+// and chat.js's own resolveKvFiles(), which this mirrors. A developer
+// uploads a large file once via /api/chat/dev-upload (X-Developer-Token
+// header, checked there against env.DEVELOPER_PASSWORD), gets back a
+// fileId, and can send that fileId to EITHER /api/chat OR this endpoint
+// (whichever one ends up handling the message, depending on whether an
+// image is also attached) via body.kvFileIds.
+//
+// NO isDeveloperMode GATE HERE, UNLIKE chat.js's VERSION — deliberate, not
+// an oversight: this file has no devPassword/isDeveloperMode concept at
+// all (MAX_TEXT_FILES/MAX_CHARS_PER_TEXT_FILE/MAX_TOTAL_TEXT_FILE_CHARS
+// above are fixed, never elevated — see that block's own comment). Adding
+// one just for this would mean porting chat.js's hmacTimingSafeEqual() +
+// isDeveloperMode computation into a file that currently has neither,
+// which is a materially bigger and more invasive change than "apply the
+// fix." Instead, this relies on the fileId itself as the capability: it is
+// a crypto.randomUUID() (122 bits of randomness) that could only have been
+// minted by a caller who already passed the X-Developer-Token check at
+// upload time — nothing here re-derives or re-checks that password, but
+// nothing here can be reached without having passed it once, upstream. If
+// you want this file to require its OWN devPassword on top of that (full
+// symmetry with chat.js), that is a separate, larger change — say so and
+// it can be added as its own patch rather than folded into this one.
+//
+// DEV_KV_MAX_TOTAL_CONTEXT_CHARS reuses chat.js's exact 350,000-char
+// value for consistency, even though this file's OWN fallback chain
+// (GEMINI_MODEL_PRIMARY / GEMINI_MODEL_FALLBACK — both Gemini 3.x Flash,
+// ~1M-token context, no Workers AI/Groq/OpenRouter step) could in
+// principle support a much larger figure — chat.js's number is bottlenecked
+// by Workers AI's 128K-token floor, which this file never routes through.
+// Kept the same anyway rather than re-deriving a vision.js-specific number:
+// one constant to reason about beats two similar-but-different ones, and
+// this file's own MAX_BODY_BYTES (1,800,000 — see above) already caps the
+// realistic ceiling for the request as a whole once image payloads are
+// factored in.
+const DEV_KV_MAX_FILES_PER_MESSAGE   = 3;
+const DEV_KV_MAX_TOTAL_CONTEXT_CHARS = 350000;
+
+async function resolveKvFiles(body, env) {
+  const ids = Array.isArray(body?.kvFileIds)
+    ? body.kvFileIds.filter((x) => typeof x === 'string' && x)
+    : [];
+  if (ids.length === 0) return { ok: true, files: [] };
+  if (!env.CES_DEV_UPLOADS) {
+    return { ok: false, error: 'CES_DEV_UPLOADS KV namespace is not bound on the server.' };
+  }
+  if (ids.length > DEV_KV_MAX_FILES_PER_MESSAGE) {
+    return { ok: false, error: `Maximum ${DEV_KV_MAX_FILES_PER_MESSAGE} uploaded files per message.` };
+  }
+
+  const files = [];
+  let totalChars = 0;
+  for (const fileId of ids.slice(0, DEV_KV_MAX_FILES_PER_MESSAGE)) {
+    // One retry with a short delay — KV writes are eventually consistent
+    // (up to ~60s globally). See chat.js's identical comment for the full
+    // rationale; unchanged here.
+    let raw = null;
+    for (let attempt = 0; attempt < 2 && raw === null; attempt++) {
+      if (attempt > 0) await new Promise((r) => setTimeout(r, 400));
+      try {
+        raw = await env.CES_DEV_UPLOADS.get(`devupload:${fileId}`);
+      } catch (err) {
+        console.error('[vision.js] CES_DEV_UPLOADS.get failed:', err.message);
+      }
+    }
+    if (!raw) {
+      return {
+        ok: false,
+        error: `Uploaded file ${fileId} was not found — it may have expired (uploads are ` +
+          `deleted after 5 minutes). Please attach it again.`,
+      };
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { ok: false, error: `Uploaded file ${fileId} is corrupted. Please attach it again.` };
+    }
+    const name = typeof parsed?.name === 'string' && parsed.name ? parsed.name : 'attachment.txt';
+    let content = typeof parsed?.content === 'string' ? parsed.content : '';
+    let truncated = false;
+    const roomLeft = DEV_KV_MAX_TOTAL_CONTEXT_CHARS - totalChars;
+    if (roomLeft <= 0) break;
+    if (content.length > roomLeft) {
+      content = content.slice(0, roomLeft);
+      truncated = true;
+    }
+    totalChars += content.length;
+    // NOTE: no originalLength field — this file's buildTextFilesBlock()
+    // above uses the older generic truncation notice, not chat.js's
+    // percentage-based one, so it doesn't read that field. If this
+    // file's buildTextFilesBlock() is ever upgraded to match chat.js's,
+    // add originalLength: content.length (captured before the slice
+    // above) here too.
+    files.push({ name, content, truncated });
+
+    try {
+      await env.CES_DEV_UPLOADS.delete(`devupload:${fileId}`);
+    } catch (err) {
+      console.warn('[vision.js] CES_DEV_UPLOADS.delete (non-fatal):', err.message);
+    }
+  }
+  return { ok: true, files };
 }
 
 const ASSISTANT_NAME = 'Eng_pro assist';
@@ -988,7 +1102,15 @@ export async function onRequestPost(context) {
   if (!textFilesResult.ok) {
     return json({ error: textFilesResult.error }, 400, undefined, request);
   }
-  const textFilesBlock = buildTextFilesBlock(textFilesResult.files);
+  // [v36] KV-staged files — see resolveKvFiles() above. Combined into the
+  // SAME buildTextFilesBlock() call below rather than a second block, so
+  // the model sees one uniform "attached file" formatting regardless of
+  // which path a file came in on.
+  const kvFilesResult = await resolveKvFiles(body, env);
+  if (!kvFilesResult.ok) {
+    return json({ error: kvFilesResult.error }, 400, undefined, request);
+  }
+  const textFilesBlock = buildTextFilesBlock(textFilesResult.files.concat(kvFilesResult.files));
   const modelMessageText = userMessage + textFilesBlock;
 
   // 6. Build the outbound Gemini payload ONCE — identical across every
@@ -1020,107 +1142,146 @@ export async function onRequestPost(context) {
     ? [...imageParts, { text: modelMessageText }]   // image before text — single-image best practice
     : [{ text: modelMessageText }, ...imageParts];  // text before images — multi-image example pattern
 
-  const payloadString = JSON.stringify({
-    system_instruction: { parts: [{ text: VISION_SYSTEM_PROMPT }] },
-    contents: [{
-      role: 'user',
-      parts,
-    }],
-    generationConfig: {
-      maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
-      // temperature/topP deliberately OMITTED (v2.4): Google's Gemini 3.x
-      // migration guidance (ai.google.dev/gemini-api/docs/generate-content/
-      // whats-new-gemini-3.5, re-verified 2026-07-16) lists both as "no
-      // longer recommended" for gemini-3.5-flash / gemini-3.1-flash-lite
-      // and says to remove them outright — default sampling is already
-      // tuned for the 3.x reasoning path.
-      //
-      // thinkingConfig.thinkingLevel replaces thinkingBudget (v2.4) — same
-      // intent as chat.js's v19 fix (keep reasoning tokens from eating the
-      // visible-answer budget under GEMINI_MAX_OUTPUT_TOKENS), but
-      // thinkingBudget is legacy-only on the 3.x family, and sending it
-      // together with thinkingLevel in one request is a hard 400. 'LOW'
-      // (not 'MINIMAL'): VISION_SYSTEM_PROMPT asks for a safety/code-
-      // compliance judgment call on top of a plain description — Google's
-      // own effort-level guidance places that in "analysis and writing
-      // tasks that require some thinking," not pure fact retrieval.
-      thinkingConfig : { thinkingLevel: 'LOW' },
-      mediaResolution: MEDIA_RESOLUTION,
-    },
-  });
+  // [PATCH] callGeminiStreaming() takes contents/generationConfig as
+  // separate parameters (see streamingProviders.mjs) rather than a single
+  // pre-built JSON string, so it can serve both chat.js's and this file's
+  // differently-shaped generationConfig without duplicating the retry/
+  // timeout/SSE-parsing code. Values below are byte-for-byte what the old
+  // payloadString sent — see the original inline comments (now attached
+  // here) for the thinkingLevel/mediaResolution/omitted-temperature
+  // rationale, unchanged.
+  const visionContents = [{ role: 'user', parts }];
+  const visionGenerationConfig = {
+    maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
+    // temperature/topP deliberately OMITTED (v2.4): Google's Gemini 3.x
+    // migration guidance says both are "no longer recommended" for
+    // gemini-3.5-flash / gemini-3.1-flash-lite and to remove them outright.
+    //
+    // thinkingConfig.thinkingLevel replaces thinkingBudget (v2.4) — sending
+    // both in one request is a hard 400. 'LOW' (not 'MINIMAL'):
+    // VISION_SYSTEM_PROMPT asks for a safety/code-compliance judgment call
+    // on top of a plain description, which Google's own effort-level
+    // guidance places in "analysis and writing tasks that require some
+    // thinking," not pure fact retrieval.
+    thinkingConfig : { thinkingLevel: 'LOW' },
+    mediaResolution: MEDIA_RESOLUTION,
+  };
 
-  // 7. Build the key pool — SAME 13 keys chat.js reads, via rotation.mjs's
-  //    buildGeminiKeyPool(). v2.3: this used to be a second, hand-copied
-  //    13-line array literal here. Confirmed 2026-07-16 against the real
-  //    rotation.mjs and chat.js: rotation.mjs exports buildGeminiKeyPool
-  //    (env) and keyTagFor(originalIndex) specifically so this file and
-  //    chat.js share one canonical copy of the key list and the _1-skip
-  //    numbering, and chat.js already imports and calls both. Replaced
-  //    the inline literal with the same calls chat.js makes — deleting the
-  //    exact drift risk rotation.mjs's own header comment warns against.
+  // ============================================================================
+  // [PATCH — streaming rewrite] Same latency audit / fix applied to
+  // functions/api/chat.js, adapted here: single provider (Gemini only, no
+  // Groq/OpenRouter/Workers AI — vision has never had those tiers), so no
+  // StreamingSanitizer is needed (vision.js has no confidentiality-blocklist
+  // gate to begin with — verified: the only "BLOCKLIST" in this file is
+  // Gemini's own SAFETY finishReason enum value, unrelated). Racing order
+  // changed from the original's per-key (primary-then-fallback-same-key,
+  // then next key) to per-model-tier-across-all-keys (primary raced across
+  // every key first, fallback tier only if every primary attempt failed) —
+  // matches chat.js's pattern exactly; a deliberate alignment, not an
+  // oversight. X-CES-Vision-Source moves from a response header (impossible
+  // to know before the stream starts) to a field on the terminal SSE event.
+  // X-CES-Vision-Detail is known upfront and stays a real header.
+  // ============================================================================
   const geminiKeysIndexed = buildGeminiKeyPool(env);
-
   const geminiPool = rotateStart(geminiKeysIndexed);
   const budget = makeFetchBudget(SUBREQUEST_BUDGET_VISION);
   const startTime = Date.now();
 
-  let lastResult = { ok: false, httpStatus: 0, errStatus: 'NOT_ATTEMPTED', errBody: '' };
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      let lastResult = { ok: false, httpStatus: 0, errStatus: 'NOT_ATTEMPTED', errBody: '' };
+      let structuralFailure = false; // BLOCKED_*/400 -- every key/model would fail identically
+      let streamClosed = false;
+      let sentAnything = false;
 
-  outer:
-  for (const { key: gKey, originalIndex } of geminiPool) {
-    const keyTag = keyTagFor(originalIndex);
-
-    for (const [model, modelTag] of [[GEMINI_MODEL_PRIMARY, 'primary'], [GEMINI_MODEL_FALLBACK, 'fallback']]) {
-      if (budget.remaining() <= 0) {
-        console.warn('[vision.js] Subrequest budget exhausted — stopping early.');
-        lastResult = { ok: false, httpStatus: 0, errStatus: 'SUBREQUEST_BUDGET_EXHAUSTED', errBody: '' };
-        break outer;
+      function closeStream() { if (!streamClosed) { streamClosed = true; controller.close(); } }
+      function sendEvent(obj) {
+        if (streamClosed) return;
+        try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`)); }
+        catch { streamClosed = true; }
       }
-      if (Date.now() - startTime > OVERALL_DEADLINE_MS) {
-        console.warn('[vision.js] Overall deadline exceeded — stopping rotation, not starting a new attempt.');
-        lastResult = { ok: false, httpStatus: 0, errStatus: 'OVERALL_DEADLINE_EXCEEDED', errBody: '' };
-        break outer;
+      function relay(text) {
+        if (text) { sendEvent({ delta: text }); sentAnything = true; }
+      }
+      function deadlineOrBudgetExceeded() {
+        if (budget.remaining() <= 0) return 'SUBREQUEST_BUDGET_EXHAUSTED';
+        if (Date.now() - startTime > OVERALL_DEADLINE_MS) return 'OVERALL_DEADLINE_EXCEEDED';
+        return null;
       }
 
-      const result = await callGeminiVisionOnce(gKey, model, payloadString, budget);
-      if (result.ok) {
-        return json(
-          { reply: result.reply },
-          200,
-          {
-            'X-CES-Vision-Source': `gemini-${keyTag}${modelTag}`,
-            'X-CES-Vision-Detail': detailReq,
+      let winner = null; // { originalIndex, modelTag }
+      for (const [model, modelTag] of [[GEMINI_MODEL_PRIMARY, 'primary'], [GEMINI_MODEL_FALLBACK, 'fallback']]) {
+        if (winner || structuralFailure) break;
+        const stopReason = deadlineOrBudgetExceeded();
+        if (stopReason) {
+          console.warn(`[vision.js] ${stopReason === 'OVERALL_DEADLINE_EXCEEDED' ? 'Overall deadline exceeded' : 'Subrequest budget exhausted'} — stopping before ${modelTag} tier.`);
+          lastResult = { ok: false, httpStatus: 0, errStatus: stopReason, errBody: '' };
+          break;
+        }
+
+        const { winner: tierWinner, lastResult: tierLastResult } = await raceKeyPool(
+          geminiPool,
+          async ({ key: gKey, originalIndex }, signal) => {
+            const keyTag = keyTagFor(originalIndex);
+            const res = await callGeminiStreaming(gKey, model, visionContents, VISION_SYSTEM_PROMPT, visionGenerationConfig, budget, relay, signal);
+            if (!res.ok && res.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED' && res.errStatus !== 'RACE_CANCELLED') {
+              console.warn(`[vision.js] Gemini ${keyTag || 'key1-'}${model} failed:`, res.errStatus, res.httpStatus);
+            }
+            if ((res.errStatus || '').startsWith('BLOCKED_') || res.httpStatus === 400) {
+              structuralFailure = true;
+            }
+            return { ...res, originalIndex, keyTag, modelTag };
           },
-          request,
+          {
+            concurrency: RACE_CONCURRENCY,
+            shouldStop: () => structuralFailure || !!deadlineOrBudgetExceeded(),
+            onAttemptSettled: (_item, res) => { lastResult = res; },
+          },
         );
+
+        if (tierWinner) { winner = tierWinner; break; }
+        if (tierLastResult) lastResult = tierLastResult;
       }
 
-      if (result.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED') {
-        console.warn(`[vision.js] Gemini ${keyTag || 'key1-'}${model} failed:`, result.errStatus, result.httpStatus);
+      if (!winner || !winner.ok) {
+        if (!sentAnything) {
+          const status =
+            lastResult.httpStatus === 400 ? 400
+            : (lastResult.errStatus || '').startsWith('BLOCKED_') ? 422
+            : (lastResult.errStatus === 'RESOURCE_EXHAUSTED' || lastResult.errStatus === 'RATE_LIMIT_EXCEEDED') ? 429
+            : (lastResult.httpStatus && lastResult.httpStatus !== 0) ? lastResult.httpStatus
+            : 502;
+          sendEvent({ error: buildFriendlyVisionError(lastResult, likelyArabic), status });
+          sendEvent({ done: true });
+          closeStream();
+          return;
+        }
+        // Committed-then-interrupted (see streamingProviders.mjs's commitment
+        // note) — winner.ok is false but text already reached the client;
+        // fall through and close cleanly rather than emitting a second,
+        // contradictory error on top of a partial answer.
       }
-      lastResult = result;
 
-      // Safety-filter block or malformed request: every key/model would
-      // fail identically, so rotating further only burns the budget.
-      if ((result.errStatus || '').startsWith('BLOCKED_') || result.httpStatus === 400) {
-        break outer;
-      }
-      // Otherwise (429, 403, 5xx, NETWORK_ERROR, TIMEOUT, EMPTY_REPLY):
-      // fall through to the fallback model, then the next key.
-    }
-  }
+      sendEvent({
+        done: true,
+        source: winner ? `gemini-${winner.keyTag}${winner.modelTag}` : undefined,
+        detail: detailReq,
+      });
+      closeStream();
+    },
+  });
 
-  const status =
-    lastResult.httpStatus === 400 ? 400
-    : (lastResult.errStatus || '').startsWith('BLOCKED_') ? 422
-    : (lastResult.errStatus === 'RESOURCE_EXHAUSTED' || lastResult.errStatus === 'RATE_LIMIT_EXCEEDED') ? 429
-    : (lastResult.httpStatus && lastResult.httpStatus !== 0) ? lastResult.httpStatus
-    : 502;
-
-  return json(
-    { error: buildFriendlyVisionError(lastResult, likelyArabic) },
-    status, undefined, request,
-  );
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+      'X-CES-Vision-Detail': detailReq,
+      ...getCorsHeaders(request),
+    },
+  });
 }
 
 export async function onRequestOptions({ request }) {
