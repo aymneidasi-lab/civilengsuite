@@ -123,7 +123,7 @@ export async function callGeminiStreaming(apiKey, model, contents, systemPrompt,
 // One function for both -- identical wire format, only url/model differ.
 // Preserves the "13 keys" retry-per-key structure at the onRequestPost
 // level; this function itself does 500/503 backoff exactly like Gemini's.
-export async function callOpenAiCompatStreaming(url, apiKey, model, messages, budget, onDelta, externalSignal, { maxTokens = 900, temperature = 0.35 } = {}) {
+export async function callOpenAiCompatStreaming(url, apiKey, model, messages, budget, onDelta, externalSignal, { maxTokens = 2048, temperature = 0.35 } = {}) {
   if (budget && !budget.take()) return { ok: false, httpStatus: 0, errStatus: 'SUBREQUEST_BUDGET_EXHAUSTED', errBody: '' };
 
   const payload = JSON.stringify({ model, messages, stream: true, max_tokens: maxTokens, temperature });
@@ -160,11 +160,11 @@ export async function callOpenAiCompatStreaming(url, apiKey, model, messages, bu
 // ── Cloudflare Workers AI (env.AI.run(model, {stream:true})) ───────────────
 // No fetch(), no URL, no subrequest-budget draw -- same as the non-streaming
 // original. env.AI.run() returns a ReadableStream directly when stream:true.
-export async function callWorkersAIStreaming(aiBinding, messages, onDelta) {
+export async function callWorkersAIStreaming(aiBinding, messages, onDelta, { maxTokens = 2048 } = {}) {
   if (!aiBinding) return { ok: false, httpStatus: 0, errStatus: 'NOT_BOUND', errBody: '' };
   let stream;
   try {
-    stream = await aiBinding.run('@cf/meta/llama-3.1-8b-instruct', { messages, stream: true, max_tokens: 900 });
+    stream = await aiBinding.run('@cf/meta/llama-3.1-8b-instruct', { messages, stream: true, max_tokens: maxTokens });
   } catch (err) {
     return { ok: false, httpStatus: 0, errStatus: 'WORKERS_AI_ERROR', errBody: String(err && err.message || err) };
   }

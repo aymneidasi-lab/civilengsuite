@@ -1220,11 +1220,24 @@ export async function onRequestPost(context) {
           break;
         }
 
+        // [PATCH] BUG 1 FIX (ported from chat.js — same raceKeyPool
+        // concurrency issue, same fix). relay() used to be passed straight
+        // through as onDelta to every one of the RACE_CONCURRENCY keys
+        // racing this tier; with no gate, any two of them mid-stream at the
+        // same time would both call relay(), interleaving text from two
+        // unrelated Gemini responses into the same SSE stream before
+        // raceKeyPool ever resolved a winner. Reset per tier (fresh pool
+        // race each iteration of the primary/fallback loop above).
+        let committedCanceller = null;
         const { winner: tierWinner, lastResult: tierLastResult } = await raceKeyPool(
           geminiPool,
-          async ({ key: gKey, originalIndex }, signal) => {
+          async ({ key: gKey, originalIndex }, signal, cancelOthers) => {
             const keyTag = keyTagFor(originalIndex);
-            const res = await callGeminiStreaming(gKey, model, visionContents, VISION_SYSTEM_PROMPT, visionGenerationConfig, budget, relay, signal);
+            const res = await callGeminiStreaming(gKey, model, visionContents, VISION_SYSTEM_PROMPT, visionGenerationConfig, budget, (text) => {
+              if (committedCanceller === null) { committedCanceller = cancelOthers; cancelOthers(); }
+              if (committedCanceller !== cancelOthers) return; // a losing racer's delta — never relayed
+              relay(text);
+            }, signal);
             if (!res.ok && res.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED' && res.errStatus !== 'RACE_CANCELLED') {
               console.warn(`[vision.js] Gemini ${keyTag || 'key1-'}${model} failed:`, res.errStatus, res.httpStatus);
             }

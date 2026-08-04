@@ -1448,7 +1448,7 @@ const RACE_CONCURRENCY = 3;
 // so the same streaming call function can also serve vision.js's different
 // generationConfig shape without duplicating the retry/timeout/SSE code).
 const GEMINI_GENERATION_CONFIG = {
-  maxOutputTokens: 900,
+  maxOutputTokens: 2048,
   temperature    : 0.35,
   topP           : 0.9,
   thinkingConfig : { thinkingBudget: 0 },
@@ -1973,6 +1973,20 @@ LANGUAGE RULE — CRITICAL
 • Keep technical terms in their standard form in both languages:
   ACI 318-19, ECP 203, ASCE 7, EPS 2012, kN, kPa, MPa, qallowable, As, ld, fcu, f'c
   — do not translate these.
+
+════════════════════════════════════════
+STATE RESUME RULE — CRITICAL
+════════════════════════════════════════
+If the user's message is short and means "continue" — "كمل", "استمر", "tabع", "كملها", "continue",
+"go on", or similar — look for a PRIOR turn with role "model" in the conversation history above.
+• If one exists: pick up EXACTLY where it left off. Do not re-greet, do not restate or summarize
+  what you already said, do not re-derive or change any number/calculation already given. If that
+  turn ends with a marker like "[...الرد السابق انقطع هنا ولم يكتمل]" or
+  "[...the previous reply was cut off here, incomplete]", treat that as the exact resume point —
+  continue the sentence/list/calculation from there, in the same language it was already in.
+• If no prior model turn exists in what you can see (a genuinely first message that just says
+  "كمل" with nothing before it): say so plainly and ask what they'd like you to continue — never
+  invent content to continue into.
 
 ════════════════════════════════════════
 SOUND LIKE A HUMAN — NOT A BROCHURE (CRITICAL)
@@ -3390,6 +3404,14 @@ LANGUAGE RULE — CRITICAL (re-check every reply, never drift):
 • English message → reply ENTIRELY in English. Never mix languages in one reply.
 • Keep technical terms as-is in both languages: ACI 318-19, ECP 203, ASCE 7, EPS 2012, kN, kPa,
   MPa, qallowable, As, ld, fcu, f'c.
+
+STATE RESUME RULE — CRITICAL: if the user's message just means "continue" ("كمل", "استمر",
+"tabع", "كملها", "continue", "go on"), find the most recent "model"-role turn above and pick up
+EXACTLY where it stopped — no re-greeting, no restating what was already said, no changing any
+number/calculation already given. A turn ending in "[...الرد السابق انقطع هنا ولم يكتمل]" or
+"[...the previous reply was cut off here, incomplete]" marks the precise resume point; continue
+the sentence/list/calculation from there, same language as before. If there's truly no prior
+model turn to resume, say so plainly instead of inventing content.
 
 TONE: Knowledgeable engineer texting a colleague — direct, warm, occasionally informal. Match
 the person's energy (short question → short answer). Vary phrasing; never repeat the same
@@ -5005,10 +5027,40 @@ export async function onRequestPost(context) {
   const turns = [];
   for (const turn of recentHistory) {
     const role = turn.role === 'model' ? 'model' : 'user';
-    const text = typeof turn.text === 'string' ? turn.text.trim().slice(0, 2000) : '';
+    // [PATCH] BUG 4 FIX — a model turn the frontend flagged `truncated`
+    // (see the terminal `done` event below, and pc_suite_v43.html/
+    // footing_pro_v43.html's history.push()) keeps its FULL text instead of
+    // the usual 2000-char slice. That reply was already cut off once by
+    // MAX_TOKENS/finish_reason:'length' upstream — slicing it AGAIN here,
+    // on the way back INTO the next request, would throw away exactly the
+    // trailing words the model needs to see to continue from the right
+    // place instead of re-deriving (and possibly changing) prior numbers.
+    const isTruncatedModelTurn = role === 'model' && turn.truncated === true;
+    let text = typeof turn.text === 'string'
+      ? (isTruncatedModelTurn ? turn.text.trim() : turn.text.trim().slice(0, 2000))
+      : '';
+    // Explicit, model-visible cut-off marker — belt-and-suspenders on top of
+    // the STATE RESUME RULE system-prompt instruction below: even if that
+    // instruction's effect is diluted by everything else competing for the
+    // model's attention, this marker sits directly in the turn being
+    // continued from, not in a system prompt several thousand tokens away.
+    if (isTruncatedModelTurn && text) {
+      text += isArabicText(text)
+        ? '\n\n[...الرد السابق انقطع هنا ولم يكتمل]'
+        : '\n\n[...the previous reply was cut off here, incomplete]';
+    }
     if (text) turns.push({ role, text });
   }
-  turns.push({ role: 'user', text: userMessage + textFilesBlock });
+  // [PATCH] BUG 2 FIX — language-lock reminder placed AFTER textFilesBlock,
+  // the point closest to actual generation. A large English file/code block
+  // pasted just before this was overriding the LANGUAGE RULE section in the
+  // system prompt (recency bias) despite that rule being clearly marked
+  // CRITICAL — being far from the point of generation made it lose to
+  // whatever text sits immediately before the model starts replying.
+  const languageLock = isArabicText(userMessage)
+    ? '\n\n[تذكير صارم: مهما كان محتوى الملف المرفق أعلاه بالإنجليزية، ردّك الكامل يجب أن يكون بالعامية المصرية بالكامل الآن.]'
+    : '\n\n[Reminder: regardless of the attached file language above, your entire reply must be in English now.]';
+  turns.push({ role: 'user', text: userMessage + textFilesBlock + languageLock });
 
   const geminiContents = turns.map(t => ({ role: t.role, parts: [{ text: t.text }] }));
 
@@ -5129,10 +5181,23 @@ export async function onRequestPost(context) {
         if (tierPool.length === 0) continue;
 
         let retractedThisTier = false;
+        // [PATCH] BUG 1 FIX — token streaming desync. Up to RACE_CONCURRENCY
+        // keys stream concurrently; without this gate, every one of them
+        // reaching callGeminiStreaming's onDelta before ANY attempt's
+        // Promise resolves would relay to the SAME sanitizer/SSE stream,
+        // interleaving characters from unrelated generations. Only the
+        // FIRST attempt to deliver a chunk may ever call relay() for this
+        // tier; cancelOthers() (new 3rd attemptFn param from raceKeyPool.mjs)
+        // fires the instant that happens, so the other in-flight keys stop
+        // being awaited as real candidates immediately, not just once their
+        // own request eventually finishes.
+        let committedCanceller = null;
         const { winner, lastResult } = await raceKeyPool(
           tierPool,
-          async ({ key: gKey, originalIndex }, signal) => {
+          async ({ key: gKey, originalIndex }, signal, cancelOthers) => {
             const res = await callGeminiStreaming(gKey, modelTier, geminiContents, geminiSystemPrompt, GEMINI_GENERATION_CONFIG, budget, (text) => {
+              if (committedCanceller === null) { committedCanceller = cancelOthers; cancelOthers(); }
+              if (committedCanceller !== cancelOthers) return; // a losing racer's delta — never relayed
               if (relay(text)) retractedThisTier = true;
             }, signal);
             if (res.errStatus && res.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED' && res.errStatus !== 'RACE_CANCELLED') {
@@ -5203,7 +5268,7 @@ export async function onRequestPost(context) {
         let workersRetracted = false;
         const layerWorkers = await callWorkersAIStreaming(env.AI, workersMsgs, (text) => {
           if (relay(text)) workersRetracted = true;
-        });
+        }, { maxTokens: 2048 });
         if (workersRetracted) {
           sendEvent({ redacted: true, reply: REDACT_MSG });
           sendEvent({ done: true });
@@ -5243,12 +5308,15 @@ export async function onRequestPost(context) {
             const groqPool = skipDeadKeys(rotateStart(groqKeysIndexed), 'groq');
 
             let groqRetracted = false;
+            let groqCommittedCanceller = null; // [PATCH] BUG 1 FIX — same commitment gate as the Gemini tier above
             const { winner, lastResult } = await raceKeyPool(
               groqPool,
-              async ({ key: gqKey, originalIndex }, signal) => {
+              async ({ key: gqKey, originalIndex }, signal, cancelOthers) => {
                 const res = await callOpenAiCompatStreaming(GROQ_API_URL, gqKey, GROQ_MODEL, workersMsgs, budget, (text) => {
+                  if (groqCommittedCanceller === null) { groqCommittedCanceller = cancelOthers; cancelOthers(); }
+                  if (groqCommittedCanceller !== cancelOthers) return;
                   if (relay(text)) groqRetracted = true;
-                }, signal);
+                }, signal, { maxTokens: 2048 });
                 if (res.errStatus === 'model_decommissioned') res.deadModelReason = 'MODEL_DECOMMISSIONED';
                 if (res.errStatus && res.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED' && res.errStatus !== 'RACE_CANCELLED') {
                   console.warn(`[chat.js] Groq key${originalIndex === 0 ? '' : originalIndex + 1} failed:`, res.errStatus, res.httpStatus);
@@ -5302,12 +5370,15 @@ export async function onRequestPost(context) {
             const openRouterPool = skipDeadKeys(rotateStart(openRouterKeysIndexed), 'openrouter');
 
             let orRetracted = false;
+            let orCommittedCanceller = null; // [PATCH] BUG 1 FIX — same commitment gate as the Gemini tier above
             const { winner, lastResult } = await raceKeyPool(
               openRouterPool,
-              async ({ key: orKey, originalIndex }, signal) => {
+              async ({ key: orKey, originalIndex }, signal, cancelOthers) => {
                 const res = await callOpenAiCompatStreaming(OPENROUTER_API_URL, orKey, OPENROUTER_MODEL, workersMsgs, budget, (text) => {
+                  if (orCommittedCanceller === null) { orCommittedCanceller = cancelOthers; cancelOthers(); }
+                  if (orCommittedCanceller !== cancelOthers) return;
                   if (relay(text)) orRetracted = true;
-                }, signal);
+                }, signal, { maxTokens: 2048 });
                 if (res.httpStatus === 404 && /no endpoints found matching your data policy/i.test(res.errBody || '')) {
                   res.accountConfigIssue = 'OPENROUTER_DATA_POLICY';
                 }
@@ -5356,7 +5427,28 @@ export async function onRequestPost(context) {
       const { emit: trailingEmit, finalText } = sanitizer.finish();
       if (trailingEmit) sendEvent({ delta: trailingEmit });
       logFactDrift(scanForFactDrift(finalText), { provider: sourceTag, isFirstTurn, isDeveloperMode });
-      sendEvent({ done: true, source: sourceTag, ...(isDeveloperMode && { devMode: true }) });
+      // [PATCH] BUG 3/4 FIX — surface truncation to the client instead of
+      // only console.warn-ing it server-side (the old behaviour: detected,
+      // logged, then silently discarded). finishReason's truncation value
+      // differs per provider: Gemini uses 'MAX_TOKENS'; Groq/OpenRouter
+      // (OpenAI-compatible wire format, see extractOpenAiCompatDelta in
+      // providerDeltas.mjs) use 'length'. Checking only 'MAX_TOKENS' would
+      // silently miss every truncation landing on the Groq/OpenRouter
+      // fallback tiers. Workers AI's stream carries no finish-reason field
+      // in Cloudflare's own wire format at all (see extractWorkersAiDelta)
+      // — truncation on that specific last-resort layer cannot be detected
+      // here; documented gap, not a silent one. `interrupted` (connection
+      // dropped mid-stream after commitment — see streamingProviders.mjs's
+      // commitment semantics) is provider-agnostic and always available.
+      const finishReason = finalWinResult && finalWinResult.finishReason;
+      const truncated = finishReason === 'MAX_TOKENS' || finishReason === 'length';
+      sendEvent({
+        done: true,
+        source: sourceTag,
+        truncated,
+        interrupted: !!(finalWinResult && finalWinResult.interrupted),
+        ...(isDeveloperMode && { devMode: true }),
+      });
       closeStream();
     },
   });
