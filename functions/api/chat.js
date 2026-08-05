@@ -1447,11 +1447,45 @@ const RACE_CONCURRENCY = 3;
 // as an explicit parameter instead of hardcoding chat.js's specific values,
 // so the same streaming call function can also serve vision.js's different
 // generationConfig shape without duplicating the retry/timeout/SSE code).
+// [PATCH] thinkingBudget -> thinkingLevel migration. thinkingBudget is the
+// Gemini 2.5-era numeric param; gemini-3.5-flash and gemini-3.1-flash-lite
+// are Gemini 3.x models, which read thinkingLevel instead. CORRECTION to
+// an earlier version of this comment: thinkingBudget:0 was NOT confirmed
+// to be silently ignored on these models — Google's own "What's new in
+// Gemini 3.5 Flash" doc states thinking_budget "is still supported for
+// backward compatibility," i.e. it was very likely still being read and
+// honored to whatever degree these models allow, just not through the
+// currently-recommended path. (Separately, and independent of that
+// question: Gemini 3 Flash/Flash-Lite tiers are documented as not
+// supporting a true thinking-OFF state at all regardless of which
+// parameter requests it, so thinkingBudget:0's original "disable it
+// outright" intent was likely never being achieved IN FULL either way —
+// that specific part of the original v19 rationale doesn't fully hold up
+// on this model family, budget honored or not.) The reasons to migrate
+// anyway: (1) thinking_budget and thinking_level are mutually exclusive —
+// sending both 400s — so this isn't "belt and suspenders", it's a
+// straight swap; (2) Google recommends thinking_level for "more
+// predictable performance" on Gemini 3.x; (3) newer Gemini 3.x
+// generations (3.6+) are moving toward hard-erroring on legacy sampling
+// params rather than silently accepting them, so staying on
+// thinkingBudget is accumulating migration debt, not staying neutral.
+// MINIMAL is the lowest available thinking_level tier and the closest
+// equivalent to the original "give the whole budget to the answer"
+// intent — thought signatures still get generated under the hood
+// regardless of level, but MINIMAL keeps visible reasoning tokens closest
+// to zero. LOW is a deliberately heavier setting vision.js chose for its
+// own different task (see that file's comment) — not a "copy whatever
+// vision.js used" default. temperature/topP removed to match: Google's
+// official Gemini 3.5 Flash migration guide explicitly lists both as "no
+// longer recommended" for this model family — independently confirmed,
+// unrelated to the thinking-param question above — same rationale
+// vision.js's visionGenerationConfig comment already cites. Uppercase
+// 'MINIMAL' to match vision.js's existing thinkingLevel casing convention
+// in this codebase; both cases are accepted by the API in practice, this
+// is an internal-consistency choice, not a correctness requirement.
 const GEMINI_GENERATION_CONFIG = {
   maxOutputTokens: 2048,
-  temperature    : 0.35,
-  topP           : 0.9,
-  thinkingConfig : { thinkingBudget: 0 },
+  thinkingConfig : { thinkingLevel: 'MINIMAL' },
 };
 
 // ── v13 CONCURRENCY HELPERS ────────────────────────────────────────────────
@@ -3856,11 +3890,25 @@ async function callGeminiWithRetry(apiKey, model, contents, systemPrompt, budget
       // This chatbot is a FAQ/retrieval-grounded sales-and-support persona
       // — no multi-step reasoning, math proofs, or agentic tool use — so
       // thinking has no upside here and only downside (leakage risk, token
-      // cost, latency). thinkingBudget: 0 disables it outright (confirmed
-      // working for gemini-3.5-flash specifically, not just the 3.x family
-      // generally). maxOutputTokens raised 700->900 as a secondary safety
-      // margin now that none of it is being silently consumed by thinking.
-      thinkingConfig : { thinkingBudget: 0 },
+      // cost, latency).
+      //
+      // [PATCH] This function is dead code (no live call sites — see the
+      // live GEMINI_GENERATION_CONFIG's own comment above for the
+      // thinkingBudget->thinkingLevel migration this mirrors), updated only
+      // for consistency in case it's ever resurrected for rollback. Note:
+      // this comment block's earlier claim that thinkingBudget:0 was
+      // "confirmed working for gemini-3.5-flash specifically" is NOT
+      // actually contradicted by Gemini 3.x's current docs — Google's own
+      // "What's new in Gemini 3.5 Flash" page states thinking_budget "is
+      // still supported for backward compatibility" on this exact model,
+      // so the old claim was likely still true (just not the recommended
+      // path anymore, and Flash/Flash-Lite tiers reportedly can't reach a
+      // true thinking-OFF state regardless of which param requests it, so
+      // "confirmed working" may have meant "accepted and mostly honored,"
+      // not "achieved literal zero"). Re-verify against current docs
+      // before trusting this function's config if it's ever brought back —
+      // this whole area has moved fast across 3.x point releases.
+      thinkingConfig : { thinkingLevel: 'MINIMAL' },
     },
   });
 
@@ -5030,11 +5078,19 @@ export async function onRequestPost(context) {
     // [PATCH] BUG 4 FIX — a model turn the frontend flagged `truncated`
     // (see the terminal `done` event below, and pc_suite_v43.html/
     // footing_pro_v43.html's history.push()) keeps its FULL text instead of
-    // the usual 2000-char slice. That reply was already cut off once by
-    // MAX_TOKENS/finish_reason:'length' upstream — slicing it AGAIN here,
-    // on the way back INTO the next request, would throw away exactly the
-    // trailing words the model needs to see to continue from the right
-    // place instead of re-deriving (and possibly changing) prior numbers.
+    // the usual 2000-char slice. That reply was already cut off once upstream
+    // — by the provider's own output-token budget (MAX_TOKENS/finish_
+    // reason:'length'), by a provider-side stream drop after commitment
+    // (doneEvent.interrupted), or by the browser's own connection to this
+    // Worker dropping mid-stream (client-side localDisconnect, folded into
+    // the same client-stored flag — see the HTML files' sendMessage()/
+    // sendImageMessage() comments) — slicing it AGAIN here, on the way back
+    // INTO the next request, would throw away exactly the trailing words the
+    // model needs to see to continue from the right place instead of
+    // re-deriving (and possibly changing) prior numbers. `turn.truncated`
+    // doesn't distinguish which of the three caused it, deliberately: all
+    // three need identical treatment here (preserve full text, add the
+    // marker below), only the client-facing hint text differs by cause.
     const isTruncatedModelTurn = role === 'model' && turn.truncated === true;
     let text = typeof turn.text === 'string'
       ? (isTruncatedModelTurn ? turn.text.trim() : turn.text.trim().slice(0, 2000))

@@ -33,6 +33,16 @@ export class StreamingSanitizer {
     this.retracted = false;
     this.bannerDecided = this.isDeveloperMode ? false : true; // non-dev mode: no banner gate at all
     this.bannerSuppressUpTo = 0; // if the banner gate fires, chars [0, this) are dropped, not emitted
+    // [FIX — see audit notes "streamSanitizer quadratic scan"] Bounded
+    // scratch buffer used for blocklist scanning only. Always equal to
+    // raw.slice(emittedLen) by construction (proven by induction: seeded
+    // once from that exact slice, then only ever += a chunk and .slice()s
+    // off its own front by the same amount emittedLen advances by) but
+    // never re-derived FROM the full-length `raw` on every call, so each
+    // push() after the first is O(chunk + holdback) instead of O(current
+    // total reply length). null until the banner gate resolves and the
+    // first post-gate call seeds it.
+    this._tailBuf = null;
   }
 
   push(chunk) {
@@ -52,6 +62,15 @@ export class StreamingSanitizer {
       return { emit, retracted: false };
     }
 
+    if (this._tailBuf === null) {
+      // First call after the banner gate resolved. One-time catch-up,
+      // bounded by the gate's own 220-char cap regardless of total reply
+      // length, so this single full slice is cheap even though it isn't
+      // "just the new chunk".
+      this._tailBuf = this.raw.slice(Math.max(this.emittedLen, this.bannerSuppressUpTo));
+    } else {
+      this._tailBuf += chunk;
+    }
     return this._advanceWithBlocklistHoldback();
   }
 
@@ -95,17 +114,17 @@ export class StreamingSanitizer {
 
   _advanceWithBlocklistHoldback() {
     const holdback = this.maxTermLen > 0 ? this.maxTermLen - 1 : 0;
-    const scanFrom = this.emittedLen;
-    const scannable = this.raw.slice(scanFrom).toLowerCase();
+    const scannable = this._tailBuf.toLowerCase();
     for (const term of this.blocklist) {
       if (term && scannable.includes(term)) {
         this.retracted = true;
         return { emit: '', retracted: true };
       }
     }
-    const safeUpTo = Math.max(scanFrom, this.raw.length - holdback);
-    const emit = this.raw.slice(this.emittedLen, safeUpTo);
-    this.emittedLen = safeUpTo;
+    const emitLen = Math.max(0, this._tailBuf.length - holdback);
+    const emit = this._tailBuf.slice(0, emitLen);
+    this._tailBuf = this._tailBuf.slice(emitLen);
+    this.emittedLen += emit.length;
     return { emit, retracted: false };
   }
 }

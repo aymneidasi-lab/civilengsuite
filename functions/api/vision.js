@@ -1276,10 +1276,32 @@ export async function onRequestPost(context) {
         // contradictory error on top of a partial answer.
       }
 
+      // [PATCH] BUG 4 FIX — same finishReason gap as chat.js had: without
+      // this, an image analysis that hits MAX_TOKENS looks identical to one
+      // that finished cleanly, and the frontend has no way to mark the
+      // resulting history turn as truncated for a later "كمل".
+      // 'length' removed from this check — vision.js only ever calls Gemini
+      // (never Groq/OpenRouter), and Gemini's finishReason enum has no
+      // 'length' value; that string only ever appears on the OpenAI-
+      // compatible wire format chat.js's fallback tiers use. Keeping it
+      // here was a harmless dead branch (visionFinishReason can never
+      // equal it), but misleading — it implied a fallback tier that
+      // doesn't exist on this endpoint.
+      // `interrupted` was missing entirely: streamingProviders.mjs's
+      // commitment semantics mark a connection dropped mid-stream AFTER
+      // commitment as {interrupted:true} with no finishReason at all (see
+      // runStream()'s catch block) — distinct from a clean MAX_TOKENS
+      // cutoff, and previously had zero client-visible signal on this
+      // endpoint even though chat.js has surfaced it since the earlier fix.
+      const visionFinishReason = winner && winner.finishReason;
+      const visionTruncated = visionFinishReason === 'MAX_TOKENS';
       sendEvent({
         done: true,
         source: winner ? `gemini-${winner.keyTag}${winner.modelTag}` : undefined,
         detail: detailReq,
+        finishReason: visionFinishReason,
+        truncated: visionTruncated,
+        interrupted: !!(winner && winner.interrupted),
       });
       closeStream();
     },
