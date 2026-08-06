@@ -1721,21 +1721,29 @@ function buildTextFilesBlock(files) {
 // (developers.cloudflare.com/workers/platform/limits/), which removes this
 // concern almost entirely — worth confirming which plan this Pages
 // project's Functions currently run under before relying on this number.
-const DEV_KV_MAX_FILES_PER_MESSAGE   = 3;
 const DEV_KV_MAX_TOTAL_CONTEXT_CHARS = 350000;
 
-// Resolves body.kvFileIds (array of fileId strings returned by a prior
-// POST /api/chat/dev-upload) against env.CES_DEV_UPLOADS. No-ops
-// (ok:true, files:[]) when not in developer mode or no ids were sent —
-// same "gate structurally, don't rely on a downstream check to ignore it"
-// posture as everything else isDeveloperMode touches in this file (see
-// CHANGELOG v35 at the top of this file). Mirrors extractTextFiles()'s
-// return shape exactly, INCLUDING the originalLength field
-// buildTextFilesBlock() now expects on every truncated entry (added
-// alongside that function's percentage-based truncation notice) — so its
-// output drops straight into the same buildTextFilesBlock() call the
-// inline path already uses, with no special-casing there for where a file
-// came from. See the call site in onRequestPost, step 3d.
+// REMOVED (v37): DEV_KV_MAX_FILES_PER_MESSAGE, formerly hardcoded to 3 —
+// the exact value of the non-dev MAX_TEXT_FILES constant above, never
+// elevated the way DEV_MAX_TEXT_FILES (Infinity, see that block's comment)
+// was. resolveKvFiles() is already unreachable outside isDeveloperMode
+// (first line of the function below), so this was a count gate sitting
+// behind a gate — nothing here ever justified "3" specifically; every
+// comment in this block is about DEV_KV_MAX_TOTAL_CONTEXT_CHARS instead.
+// Dropped for the same "explicit developer choice, Infinity not just
+// elevated" reasoning as DEV_MAX_TEXT_FILES.
+//
+// Re file count vs. the Workers Free-plan subrequest ceiling this file's
+// other dev-mode comments warn about (developers.cloudflare.com/changelog/
+// 2026-02-11-subrequests-limit/): that ceiling — 50 per invocation — is
+// SUBREQUESTS TO EXTERNAL HOSTS, i.e. what bounds raceKeyPool()'s fan-out
+// across the Gemini/Groq/OpenRouter/Workers-AI key pool elsewhere in this
+// file. KV get/delete are calls to a CLOUDFLARE SERVICE, a separate budget
+// on the same Free plan: 1,000 subrequests/invocation. Worst case here is
+// 3 KV ops/file (2 GET attempts on retry + 1 DELETE); even 100 attached
+// files is 300 of those, well inside 1,000. File count was never actually
+// the platform constraint — DEV_KV_MAX_TOTAL_CONTEXT_CHARS below, sized to
+// the smallest downstream model's context window, already is.
 async function resolveKvFiles(body, env, isDeveloperMode) {
   if (!isDeveloperMode) return { ok: true, files: [] };
   const ids = Array.isArray(body?.kvFileIds)
@@ -1745,19 +1753,23 @@ async function resolveKvFiles(body, env, isDeveloperMode) {
   if (!env.CES_DEV_UPLOADS) {
     return { ok: false, error: 'CES_DEV_UPLOADS KV namespace is not bound on the server.' };
   }
-  if (ids.length > DEV_KV_MAX_FILES_PER_MESSAGE) {
-    return { ok: false, error: `Maximum ${DEV_KV_MAX_FILES_PER_MESSAGE} uploaded files per message.` };
-  }
 
-  const files = [];
-  let totalChars = 0;
-  for (const fileId of ids.slice(0, DEV_KV_MAX_FILES_PER_MESSAGE)) {
-    // One retry with a short delay: KV writes are eventually consistent —
-    // up to ~60s globally (developers.cloudflare.com/kv/api/write-key-value-
-    // pairs/). An upload immediately followed by a chat message almost
-    // always lands on the same colo and reads back instantly, but this is
-    // cheap insurance against the rare case it doesn't. Costs wall-clock
-    // only (awaited I/O), not CPU-time.
+  // GET (with its one-retry/400ms-backoff) now runs concurrently across
+  // every id via Promise.all instead of one id at a time. The old
+  // sequential loop made wall-clock cost scale linearly with file count —
+  // worst case N files x up to ~400ms retry each — invisible at the old
+  // 3-file ceiling but exactly what that ceiling's removal would otherwise
+  // expose. Each mapped call catches its own errors and resolves to a
+  // tagged {ok, ...} object rather than throwing, so Promise.all is safe
+  // without allSettled: nothing here can reject.
+  //
+  // KV writes are eventually consistent — up to ~60s globally
+  // (developers.cloudflare.com/kv/api/write-key-value-pairs/). An upload
+  // immediately followed by a chat message almost always lands on the same
+  // colo and reads back instantly; the retry is cheap insurance against
+  // the rare case it doesn't. Costs wall-clock only (awaited I/O), not
+  // CPU-time.
+  const settled = await Promise.all(ids.map(async (fileId) => {
     let raw = null;
     for (let attempt = 0; attempt < 2 && raw === null; attempt++) {
       if (attempt > 0) await new Promise((r) => setTimeout(r, 400));
@@ -1770,6 +1782,7 @@ async function resolveKvFiles(body, env, isDeveloperMode) {
     if (!raw) {
       return {
         ok: false,
+        fileId,
         error: `Uploaded file ${fileId} was not found — it may have expired (uploads are ` +
           `deleted after 5 minutes). Please attach it again.`,
       };
@@ -1778,11 +1791,51 @@ async function resolveKvFiles(body, env, isDeveloperMode) {
     try {
       parsed = JSON.parse(raw);
     } catch {
-      return { ok: false, error: `Uploaded file ${fileId} is corrupted. Please attach it again.` };
+      return { ok: false, fileId, error: `Uploaded file ${fileId} is corrupted. Please attach it again.` };
     }
     const name = typeof parsed?.name === 'string' && parsed.name ? parsed.name : 'attachment.txt';
-    let content = typeof parsed?.content === 'string' ? parsed.content : '';
-    const originalLength = content.length; // buildTextFilesBlock() needs this on truncated entries
+    const content = typeof parsed?.content === 'string' ? parsed.content : '';
+    return { ok: true, fileId, name, content, originalLength: content.length };
+  }));
+
+  // Fail fast on the first bad id in ids[] order (not settle order), so
+  // the same input always produces the same error regardless of which
+  // fetch happens to finish first — matches the old loop's deterministic
+  // first-bad-id behavior. Deliberately returns BEFORE the delete pass
+  // below: a sibling id's failure no longer causes a successfully-read
+  // file's KV entry to be deleted-then-discarded the way the old
+  // single-pass loop did (it deleted each file immediately after reading
+  // it, inside the same iteration that could still fail on a later id) —
+  // a good file now survives on its TTL for the caller to retry with,
+  // instead of being silently lost.
+  const firstBad = settled.find((r) => !r.ok);
+  if (firstBad) return { ok: false, error: firstBad.error };
+
+  // Best-effort delete-after-read, also concurrent. Promise.allSettled
+  // (not .all): a single KV delete hiccup must not reject the whole batch
+  // — this step existing at all is on top of, not instead of, the
+  // expirationTtl safety net already set at upload time, same contract as
+  // the original per-file try/catch.
+  const deletions = await Promise.allSettled(
+    settled.map((r) => env.CES_DEV_UPLOADS.delete(`devupload:${r.fileId}`))
+  );
+  deletions.forEach((d, i) => {
+    if (d.status === 'rejected') {
+      console.warn('[chat.js] CES_DEV_UPLOADS.delete (non-fatal):', settled[i].fileId, d.reason?.message);
+    }
+  });
+
+  // Sequential, order-preserving budget pass over the now-settled results.
+  // Pure/synchronous (no I/O), so parallelizing it buys nothing — and
+  // keeping it a plain walk over settled[] in the caller's original
+  // ids[] order means which file(s) get cut when the combined cap is hit
+  // still depends on attachment order, not network/KV timing. Identical
+  // truncate-and-drop-remaining semantics to the original loop and to
+  // extractTextFiles()'s own combined-cap handling.
+  const files = [];
+  let totalChars = 0;
+  for (const r of settled) {
+    let content = r.content;
     let truncated = false;
     const roomLeft = DEV_KV_MAX_TOTAL_CONTEXT_CHARS - totalChars;
     if (roomLeft <= 0) break; // combined cap already reached — drop remaining files silently,
@@ -1792,18 +1845,7 @@ async function resolveKvFiles(body, env, isDeveloperMode) {
       truncated = true;
     }
     totalChars += content.length;
-    files.push({ name, content, truncated, originalLength });
-
-    // Best-effort delete-after-read: minimizes how long a resolved file's
-    // content sits in KV beyond the moment it was actually used, on top of
-    // (not instead of) the expirationTtl safety net already set at upload
-    // time. A failure here just means the TTL (5 min) is what eventually
-    // cleans it up instead — never fails the request.
-    try {
-      await env.CES_DEV_UPLOADS.delete(`devupload:${fileId}`);
-    } catch (err) {
-      console.warn('[chat.js] CES_DEV_UPLOADS.delete (non-fatal):', err.message);
-    }
+    files.push({ name: r.name, content, truncated, originalLength: r.originalLength });
   }
   return { ok: true, files };
 }
