@@ -346,7 +346,6 @@ import {
 } from '../_lib/rotation.mjs';
 import { raceKeyPool } from '../_lib/raceKeyPool.mjs';
 import { callGeminiStreaming } from '../_lib/streamingProviders.mjs';
-import { SseChunkWriter } from '../_lib/resumableSse.mjs'; // [PATCH] resume-mechanism chunkIndex writer
 
 // ── Models — same pair chat.js uses. gemini-3.5-flash confirmed current
 // GA/multimodal (ai.google.dev, 2026-07). gemini-2.5-flash is NOT used here
@@ -1387,22 +1386,13 @@ export async function onRequestPost(context) {
       let sentAnything = false;
 
       function closeStream() { if (!streamClosed) { streamClosed = true; controller.close(); } }
-      // [PATCH] Manual `data: ...` framing replaced by SseChunkWriter (see
-      // functions/_lib/resumableSse.mjs) — assigns the client-facing
-      // chunkIndex/finalChunkIndex the frontend's resume handshake reads.
-      // The streamClosed guard + enqueue try/catch that used to live
-      // inside sendEvent() move into this write callback unchanged: they
-      // guard this Worker invocation's own controller, which
-      // SseChunkWriter is deliberately agnostic to (see its constructor's
-      // `write` param doc) — not a loss of resilience, just relocated one
-      // level out to where streamClosed/controller already live.
-      const sseWriter = new SseChunkWriter((chunk) => {
+      function sendEvent(obj) {
         if (streamClosed) return;
-        try { controller.enqueue(chunk); }
+        try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`)); }
         catch { streamClosed = true; }
-      }, encoder);
+      }
       function relay(text) {
-        if (text) { sseWriter.writeDelta(text); sentAnything = true; }
+        if (text) { sendEvent({ delta: text }); sentAnything = true; }
       }
       function deadlineOrBudgetExceeded() {
         if (budget.remaining() <= 0) return 'SUBREQUEST_BUDGET_EXHAUSTED';
@@ -1472,8 +1462,9 @@ export async function onRequestPost(context) {
             : (lastResult.errStatus === 'RESOURCE_EXHAUSTED' || lastResult.errStatus === 'RATE_LIMIT_EXCEEDED') ? 429
             : (lastResult.httpStatus && lastResult.httpStatus !== 0) ? lastResult.httpStatus
             : 502;
-          sseWriter.writeError(buildFriendlyVisionError(lastResult, likelyArabic), { status });
-          sseWriter.writeDone({
+          sendEvent({ error: buildFriendlyVisionError(lastResult, likelyArabic), status });
+          sendEvent({
+            done: true,
             extracted: extractionResult?.extracted ?? undefined,
             extractStatus: extractionResult?.status ?? undefined,
           });
@@ -1505,7 +1496,8 @@ export async function onRequestPost(context) {
       // endpoint even though chat.js has surfaced it since the earlier fix.
       const visionFinishReason = winner && winner.finishReason;
       const visionTruncated = visionFinishReason === 'MAX_TOKENS';
-      sseWriter.writeDone({
+      sendEvent({
+        done: true,
         source: winner ? `gemini-${winner.keyTag}${winner.modelTag}` : undefined,
         detail: detailReq,
         finishReason: visionFinishReason,
