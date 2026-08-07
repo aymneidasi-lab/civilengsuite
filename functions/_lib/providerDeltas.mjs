@@ -17,7 +17,17 @@ export function extractGeminiDelta(dataStr) {
     .map((p) => p.text)
     .join('');
   const finishReason = candidate?.finishReason || '';
-  return { text, finished: finishReason !== '', finishReason };
+  // [PATCH — search bridge] groundingMetadata is only present on grounded
+  // responses (google_search tool declared AND the model actually chose to
+  // search this turn) and, empirically for every other per-chunk field this
+  // function already reads (finishReason included), is not guaranteed to be
+  // filled in until the terminal chunk. Surfaced as `null` rather than
+  // omitted so callers can `d.groundingMetadata ?? previous` without an
+  // `in`/`hasOwnProperty` check. Groq/OpenRouter/Workers AI extractors below
+  // never set this key — runStream()'s handling of it is a plain truthy
+  // check, so it's a no-op for those three providers, not a special case.
+  const groundingMetadata = candidate?.groundingMetadata || null;
+  return { text, finished: finishReason !== '', finishReason, groundingMetadata };
 }
 
 // Groq + OpenRouter (OpenAI-compatible chat.completions, stream:true).
