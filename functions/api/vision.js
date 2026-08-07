@@ -567,20 +567,9 @@ function buildTextFilesBlock(files) {
 // this file's own MAX_BODY_BYTES (1,800,000 — see above) already caps the
 // realistic ceiling for the request as a whole once image payloads are
 // factored in.
+const DEV_KV_MAX_FILES_PER_MESSAGE   = 3;
 const DEV_KV_MAX_TOTAL_CONTEXT_CHARS = 350000;
 
-// REMOVED (v37): DEV_KV_MAX_FILES_PER_MESSAGE, formerly hardcoded to 3 —
-// same value, same non-issue, same fix as chat.js's identical constant;
-// see that file's own removal comment for the full Cloudflare-subrequest-
-// budget reasoning (50 external/invocation vs. 1,000 Cloudflare-service/
-// invocation — KV calls draw from the latter). This file's own
-// SUBREQUEST_BUDGET_VISION comment above already independently states the
-// same 50-external-subrequest figure, "verified 2026-07" — consistent
-// with that. This function never had an isDeveloperMode gate (see block
-// comment above) because it didn't need one: the count cap was gating a
-// path already gated by possession of a fileId, obtainable only via
-// authenticated dev-upload.js — a gate behind a gate, same shape as
-// chat.js's version, same fix.
 async function resolveKvFiles(body, env) {
   const ids = Array.isArray(body?.kvFileIds)
     ? body.kvFileIds.filter((x) => typeof x === 'string' && x)
@@ -589,11 +578,16 @@ async function resolveKvFiles(body, env) {
   if (!env.CES_DEV_UPLOADS) {
     return { ok: false, error: 'CES_DEV_UPLOADS KV namespace is not bound on the server.' };
   }
+  if (ids.length > DEV_KV_MAX_FILES_PER_MESSAGE) {
+    return { ok: false, error: `Maximum ${DEV_KV_MAX_FILES_PER_MESSAGE} uploaded files per message.` };
+  }
 
-  // Concurrent GET, same rationale as chat.js's identical block: the old
-  // sequential per-id loop made wall-clock cost scale linearly with file
-  // count, invisible at the old 3-file ceiling but not once it's gone.
-  const settled = await Promise.all(ids.map(async (fileId) => {
+  const files = [];
+  let totalChars = 0;
+  for (const fileId of ids.slice(0, DEV_KV_MAX_FILES_PER_MESSAGE)) {
+    // One retry with a short delay — KV writes are eventually consistent
+    // (up to ~60s globally). See chat.js's identical comment for the full
+    // rationale; unchanged here.
     let raw = null;
     for (let attempt = 0; attempt < 2 && raw === null; attempt++) {
       if (attempt > 0) await new Promise((r) => setTimeout(r, 400));
@@ -606,7 +600,6 @@ async function resolveKvFiles(body, env) {
     if (!raw) {
       return {
         ok: false,
-        fileId,
         error: `Uploaded file ${fileId} was not found — it may have expired (uploads are ` +
           `deleted after 5 minutes). Please attach it again.`,
       };
@@ -615,41 +608,10 @@ async function resolveKvFiles(body, env) {
     try {
       parsed = JSON.parse(raw);
     } catch {
-      return { ok: false, fileId, error: `Uploaded file ${fileId} is corrupted. Please attach it again.` };
+      return { ok: false, error: `Uploaded file ${fileId} is corrupted. Please attach it again.` };
     }
     const name = typeof parsed?.name === 'string' && parsed.name ? parsed.name : 'attachment.txt';
-    const content = typeof parsed?.content === 'string' ? parsed.content : '';
-    return { ok: true, fileId, name, content };
-  }));
-
-  // Fail fast on the first bad id in ids[] order, deterministic regardless
-  // of settle order. Returns before any deletes fire, same improvement as
-  // chat.js: a sibling id's failure no longer deletes-then-discards a
-  // successfully-read file's KV entry.
-  const firstBad = settled.find((r) => !r.ok);
-  if (firstBad) return { ok: false, error: firstBad.error };
-
-  // Best-effort delete-after-read, concurrent, allSettled so one KV
-  // hiccup can't fail the batch — same contract as the original per-file
-  // try/catch.
-  const deletions = await Promise.allSettled(
-    settled.map((r) => env.CES_DEV_UPLOADS.delete(`devupload:${r.fileId}`))
-  );
-  deletions.forEach((d, i) => {
-    if (d.status === 'rejected') {
-      console.warn('[vision.js] CES_DEV_UPLOADS.delete (non-fatal):', settled[i].fileId, d.reason?.message);
-    }
-  });
-
-  // Sequential, order-preserving budget pass — see chat.js's identical
-  // comment for why this stays synchronous. NOTE: still no originalLength
-  // field — this file's buildTextFilesBlock() uses the older generic
-  // truncation notice, not chat.js's percentage-based one, so it doesn't
-  // read that field (unchanged from the pre-v37 version).
-  const files = [];
-  let totalChars = 0;
-  for (const r of settled) {
-    let content = r.content;
+    let content = typeof parsed?.content === 'string' ? parsed.content : '';
     let truncated = false;
     const roomLeft = DEV_KV_MAX_TOTAL_CONTEXT_CHARS - totalChars;
     if (roomLeft <= 0) break;
@@ -658,7 +620,19 @@ async function resolveKvFiles(body, env) {
       truncated = true;
     }
     totalChars += content.length;
-    files.push({ name: r.name, content, truncated });
+    // NOTE: no originalLength field — this file's buildTextFilesBlock()
+    // above uses the older generic truncation notice, not chat.js's
+    // percentage-based one, so it doesn't read that field. If this
+    // file's buildTextFilesBlock() is ever upgraded to match chat.js's,
+    // add originalLength: content.length (captured before the slice
+    // above) here too.
+    files.push({ name, content, truncated });
+
+    try {
+      await env.CES_DEV_UPLOADS.delete(`devupload:${fileId}`);
+    } catch (err) {
+      console.warn('[vision.js] CES_DEV_UPLOADS.delete (non-fatal):', err.message);
+    }
   }
   return { ok: true, files };
 }
@@ -687,151 +661,6 @@ instead of guessing a specific number.
 Reply in the SAME language as the person's own message (Arabic or English) — never mix both in one \
 reply. Keep the reply focused and practical: this is a working engineer reading a chat reply, not a \
 report.`;
-
-// ── Structured extraction (Footing Pro autofill) ─────────────────────────
-// Deliberately a SEPARATE call from VISION_SYSTEM_PROMPT's conversational
-// reply, not a trailing-JSON-line convention appended to it. Two reasons,
-// both load-bearing:
-//   1. responseMimeType:'application/json' + responseSchema makes Gemini
-//      emit ONLY schema-conformant JSON for the entire turn (ai.google.dev
-//      "Structured output" guide, current as of 2026-08) — it cannot also
-//      stream the Arabic/English engineering explanation in that same
-//      response. A prompt-only "put JSON on the last line" convention is
-//      the documented fallback for when responseSchema ISN'T used, and
-//      Google's own docs are explicit that this fallback is NOT guaranteed
-//      to produce clean, parseable JSON — schema mode exists specifically
-//      to replace it.
-//   2. Even with schema mode, keep this prompt SMALL and dedicated rather
-//      than reusing VISION_SYSTEM_PROMPT: a reported bug (Google AI
-//      Developer Forum thread opened ~2026-07-29) has responseSchema + a
-//      large, mostly-static system prompt on the gemini-3.x family
-//      occasionally returning content belonging to a DIFFERENT prior
-//      request. No confirmation this is fixed — a small, purpose-built
-//      prompt is a different shape than the repro and is also just
-//      cheaper/faster for a 6-field lookup. Treat the result as unverified
-//      model output regardless (sanitizeExtracted below), same posture as
-//      any other Gemini response, bug or not.
-const FOOTING_EXTRACT_FIELDS = ['w', 'l', 'q', 'd', 'as_top', 'as_bot'];
-// Fields that cannot legitimately be zero on a real footing — a 0 here
-// means the model emitted a number where it should have emitted null.
-// as_top/as_bot are excluded on purpose: zero top or zero bottom steel is
-// a real design value (unreinforced footing, or no moment reversal).
-const FOOTING_EXTRACT_NONZERO_FIELDS = new Set(['w', 'l', 'q', 'd']);
-const FOOTING_EXTRACT_UNITS = ['mm', 'cm', 'm', 'in', 'ft'];
-const FOOTING_EXTRACT_SYSTEM_PROMPT =
-  'Extract isolated-footing design values visible in the image(s): plan width (w), ' +
-  'plan length (l), applied load or allowable bearing pressure (q), effective depth ' +
-  'or main bar diameter (d), top reinforcement area (as_top), bottom reinforcement ' +
-  'area (as_bot), and the unit system the drawing itself uses (units). Read values ' +
-  'exactly as labeled on the drawing; do not convert or unit-normalize them. If a ' +
-  'value is not visible or not legible, return null for it — never guess or ' +
-  'substitute a default, and never invent a unit system that is not shown.';
-// propertyOrdering pins field order explicitly — Gemini's docs warn a
-// responseSchema/prompt property-order mismatch can degrade output
-// quality, and the REST default (alphabetical, required-first) would
-// otherwise scramble this relative to the prompt's own w/l/q/d/... order.
-const FOOTING_EXTRACT_SCHEMA = {
-  type: 'object',
-  properties: {
-    ...Object.fromEntries(FOOTING_EXTRACT_FIELDS.map(f => [f, { type: 'number', nullable: true }])),
-    units: { type: 'string', nullable: true, enum: FOOTING_EXTRACT_UNITS },
-  },
-  propertyOrdering: [...FOOTING_EXTRACT_FIELDS, 'units'],
-  required: [...FOOTING_EXTRACT_FIELDS, 'units'],
-};
-const FOOTING_EXTRACT_TIMEOUT_MS   = 8_000;  // per attempt — small schema-locked lookup, not open-ended prose
-const FOOTING_EXTRACT_OVERALL_CAP_MS = 12_000; // hard ceiling regardless of attempt count, see runFootingExtraction
-
-function buildFootingExtractPayloadString(imageParts, mediaResolution) {
-  return JSON.stringify({
-    system_instruction: { parts: [{ text: FOOTING_EXTRACT_SYSTEM_PROMPT }] },
-    contents: [{ role: 'user', parts: imageParts }],
-    generationConfig: {
-      responseMimeType: 'application/json',
-      responseSchema: FOOTING_EXTRACT_SCHEMA,
-      maxOutputTokens: 256, // six numbers + a unit string — generous headroom, still tiny
-      thinkingConfig: { thinkingLevel: 'LOW' }, // structured lookup, not a judgment call
-      mediaResolution,
-    },
-  });
-}
-
-// Never throws. Unknown/extra keys dropped. Non-finite/non-numeric values,
-// and zero on a NONZERO_FIELDS entry, sanitize to null rather than passing
-// through — a malformed or bug-triggered model response can never reach
-// the calculator looking like a real reading.
-function sanitizeExtractedFooting(parsed) {
-  const out = {};
-  for (const f of FOOTING_EXTRACT_FIELDS) {
-    const v = parsed && typeof parsed === 'object' ? parsed[f] : undefined;
-    const num = typeof v === 'number' && Number.isFinite(v) ? v : null;
-    out[f] = num !== null && FOOTING_EXTRACT_NONZERO_FIELDS.has(f) && num === 0 ? null : num;
-  }
-  const u = parsed && typeof parsed === 'object' ? parsed.units : undefined;
-  out.units = typeof u === 'string' && FOOTING_EXTRACT_UNITS.includes(u) ? u : null;
-  return out;
-}
-
-// Handles the well-formed case (bare JSON — schema mode should never emit
-// a fence) and defensively strips one anyway per the bug note above.
-function parseFootingExtractReply(reply) {
-  if (typeof reply !== 'string' || !reply.trim()) return { ok: false, reason: 'EMPTY' };
-  let text = reply.trim();
-  const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  if (fenced) text = fenced[1].trim();
-  let parsed;
-  try { parsed = JSON.parse(text); }
-  catch { return { ok: false, reason: 'BAD_JSON' }; }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return { ok: false, reason: 'NOT_AN_OBJECT' };
-  }
-  return { ok: true, extracted: sanitizeExtractedFooting(parsed) };
-}
-
-// Best-effort side-channel: tries up to 2 keys from the SAME pool/budget
-// the conversational call uses (sequential, not raced — this is enrichment,
-// not the primary reply, so it doesn't warrant its own concurrent-race
-// machinery). Bounded overall by FOOTING_EXTRACT_OVERALL_CAP_MS regardless
-// of how the two attempts split that time, so a hung key can never push
-// the terminal SSE event out by more than that ceiling. NEVER throws and
-// NEVER returns a status that blocks or delays the conversational reply
-// the caller already relayed — this function's result is only merged into
-// the terminal `done` event, never the `delta` stream.
-async function runFootingExtraction(geminiPool, budget, imageParts, mediaResolution) {
-  const payloadString = buildFootingExtractPayloadString(imageParts, mediaResolution);
-  async function attempt() {
-    try {
-      for (const { key } of geminiPool.slice(0, 2)) {
-        if (budget.remaining() <= 0) return { status: 'budget_exhausted', extracted: null };
-        const res = await callGeminiVisionOnce(key, GEMINI_MODEL_FALLBACK, payloadString, budget, FOOTING_EXTRACT_TIMEOUT_MS);
-        if (res.ok) {
-          const parsed = parseFootingExtractReply(res.reply);
-          if (parsed.ok) return { status: 'ok', extracted: parsed.extracted };
-          console.warn('[vision.js] footing extraction: schema-mode reply failed to parse:', parsed.reason);
-          return { status: 'parse_failed', extracted: null };
-        }
-        if (res.errStatus === 'SUBREQUEST_BUDGET_EXHAUSTED') return { status: 'budget_exhausted', extracted: null };
-        // otherwise fall through and try the next key (transient/HTTP/timeout failure)
-      }
-      return { status: 'all_attempts_failed', extracted: null };
-    } catch (err) {
-      // Defensive only — callGeminiVisionOnce/parseFootingExtractReply/
-      // sanitizeExtractedFooting are all written to never throw, but this
-      // function's caller (the Promise executor below) has no rejection
-      // handler on attempt()'s result, so a stray throw here MUST be
-      // caught locally rather than left to become an unhandled rejection.
-      console.warn('[vision.js] footing extraction: attempt() threw:', err?.message);
-      return { status: 'error', extracted: null };
-    }
-  }
-  // resolve() is the only exit from this executor — attempt() can no
-  // longer reject (see try/catch above), so this Promise itself can never
-  // reject either; the caller can safely `await` it with no try/catch.
-  return new Promise(resolve => {
-    const t = setTimeout(() => resolve({ status: 'overall_cap_exceeded', extracted: null }), FOOTING_EXTRACT_OVERALL_CAP_MS);
-    attempt().then(r => { clearTimeout(t); resolve(r); });
-  });
-}
 
 function isArabicText(str) {
   return /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/.test(str || '');
@@ -1006,7 +835,7 @@ async function readBodyWithCap(request, capBytes) {
 // ── Provider call — single attempt, no in-place backoff-retry (see header
 // rationale). payloadString is pre-built ONCE by the caller and reused
 // verbatim across every key/model attempt; only the URL varies. ─────────
-async function callGeminiVisionOnce(apiKey, model, payloadString, budget, timeoutMs = PER_ATTEMPT_TIMEOUT_MS) {
+async function callGeminiVisionOnce(apiKey, model, payloadString, budget) {
   if (!budget.take()) {
     return { ok: false, httpStatus: 0, errStatus: 'SUBREQUEST_BUDGET_EXHAUSTED', errBody: '' };
   }
@@ -1016,7 +845,7 @@ async function callGeminiVisionOnce(apiKey, model, payloadString, budget, timeou
     res = await fetchWithTimeout(
       `${GEMINI_API_URL(model)}?key=${apiKey}`,
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payloadString },
-      timeoutMs,
+      PER_ATTEMPT_TIMEOUT_MS,
     );
   } catch (err) {
     const isTimeout = err.name === 'AbortError';
@@ -1284,14 +1113,6 @@ export async function onRequestPost(context) {
   const textFilesBlock = buildTextFilesBlock(textFilesResult.files.concat(kvFilesResult.files));
   const modelMessageText = userMessage + textFilesBlock;
 
-  // 5e. Structured-extraction opt-in — NEW. Only footing_pro's "read from
-  //     photo" autofill sends this; the general vision chat (this same
-  //     endpoint, called from pc_suite and elsewhere) never sets it, so it
-  //     never pays the extra subrequest/latency cost below. Closed allow-
-  //     list of one value on purpose — this is a route selector, not free
-  //     text, so anything else is silently ignored rather than erroring.
-  const extractMode = body?.extract === 'footing' ? 'footing' : null;
-
   // 6. Build the outbound Gemini payload ONCE — identical across every
   //    key/model attempt (only the URL varies), see header note on why
   //    this matters under a 10ms/invocation CPU ceiling. Casing verified
@@ -1366,17 +1187,6 @@ export async function onRequestPost(context) {
   const budget = makeFetchBudget(SUBREQUEST_BUDGET_VISION);
   const startTime = Date.now();
 
-  // Fires immediately, alongside (not after) the conversational race below
-  // — same geminiPool/budget, so it draws against the SAME
-  // SUBREQUEST_BUDGET_VISION ceiling rather than a separate allowance.
-  // Awaited once, right before the terminal SSE event is built (both the
-  // early-error and normal-completion paths converge there) — never joins
-  // the `delta` relay, so it cannot leak into what the user sees mid-
-  // stream even in principle.
-  const extractionPromise = extractMode === 'footing'
-    ? runFootingExtraction(geminiPool, budget, imageParts, MEDIA_RESOLUTION)
-    : null;
-
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
@@ -1447,13 +1257,6 @@ export async function onRequestPost(context) {
         if (tierLastResult) lastResult = tierLastResult;
       }
 
-      // Single await point for both paths below — by the time the primary/
-      // fallback loop above has finished, every delta the conversational
-      // reply will ever produce has already been relayed (or the winner
-      // failed outright), so waiting here adds latency only to the
-      // terminal event, never to the visible token stream.
-      const extractionResult = extractMode === 'footing' ? await extractionPromise : null;
-
       if (!winner || !winner.ok) {
         if (!sentAnything) {
           const status =
@@ -1463,11 +1266,7 @@ export async function onRequestPost(context) {
             : (lastResult.httpStatus && lastResult.httpStatus !== 0) ? lastResult.httpStatus
             : 502;
           sendEvent({ error: buildFriendlyVisionError(lastResult, likelyArabic), status });
-          sendEvent({
-            done: true,
-            extracted: extractionResult?.extracted ?? undefined,
-            extractStatus: extractionResult?.status ?? undefined,
-          });
+          sendEvent({ done: true });
           closeStream();
           return;
         }
@@ -1503,12 +1302,6 @@ export async function onRequestPost(context) {
         finishReason: visionFinishReason,
         truncated: visionTruncated,
         interrupted: !!(winner && winner.interrupted),
-        // undefined when extractMode wasn't requested — JSON.stringify
-        // drops undefined keys, so a plain chat turn's done event is
-        // byte-identical to today's, same as `source`'s existing pattern
-        // above for a no-winner turn.
-        extracted: extractionResult?.extracted ?? undefined,
-        extractStatus: extractionResult?.status ?? undefined,
       });
       closeStream();
     },
