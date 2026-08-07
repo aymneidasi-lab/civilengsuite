@@ -1208,6 +1208,7 @@ import {
 import { raceKeyPool } from '../_lib/raceKeyPool.mjs';
 import { callGeminiStreaming, callOpenAiCompatStreaming, callWorkersAIStreaming } from '../_lib/streamingProviders.mjs';
 import { StreamingSanitizer } from '../_lib/streamSanitizer.mjs';
+import { SseChunkWriter } from '../_lib/resumableSse.mjs'; // [PATCH] resume-mechanism chunkIndex writer
 import { assertPromptBudget } from '../_lib/promptBudget.mjs';
 
 
@@ -5370,11 +5371,20 @@ export async function onRequestPost(context) {
       let streamClosed = false;
 
       function closeStream() { if (!streamClosed) { streamClosed = true; controller.close(); } }
-      function sendEvent(obj) {
+      // [PATCH] Manual `data: ...` framing replaced by SseChunkWriter (see
+      // functions/_lib/resumableSse.mjs) — assigns the client-facing
+      // chunkIndex/finalChunkIndex the frontend's resume handshake reads.
+      // The streamClosed guard + enqueue try/catch that used to live
+      // inside sendEvent() move into this write callback unchanged: they
+      // guard this Worker invocation's own controller, which
+      // SseChunkWriter is deliberately agnostic to (see its constructor's
+      // `write` param doc) — not a loss of resilience, just relocated one
+      // level out to where streamClosed/controller already live.
+      const sseWriter = new SseChunkWriter((chunk) => {
         if (streamClosed) return; // a losing racer's callback arrived after we already finished
-        try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`)); }
+        try { controller.enqueue(chunk); }
         catch { streamClosed = true; } // controller already closed by the runtime underneath us
-      }
+      }, encoder);
       const REDACT_MSG = isArabicText(userMessage)
         ? 'الموضوع ده متعلق ببنية الموقع الداخلية، وأنا مش بتكلم فيه بره وضع المطور. تحب نرجع لسؤالك الهندسي؟'
         : "That's about the site's internal setup, which isn't something I discuss outside developer mode. Want to get back to your engineering question?";
@@ -5387,7 +5397,7 @@ export async function onRequestPost(context) {
       });
       function relay(deltaText) {
         const { emit, retracted } = sanitizer.push(deltaText);
-        if (emit) { sendEvent({ delta: emit }); sentAnything = true; }
+        if (emit) { sseWriter.writeDelta(emit); sentAnything = true; }
         return retracted;
       }
 
@@ -5437,8 +5447,8 @@ export async function onRequestPost(context) {
         );
 
         if (retractedThisTier) {
-          sendEvent({ redacted: true, reply: REDACT_MSG });
-          sendEvent({ done: true });
+          sseWriter.writeRedacted(REDACT_MSG);
+          sseWriter.writeDone({});
           closeStream();
           return;
         }
@@ -5492,8 +5502,8 @@ export async function onRequestPost(context) {
           if (relay(text)) workersRetracted = true;
         }, { maxTokens: 2048 });
         if (workersRetracted) {
-          sendEvent({ redacted: true, reply: REDACT_MSG });
-          sendEvent({ done: true });
+          sseWriter.writeRedacted(REDACT_MSG);
+          sseWriter.writeDone({});
           closeStream();
           return;
         }
@@ -5550,8 +5560,8 @@ export async function onRequestPost(context) {
               { concurrency: RACE_CONCURRENCY, shouldStop: () => budget.remaining() <= 0 || groqRetracted },
             );
             if (groqRetracted) {
-              sendEvent({ redacted: true, reply: REDACT_MSG });
-              sendEvent({ done: true });
+              sseWriter.writeRedacted(REDACT_MSG);
+              sseWriter.writeDone({});
               closeStream();
               return;
             }
@@ -5614,8 +5624,8 @@ export async function onRequestPost(context) {
               { concurrency: RACE_CONCURRENCY, shouldStop: () => budget.remaining() <= 0 || orRetracted },
             );
             if (orRetracted) {
-              sendEvent({ redacted: true, reply: REDACT_MSG });
-              sendEvent({ done: true });
+              sseWriter.writeRedacted(REDACT_MSG);
+              sseWriter.writeDone({});
               closeStream();
               return;
             }
@@ -5635,8 +5645,8 @@ export async function onRequestPost(context) {
 
       // 10. All layers exhausted, nothing ever reached the client.
       if (!finalWinResult && !sentAnything) {
-        sendEvent({ error: buildFriendlyError(lastProviderResult, workersAttempted, userMessage) });
-        sendEvent({ done: true });
+        sseWriter.writeError(buildFriendlyError(lastProviderResult, workersAttempted, userMessage));
+        sseWriter.writeDone({});
         closeStream();
         return;
       }
@@ -5647,7 +5657,7 @@ export async function onRequestPost(context) {
       // never reach the client, since push() alone never emits that trailing
       // margin (see streamSanitizer.mjs).
       const { emit: trailingEmit, finalText } = sanitizer.finish();
-      if (trailingEmit) sendEvent({ delta: trailingEmit });
+      if (trailingEmit) sseWriter.writeDelta(trailingEmit);
       logFactDrift(scanForFactDrift(finalText), { provider: sourceTag, isFirstTurn, isDeveloperMode });
       // [PATCH] BUG 3/4 FIX — surface truncation to the client instead of
       // only console.warn-ing it server-side (the old behaviour: detected,
@@ -5672,8 +5682,7 @@ export async function onRequestPost(context) {
       const sources = finalWinResult
         ? extractGroundingSources(finalWinResult.groundingMetadata)
         : [];
-      sendEvent({
-        done: true,
+      sseWriter.writeDone({
         source: sourceTag,
         truncated,
         interrupted: !!(finalWinResult && finalWinResult.interrupted),
