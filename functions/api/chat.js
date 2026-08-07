@@ -1208,9 +1208,7 @@ import {
 import { raceKeyPool } from '../_lib/raceKeyPool.mjs';
 import { callGeminiStreaming, callOpenAiCompatStreaming, callWorkersAIStreaming } from '../_lib/streamingProviders.mjs';
 import { StreamingSanitizer } from '../_lib/streamSanitizer.mjs';
-import { SseChunkWriter } from '../_lib/resumableSse.mjs'; // [PATCH] resume-mechanism chunkIndex writer
 import { assertPromptBudget } from '../_lib/promptBudget.mjs';
-import { NotationNormalizer } from '../_lib/notationNormalizer.mjs';
 
 
 // ── Per-isolate dead-key skip cache (v25) ─────────────────────────────────
@@ -2138,11 +2136,9 @@ LANGUAGE RULE — CRITICAL
   NEVER use Modern Standard Arabic (فصحى). This is a chat with an engineer, not a press release.
 • English message → reply ENTIRELY in English.
 • Never mix languages in the same reply. Detect by the script of the user's message.
-• Keep code/standard names and units in their standard form in both languages — never
-  translate: ACI 318-19, ECP 203, ASCE 7, EPS 2012, kN, kPa, MPa.
-• Symbols like As, ld, fcu, qallowable, f'c never get translated either, but they DO get
-  reformatted — see ENGINEERING NOTATION below for the required Unicode-subscript form
-  (As → Aˢ, not literal "As"; f'c → f'ᶜ, prime stays, only the trailing letter subscripts).
+• Keep technical terms in their standard form in both languages:
+  ACI 318-19, ECP 203, ASCE 7, EPS 2012, kN, kPa, MPa, qallowable, As, ld, fcu, f'c
+  — do not translate these.
 
 ════════════════════════════════════════
 STATE RESUME RULE — CRITICAL
@@ -2218,43 +2214,6 @@ the alternative briefly, then leave the pick to the user — never a flat list w
 Egyptian-Arabic worked example (match this register, not فصحى):
 "يا هندسة، عشان تتفادى الـ **punching shear** في الـ **combined footing**، يفضل تزود الـ
 **effective depth** أو تستخدم **drop panel**. إيه رأيك؟ 🛠️"
-
-════════════════════════════════════════
-ENGINEERING NOTATION — NO LATEX, UNICODE SUBSCRIPT ONLY (CRITICAL)
-════════════════════════════════════════
-This chat has no math renderer (no MathJax, no KaTeX). Any LaTeX you write — $...$, $$...$$,
-or bare commands like \\frac{}{}, \\times, \\phi — is displayed to the user as raw, broken
-source text (visible dollar signs, backslashes, braces). This is a hard product constraint,
-not a style preference.
-
-1. NEVER use LaTeX. No $ or $$ delimiters, no backslash commands — not even inside code
-   blocks, not even if the user asks for "LaTeX format." If asked for LaTeX explicitly,
-   say once this chat can't render it and give the plain-text engineering form instead.
-
-2. Every subscripted symbol is [base letter, normal size] + [subscript word, small raised
-   letters below] — never an underscore, never braces, never a caret.
-   Letters (raised small form — subscript part only):
-   aᵃ  bᵇ  cᶜ  dᵈ  eᵉ  fᶠ  gᵍ  hʰ  iⁱ  jʲ  kᵏ  lˡ  mᵐ  nⁿ  oᵒ  pᵖ  rʳ  sˢ  tᵗ  uᵘ  vᵛ  wʷ  xˣ  yʸ  zᶻ
-   ('q' has no small-letter Unicode form — keep it normal size on the rare occasion it's
-   needed as the subscript itself; it's never a base letter that takes a subscript.)
-   Digits (lowered subscript form — numeric subscripts only):
-   0₀ 1₁ 2₂ 3₃ 4₄ 5₅ 6₆ 7₇ 8₈ 9₉
-   Compose any symbol the same way — worked examples:
-   fcu → fᶜᵘ    fy → fʸ    As → Aˢ    Ac → Aᶜ    Pu → Pᵘ    bo → bᵒ    Mu → Mᵘ    Vu → Vᵘ    qall → qᵃˡˡ    wu → wᵘ    Ec → Eᶜ    ld → lᵈ
-   Standard Greek letters — type the character directly, never spell out or \\escape:
-   φ ρ γ λ μ σ τ β θ Δ  (e.g. φMⁿ ≥ Mᵘ, ρᵐⁱⁿ, β₁)
-
-3. Wrap every complete equation or calculated expression in square brackets as one unit:
-   [fᶜᵘ = 0.85 x 30 = 25.5 N/mm²]. This keeps the expression visually intact
-   regardless of Arabic (RTL) or English (LTR) direction — apply it in both languages.
-
-4. Keep each calculated line on ONE line, left to right — never re-flow a formula mid-
-   expression. Use the plain letter "x" (or "***") for multiplication, never "×" or
-   "\\times" — plain "x" is unambiguous across every model and font in this pipeline.
-   Type ≤, ≥, ± directly — never \\leq, \\geq, \\pm.
-
-Before sending: if the draft still has "$", "\\", or a bare underscore-subscript like "fcu"
-or "fy", rewrite it in this format first.
 
 ════════════════════════════════════════
 ARABIC DIALECT TRAINING — EGYPTIAN (عامية مصرية)
@@ -3609,14 +3568,8 @@ and steer back to structural engineering / Footing Pro.
 LANGUAGE RULE — CRITICAL (re-check every reply, never drift):
 • Arabic message → reply ENTIRELY in Arabic (Egyptian dialect, عامية مصرية). NEVER فصحى.
 • English message → reply ENTIRELY in English. Never mix languages in one reply.
-• Keep code/standard names and units as-is in both languages: ACI 318-19, ECP 203, ASCE 7,
-  EPS 2012, kN, kPa, MPa. Symbols (As, ld, fcu, qallowable, f'c) aren't translated either, but
-  use the Unicode-subscript form from NOTATION below, not bare ASCII.
-
-NOTATION (still applies): no LaTeX/$ ever. Subscripts use small raised letters, not
-underscore — fᶜᵘ, fʸ, Aˢ, Aᶜ, Pᵘ, Mᵘ, Vᵘ, bᵒ (same
-pattern for any other symbol). Wrap full equations in [ ]. One line per calc. Multiply
-with "x", not "×".
+• Keep technical terms as-is in both languages: ACI 318-19, ECP 203, ASCE 7, EPS 2012, kN, kPa,
+  MPa, qallowable, As, ld, fcu, f'c.
 
 WEB SEARCH: still available every turn — same rules as established earlier this session,
 condensed to one line: cite by source not mechanism, admit it plainly if asked directly, say so
@@ -3828,11 +3781,7 @@ BEHAVIOUR:
 • If you lack information: direct the user to Eng. Aymn Asi at aymneidasi@gmail.com
   or WhatsApp +201287232413 — do not guess. Note: the site's "Get in Touch" form does
   NOT give a private reply (answers go public as FAQ entries; trivial msgs get none).
-• Bring up purchase steps only when the user shows genuine buying intent.
-
-No LaTeX, no $ signs, ever. Write symbols like this: fcu→fᶜᵘ fy→fʸ As→Aˢ
-Ac→Aᶜ Pu→Pᵘ Mu→Mᵘ Vu→Vᵘ bo→bᵒ. Put full equations in [brackets]. Use "x" to
-multiply, never ×.`;
+• Bring up purchase steps only when the user shows genuine buying intent.`;
 }
 
 // ── Developer / Programmer Mode prompt extension ──────────────────────────
@@ -5408,20 +5357,11 @@ export async function onRequestPost(context) {
       let streamClosed = false;
 
       function closeStream() { if (!streamClosed) { streamClosed = true; controller.close(); } }
-      // [PATCH] Manual `data: ...` framing replaced by SseChunkWriter (see
-      // functions/_lib/resumableSse.mjs) — assigns the client-facing
-      // chunkIndex/finalChunkIndex the frontend's resume handshake reads.
-      // The streamClosed guard + enqueue try/catch that used to live
-      // inside sendEvent() move into this write callback unchanged: they
-      // guard this Worker invocation's own controller, which
-      // SseChunkWriter is deliberately agnostic to (see its constructor's
-      // `write` param doc) — not a loss of resilience, just relocated one
-      // level out to where streamClosed/controller already live.
-      const sseWriter = new SseChunkWriter((chunk) => {
+      function sendEvent(obj) {
         if (streamClosed) return; // a losing racer's callback arrived after we already finished
-        try { controller.enqueue(chunk); }
+        try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`)); }
         catch { streamClosed = true; } // controller already closed by the runtime underneath us
-      }, encoder);
+      }
       const REDACT_MSG = isArabicText(userMessage)
         ? 'الموضوع ده متعلق ببنية الموقع الداخلية، وأنا مش بتكلم فيه بره وضع المطور. تحب نرجع لسؤالك الهندسي؟'
         : "That's about the site's internal setup, which isn't something I discuss outside developer mode. Want to get back to your engineering question?";
@@ -5432,16 +5372,9 @@ export async function onRequestPost(context) {
         bannerDevTerms: BANNER_DEVMODE_TERMS,
         bannerConfirmTerms: BANNER_CONFIRM_TERMS,
       });
-      // Composed AFTER the confidentiality gate, same push()/finish() shape
-      // so the two stages chain without special-casing: sanitizer decides
-      // what may be sent at all; notation only reshapes text already
-      // cleared to go (fcu -> fᶜᵘ, bare $ stripped, etc. -- see
-      // functions/_lib/notationNormalizer.mjs for the holdback contract).
-      const notation = new NotationNormalizer();
       function relay(deltaText) {
         const { emit, retracted } = sanitizer.push(deltaText);
-        const { emit: notated } = notation.push(emit || '');
-        if (notated) { sseWriter.writeDelta(notated); sentAnything = true; }
+        if (emit) { sendEvent({ delta: emit }); sentAnything = true; }
         return retracted;
       }
 
@@ -5468,11 +5401,6 @@ export async function onRequestPost(context) {
         // being awaited as real candidates immediately, not just once their
         // own request eventually finishes.
         let committedCanceller = null;
-        // [PATCH] progress heartbeat — see accompanying patch notes. Purely
-        // additive: an SSE frame the client can choose to ignore (the
-        // existing handleEventData() already no-ops on unrecognized
-        // fields). Does not touch sanitizer/budget/blocklist logic.
-        sseWriter.writeProgress('gemini', { tier: modelTier === GEMINI_MODEL_PRIMARY ? 'primary' : 'fallback' });
         const { winner, lastResult } = await raceKeyPool(
           tierPool,
           async ({ key: gKey, originalIndex }, signal, cancelOthers) => {
@@ -5496,8 +5424,8 @@ export async function onRequestPost(context) {
         );
 
         if (retractedThisTier) {
-          sseWriter.writeRedacted(REDACT_MSG);
-          sseWriter.writeDone({});
+          sendEvent({ redacted: true, reply: REDACT_MSG });
+          sendEvent({ done: true });
           closeStream();
           return;
         }
@@ -5546,14 +5474,13 @@ export async function onRequestPost(context) {
         // 7. WORKERS AI LAYER — unchanged routing from v10 (binding call, not
         //    a fetch() subrequest, so it does not draw from `budget`).
         workersAttempted = !!env.AI;
-        if (workersAttempted) sseWriter.writeProgress('workers-ai'); // [PATCH] progress heartbeat
         let workersRetracted = false;
         const layerWorkers = await callWorkersAIStreaming(env.AI, workersMsgs, (text) => {
           if (relay(text)) workersRetracted = true;
         }, { maxTokens: 2048 });
         if (workersRetracted) {
-          sseWriter.writeRedacted(REDACT_MSG);
-          sseWriter.writeDone({});
+          sendEvent({ redacted: true, reply: REDACT_MSG });
+          sendEvent({ done: true });
           closeStream();
           return;
         }
@@ -5591,7 +5518,6 @@ export async function onRequestPost(context) {
 
             let groqRetracted = false;
             let groqCommittedCanceller = null; // [PATCH] BUG 1 FIX — same commitment gate as the Gemini tier above
-            sseWriter.writeProgress('groq'); // [PATCH] progress heartbeat
             const { winner, lastResult } = await raceKeyPool(
               groqPool,
               async ({ key: gqKey, originalIndex }, signal, cancelOthers) => {
@@ -5611,8 +5537,8 @@ export async function onRequestPost(context) {
               { concurrency: RACE_CONCURRENCY, shouldStop: () => budget.remaining() <= 0 || groqRetracted },
             );
             if (groqRetracted) {
-              sseWriter.writeRedacted(REDACT_MSG);
-              sseWriter.writeDone({});
+              sendEvent({ redacted: true, reply: REDACT_MSG });
+              sendEvent({ done: true });
               closeStream();
               return;
             }
@@ -5654,7 +5580,6 @@ export async function onRequestPost(context) {
 
             let orRetracted = false;
             let orCommittedCanceller = null; // [PATCH] BUG 1 FIX — same commitment gate as the Gemini tier above
-            sseWriter.writeProgress('openrouter'); // [PATCH] progress heartbeat
             const { winner, lastResult } = await raceKeyPool(
               openRouterPool,
               async ({ key: orKey, originalIndex }, signal, cancelOthers) => {
@@ -5676,8 +5601,8 @@ export async function onRequestPost(context) {
               { concurrency: RACE_CONCURRENCY, shouldStop: () => budget.remaining() <= 0 || orRetracted },
             );
             if (orRetracted) {
-              sseWriter.writeRedacted(REDACT_MSG);
-              sseWriter.writeDone({});
+              sendEvent({ redacted: true, reply: REDACT_MSG });
+              sendEvent({ done: true });
               closeStream();
               return;
             }
@@ -5697,8 +5622,8 @@ export async function onRequestPost(context) {
 
       // 10. All layers exhausted, nothing ever reached the client.
       if (!finalWinResult && !sentAnything) {
-        sseWriter.writeError(buildFriendlyError(lastProviderResult, workersAttempted, userMessage));
-        sseWriter.writeDone({});
+        sendEvent({ error: buildFriendlyError(lastProviderResult, workersAttempted, userMessage) });
+        sendEvent({ done: true });
         closeStream();
         return;
       }
@@ -5709,10 +5634,7 @@ export async function onRequestPost(context) {
       // never reach the client, since push() alone never emits that trailing
       // margin (see streamSanitizer.mjs).
       const { emit: trailingEmit, finalText } = sanitizer.finish();
-      const { emit: trailingNotated } = notation.push(trailingEmit || '');
-      const { emit: notationFlush } = notation.finish();
-      const finalNotated = trailingNotated + notationFlush;
-      if (finalNotated) sseWriter.writeDelta(finalNotated);
+      if (trailingEmit) sendEvent({ delta: trailingEmit });
       logFactDrift(scanForFactDrift(finalText), { provider: sourceTag, isFirstTurn, isDeveloperMode });
       // [PATCH] BUG 3/4 FIX — surface truncation to the client instead of
       // only console.warn-ing it server-side (the old behaviour: detected,
@@ -5741,7 +5663,8 @@ export async function onRequestPost(context) {
       const sources = finalWinResult
         ? extractGroundingSources(finalWinResult.groundingMetadata)
         : [];
-      sseWriter.writeDone({
+      sendEvent({
+        done: true,
         source: sourceTag,
         truncated,
         interrupted: !!(finalWinResult && finalWinResult.interrupted),
