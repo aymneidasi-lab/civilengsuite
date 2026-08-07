@@ -77,6 +77,10 @@ async function runStream(res, { extractDelta, onDelta, isDoneMarker, signal }) {
   let full = '';
   let committed = false;
   let finishReason = null;
+  // [PATCH — search bridge] Only ever set by extractGeminiDelta, and only on
+  // grounded turns; stays null for every non-grounded reply and for the
+  // other two providers' extractors, which never populate this key on `d`.
+  let groundingMetadata = null;
   let externallyCancelled = false;
   const onAbort = () => {
     externallyCancelled = true;
@@ -95,13 +99,18 @@ async function runStream(res, { extractDelta, onDelta, isDoneMarker, signal }) {
         committed = true;
         onDelta(d.text);
       }
+      // [PATCH — search bridge] Keep the latest non-null value rather than
+      // only reading it off the terminal chunk: Google's docs don't commit
+      // to which chunk carries it in streaming mode, so this is correct
+      // whether it lands once on the last chunk or is repeated earlier.
+      if (d.groundingMetadata) groundingMetadata = d.groundingMetadata;
       if (d.finished || (isDoneMarker && d.done)) {
         finishReason = d.finishReason || (d.done ? 'DONE' : 'STOP');
         break;
       }
     }
   } catch (err) {
-    if (committed) return { ok: true, reply: full, interrupted: true, errStatus: 'STREAM_DROPPED', errBody: String(err && err.message || err) };
+    if (committed) return { ok: true, reply: full, interrupted: true, errStatus: 'STREAM_DROPPED', errBody: String(err && err.message || err), groundingMetadata };
     return { ok: false, httpStatus: 0, errStatus: 'STREAM_NETWORK_ERROR', errBody: String(err && err.message || err) };
   } finally {
     if (signal) signal.removeEventListener('abort', onAbort);
@@ -116,11 +125,11 @@ async function runStream(res, { extractDelta, onDelta, isDoneMarker, signal }) {
     // has to special-case a third result shape for what is, from their
     // point of view, the same "cut short after committing" event.
     return committed
-      ? { ok: true, reply: full, interrupted: true, errStatus: 'RACE_CANCELLED', errBody: '' }
+      ? { ok: true, reply: full, interrupted: true, errStatus: 'RACE_CANCELLED', errBody: '', groundingMetadata }
       : { ok: false, httpStatus: 0, errStatus: 'RACE_CANCELLED', errBody: '' };
   }
   if (!full.trim()) return { ok: false, httpStatus: res.status, errStatus: 'EMPTY_REPLY', errBody: '' };
-  return { ok: true, reply: full, finishReason };
+  return { ok: true, reply: full, finishReason, groundingMetadata };
 }
 
 // ── Gemini (:streamGenerateContent?alt=sse) ────────────────────────────────
@@ -130,13 +139,28 @@ async function runStream(res, { extractDelta, onDelta, isDoneMarker, signal }) {
 // request carrying both is a hard 400 — see vision.js's own header note),
 // so silently merging defaults here would risk producing an invalid
 // combination for whichever caller didn't expect the merge.
-export async function callGeminiStreaming(apiKey, model, contents, systemPrompt, generationConfig, budget, onDelta, externalSignal) {
+// [PATCH — search bridge] `tools` param appended at the END of the existing
+// positional list (not inserted, not converted to an options object) so the
+// two existing call sites — chat.js's text tier and vision.js's image tier —
+// need zero changes and simply pass `undefined`, same as any other JS call
+// with a missing trailing arg. Caller-supplied for the same reason
+// generationConfig already is (see header comment above): the google_search
+// tool is chat.js-only for now (see chat.js's own GOOGLE_SEARCH_TOOL
+// comment for why vision.js is deliberately excluded), and hardcoding it
+// here would silently turn it on for every future caller of this function.
+export async function callGeminiStreaming(apiKey, model, contents, systemPrompt, generationConfig, budget, onDelta, externalSignal, tools) {
   if (!budget.take()) return { ok: false, httpStatus: 0, errStatus: 'SUBREQUEST_BUDGET_EXHAUSTED', errBody: '' };
 
   const payload = JSON.stringify({
     system_instruction: { parts: [{ text: systemPrompt }] },
     contents,
     generationConfig,
+    // Gemini API rejects mixing google_search with function-calling tools in
+    // one request (not applicable here — this codebase declares no function
+    // tools) but is otherwise a plain top-level sibling of generationConfig;
+    // confirmed against the current v1beta REST wire format, not the SDK's
+    // camelCase binding — this file talks to the raw endpoint directly.
+    ...(tools && { tools }),
   });
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`;
