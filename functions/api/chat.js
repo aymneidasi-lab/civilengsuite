@@ -1208,7 +1208,6 @@ import {
 import { raceKeyPool } from '../_lib/raceKeyPool.mjs';
 import { callGeminiStreaming, callOpenAiCompatStreaming, callWorkersAIStreaming } from '../_lib/streamingProviders.mjs';
 import { StreamingSanitizer } from '../_lib/streamSanitizer.mjs';
-import { SseChunkWriter } from '../_lib/resumableSse.mjs'; // [PATCH] resume-mechanism chunkIndex writer
 import { assertPromptBudget } from '../_lib/promptBudget.mjs';
 import { NotationNormalizer } from '../_lib/notationNormalizer.mjs';
 
@@ -5408,20 +5407,11 @@ export async function onRequestPost(context) {
       let streamClosed = false;
 
       function closeStream() { if (!streamClosed) { streamClosed = true; controller.close(); } }
-      // [PATCH] Manual `data: ...` framing replaced by SseChunkWriter (see
-      // functions/_lib/resumableSse.mjs) — assigns the client-facing
-      // chunkIndex/finalChunkIndex the frontend's resume handshake reads.
-      // The streamClosed guard + enqueue try/catch that used to live
-      // inside sendEvent() move into this write callback unchanged: they
-      // guard this Worker invocation's own controller, which
-      // SseChunkWriter is deliberately agnostic to (see its constructor's
-      // `write` param doc) — not a loss of resilience, just relocated one
-      // level out to where streamClosed/controller already live.
-      const sseWriter = new SseChunkWriter((chunk) => {
+      function sendEvent(obj) {
         if (streamClosed) return; // a losing racer's callback arrived after we already finished
-        try { controller.enqueue(chunk); }
+        try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`)); }
         catch { streamClosed = true; } // controller already closed by the runtime underneath us
-      }, encoder);
+      }
       const REDACT_MSG = isArabicText(userMessage)
         ? 'الموضوع ده متعلق ببنية الموقع الداخلية، وأنا مش بتكلم فيه بره وضع المطور. تحب نرجع لسؤالك الهندسي؟'
         : "That's about the site's internal setup, which isn't something I discuss outside developer mode. Want to get back to your engineering question?";
@@ -5441,7 +5431,7 @@ export async function onRequestPost(context) {
       function relay(deltaText) {
         const { emit, retracted } = sanitizer.push(deltaText);
         const { emit: notated } = notation.push(emit || '');
-        if (notated) { sseWriter.writeDelta(notated); sentAnything = true; }
+        if (notated) { sendEvent({ delta: notated }); sentAnything = true; }
         return retracted;
       }
 
@@ -5472,7 +5462,7 @@ export async function onRequestPost(context) {
         // additive: an SSE frame the client can choose to ignore (the
         // existing handleEventData() already no-ops on unrecognized
         // fields). Does not touch sanitizer/budget/blocklist logic.
-        sseWriter.writeProgress('gemini', { tier: modelTier === GEMINI_MODEL_PRIMARY ? 'primary' : 'fallback' });
+        sendEvent({ progress: 'gemini', tier: modelTier === GEMINI_MODEL_PRIMARY ? 'primary' : 'fallback' });
         const { winner, lastResult } = await raceKeyPool(
           tierPool,
           async ({ key: gKey, originalIndex }, signal, cancelOthers) => {
@@ -5496,8 +5486,8 @@ export async function onRequestPost(context) {
         );
 
         if (retractedThisTier) {
-          sseWriter.writeRedacted(REDACT_MSG);
-          sseWriter.writeDone({});
+          sendEvent({ redacted: true, reply: REDACT_MSG });
+          sendEvent({ done: true });
           closeStream();
           return;
         }
@@ -5546,14 +5536,14 @@ export async function onRequestPost(context) {
         // 7. WORKERS AI LAYER — unchanged routing from v10 (binding call, not
         //    a fetch() subrequest, so it does not draw from `budget`).
         workersAttempted = !!env.AI;
-        if (workersAttempted) sseWriter.writeProgress('workers-ai'); // [PATCH] progress heartbeat
+        if (workersAttempted) sendEvent({ progress: 'workers-ai' }); // [PATCH] progress heartbeat
         let workersRetracted = false;
         const layerWorkers = await callWorkersAIStreaming(env.AI, workersMsgs, (text) => {
           if (relay(text)) workersRetracted = true;
         }, { maxTokens: 2048 });
         if (workersRetracted) {
-          sseWriter.writeRedacted(REDACT_MSG);
-          sseWriter.writeDone({});
+          sendEvent({ redacted: true, reply: REDACT_MSG });
+          sendEvent({ done: true });
           closeStream();
           return;
         }
@@ -5591,7 +5581,7 @@ export async function onRequestPost(context) {
 
             let groqRetracted = false;
             let groqCommittedCanceller = null; // [PATCH] BUG 1 FIX — same commitment gate as the Gemini tier above
-            sseWriter.writeProgress('groq'); // [PATCH] progress heartbeat
+            sendEvent({ progress: 'groq' }); // [PATCH] progress heartbeat
             const { winner, lastResult } = await raceKeyPool(
               groqPool,
               async ({ key: gqKey, originalIndex }, signal, cancelOthers) => {
@@ -5611,8 +5601,8 @@ export async function onRequestPost(context) {
               { concurrency: RACE_CONCURRENCY, shouldStop: () => budget.remaining() <= 0 || groqRetracted },
             );
             if (groqRetracted) {
-              sseWriter.writeRedacted(REDACT_MSG);
-              sseWriter.writeDone({});
+              sendEvent({ redacted: true, reply: REDACT_MSG });
+              sendEvent({ done: true });
               closeStream();
               return;
             }
@@ -5654,7 +5644,7 @@ export async function onRequestPost(context) {
 
             let orRetracted = false;
             let orCommittedCanceller = null; // [PATCH] BUG 1 FIX — same commitment gate as the Gemini tier above
-            sseWriter.writeProgress('openrouter'); // [PATCH] progress heartbeat
+            sendEvent({ progress: 'openrouter' }); // [PATCH] progress heartbeat
             const { winner, lastResult } = await raceKeyPool(
               openRouterPool,
               async ({ key: orKey, originalIndex }, signal, cancelOthers) => {
@@ -5676,8 +5666,8 @@ export async function onRequestPost(context) {
               { concurrency: RACE_CONCURRENCY, shouldStop: () => budget.remaining() <= 0 || orRetracted },
             );
             if (orRetracted) {
-              sseWriter.writeRedacted(REDACT_MSG);
-              sseWriter.writeDone({});
+              sendEvent({ redacted: true, reply: REDACT_MSG });
+              sendEvent({ done: true });
               closeStream();
               return;
             }
@@ -5697,8 +5687,8 @@ export async function onRequestPost(context) {
 
       // 10. All layers exhausted, nothing ever reached the client.
       if (!finalWinResult && !sentAnything) {
-        sseWriter.writeError(buildFriendlyError(lastProviderResult, workersAttempted, userMessage));
-        sseWriter.writeDone({});
+        sendEvent({ error: buildFriendlyError(lastProviderResult, workersAttempted, userMessage) });
+        sendEvent({ done: true });
         closeStream();
         return;
       }
@@ -5712,7 +5702,7 @@ export async function onRequestPost(context) {
       const { emit: trailingNotated } = notation.push(trailingEmit || '');
       const { emit: notationFlush } = notation.finish();
       const finalNotated = trailingNotated + notationFlush;
-      if (finalNotated) sseWriter.writeDelta(finalNotated);
+      if (finalNotated) sendEvent({ delta: finalNotated });
       logFactDrift(scanForFactDrift(finalText), { provider: sourceTag, isFirstTurn, isDeveloperMode });
       // [PATCH] BUG 3/4 FIX — surface truncation to the client instead of
       // only console.warn-ing it server-side (the old behaviour: detected,
@@ -5741,7 +5731,8 @@ export async function onRequestPost(context) {
       const sources = finalWinResult
         ? extractGroundingSources(finalWinResult.groundingMetadata)
         : [];
-      sseWriter.writeDone({
+      sendEvent({
+        done: true,
         source: sourceTag,
         truncated,
         interrupted: !!(finalWinResult && finalWinResult.interrupted),
