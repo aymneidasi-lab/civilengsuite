@@ -134,26 +134,14 @@ const UPLOAD_TTL_SECONDS = 300;
 // file header's "WHY A SEPARATE KV NAMESPACE" note: reusing checkRateLimit
 // unmodified would draw this endpoint's counters from CES_CHAT_KV in the
 // no-RATE_LIMITER-binding case, working against the exact quota-isolation
-// this file exists to provide.
-//
-// maxPerWindow raised 6 -> 40 (v37): 6/min assumed "attach one big file,
-// maybe retry once" as the whole use case. chat.js's resolveKvFiles() and
-// vision.js's copy both dropped their own hardcoded 3-file-per-message
-// ceiling this same patch — a caller now attaching, say, 17 large files to
-// ONE outgoing message fires up to 17 of these upload calls back-to-back,
-// blowing straight through 6/min. 40/min covers that many times over.
-// This is still just burst-smoothing, not the actual abuse backstop: the
-// real ceiling is env.CES_DEV_UPLOADS's OWN Free-plan 1,000-writes/day
-// namespace cap (see file header), which 6/min already couldn't hold
-// under sustained abuse either (6/min sustained = 8,640/day) — so 40/min
-// doesn't weaken the dimension that was actually load-bearing, it just
-// stops legitimate bursts from tripping a limit tuned for a workflow this
-// repo's own other files no longer assume.
+// this file exists to provide. Generous threshold: this is a manual,
+// low-frequency developer action (attach one big file, maybe retry once),
+// not a per-message call like /api/chat's own rate limit.
 async function checkUploadRateLimit(env, key) {
   if (!env.CES_DEV_UPLOADS) return { limited: false, mechanism: 'no-kv' };
   try {
     const windowSeconds = 60;
-    const maxPerWindow = 40;
+    const maxPerWindow = 6;
     const bucket = Math.floor(Date.now() / 1000 / windowSeconds);
     const kvKey = `rl:${key}:${bucket}`;
     const rawCurrent = await env.CES_DEV_UPLOADS.get(kvKey);
