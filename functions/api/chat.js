@@ -5284,13 +5284,7 @@ export async function onRequestPost(context) {
   // see the CAPABILITY HONESTY note on webSearchSection above for why that
   // coupling matters. Default OFF means: deploying this file changes
   // nothing about current behaviour until this env var is set.
-  // [FIX — search bridge / config-tolerance] Strict `=== '1'` silently stayed
-  // OFF against the value actually saved in the Cloudflare Pages dashboard
-  // ("true", typed as the natural boolean-ish string) -- the toggle was a
-  // no-op in production. Accept the common truthy spellings so the dashboard
-  // value and the runtime check agree; still OFF for unset/'0'/'false'/empty.
-  const searchGroundingEnabled = ['1', 'true', 'yes', 'on']
-    .includes(String(env.ENABLE_SEARCH_GROUNDING || '').trim().toLowerCase());
+  const searchGroundingEnabled = env.ENABLE_SEARCH_GROUNDING === '1';
   const baseSystemPrompt   = isFirstTurn ? buildSystemPrompt(isDeveloperMode, searchGroundingEnabled) : buildGeminiFollowupPrompt(isDeveloperMode, searchGroundingEnabled);
 
   // v16: KB retrieval query — the live message, plus the immediately prior
@@ -5407,7 +5401,6 @@ export async function onRequestPost(context) {
         return retracted;
       }
 
-     try {
       let geminiWinner = null;
       for (const modelTier of [GEMINI_MODEL_PRIMARY, GEMINI_MODEL_FALLBACK]) {
         if (geminiWinner || budget.remaining() <= 0) break;
@@ -5440,15 +5433,7 @@ export async function onRequestPost(context) {
               if (relay(text)) retractedThisTier = true;
             }, signal, searchGroundingEnabled ? GOOGLE_SEARCH_TOOL : undefined); // [PATCH — search bridge]
             if (res.errStatus && res.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED' && res.errStatus !== 'RACE_CANCELLED') {
-              // [FIX — diagnostics] errStatus/httpStatus alone cannot tell a
-              // grounding-specific rejection (e.g. INVALID_ARGUMENT on the
-              // `tools` field, or a FAILED_PRECONDITION/PERMISSION_DENIED tied
-              // to the key's project) apart from any other 400/403. errBody
-              // carries Google's actual message field; capped at 400 chars
-              // since it's occasionally a full HTML/JSON error page. Gemini
-              // error bodies do not echo the API key.
-              const bodyPreview = typeof res.errBody === 'string' ? res.errBody.slice(0, 400) : res.errBody;
-              console.warn(`[chat.js] Gemini ${keyTagFor(originalIndex) || 'key1-'}${modelTier} failed:`, res.errStatus, res.httpStatus, bodyPreview);
+              console.warn(`[chat.js] Gemini ${keyTagFor(originalIndex) || 'key1-'}${modelTier} failed:`, res.errStatus, res.httpStatus);
             }
             markKeyResult('gemini', originalIndex, res);
             markModelResult('gemini', modelTier, res);
@@ -5462,15 +5447,6 @@ export async function onRequestPost(context) {
         );
 
         if (retractedThisTier) {
-          // [FIX — resumable-sse regression] writeRedacted() does NOT set
-          // SseChunkWriter's `_done` latch — only writeDone() does (see
-          // resumableSse.mjs source: `_done = true` appears exactly once,
-          // inside writeDone()). The claim in the removed comment here was
-          // incorrect; resumableSse.mjs's own header documents the real,
-          // non-terminal contract explicitly and even flags that an EARLIER
-          // draft of that file made this identical wrong assumption once
-          // already. Without this call, the client never receives
-          // {done:true}, only {redacted:true} before the raw stream closes.
           sseWriter.writeRedacted(REDACT_MSG);
           sseWriter.writeDone({});
           closeStream();
@@ -5526,8 +5502,6 @@ export async function onRequestPost(context) {
           if (relay(text)) workersRetracted = true;
         }, { maxTokens: 2048 });
         if (workersRetracted) {
-          // [FIX — resumable-sse regression] see the Gemini-tier redaction
-          // branch above for why writeDone() must follow writeRedacted().
           sseWriter.writeRedacted(REDACT_MSG);
           sseWriter.writeDone({});
           closeStream();
@@ -5586,9 +5560,6 @@ export async function onRequestPost(context) {
               { concurrency: RACE_CONCURRENCY, shouldStop: () => budget.remaining() <= 0 || groqRetracted },
             );
             if (groqRetracted) {
-              // [FIX — resumable-sse regression] see the Gemini-tier
-              // redaction branch above for why writeDone() must follow
-              // writeRedacted().
               sseWriter.writeRedacted(REDACT_MSG);
               sseWriter.writeDone({});
               closeStream();
@@ -5653,9 +5624,6 @@ export async function onRequestPost(context) {
               { concurrency: RACE_CONCURRENCY, shouldStop: () => budget.remaining() <= 0 || orRetracted },
             );
             if (orRetracted) {
-              // [FIX — resumable-sse regression] see the Gemini-tier
-              // redaction branch above for why writeDone() must follow
-              // writeRedacted().
               sseWriter.writeRedacted(REDACT_MSG);
               sseWriter.writeDone({});
               closeStream();
@@ -5677,38 +5645,11 @@ export async function onRequestPost(context) {
 
       // 10. All layers exhausted, nothing ever reached the client.
       if (!finalWinResult && !sentAnything) {
-        // [FIX — resumable-sse regression] see the Gemini-tier redaction
-        // branch above: writeError(), like writeRedacted(), does not set
-        // the _done latch by itself. This is the branch a request reaches
-        // when every provider tier fails — including a search-grounding
-        // request where Gemini rejects the `tools` field on every key —
-        // so this specific missing writeDone() is the most likely reason
-        // the client-visible symptom looked like a dead/incomplete stream
-        // rather than a rendered error message, even though the correct
-        // Arabic/English "not available" text was already being written.
         sseWriter.writeError(buildFriendlyError(lastProviderResult, workersAttempted, userMessage));
         sseWriter.writeDone({});
         closeStream();
         return;
       }
-
-      // [DIAG] Temporary instrumentation — same purpose as the copy in the
-      // notationNormalizer-integrated chat.js: bisects a "clean stream, zero
-      // delta/error/redacted" client symptom (finalText empty, gotError
-      // null, no redaction) that a provider "win" with nothing actually
-      // relayed would produce. sanitizerRawLen>0 with nothing emitted below
-      // points at StreamingSanitizer's flush; sanitizerRawLen===0 points at
-      // the raceKeyPool/streamingProviders commitment contract instead.
-      // Remove once a real occurrence's log line answers this.
-      console.warn('[chat.js][DIAG empty-turn]', {
-        sourceTag,
-        finalWinResultOk: !!(finalWinResult && finalWinResult.ok),
-        sentAnything,
-        sanitizerRawLen: sanitizer.raw.length,
-        sanitizerRetracted: sanitizer.retracted,
-        sanitizerEmittedLen: sanitizer.emittedLen,
-        lastProviderResultErrStatus: lastProviderResult && lastProviderResult.errStatus,
-      });
 
       // finish() flushes whatever the sanitizer's blocklist holdback margin
       // was still withholding — without this, the last (longest-blocklist-
@@ -5749,22 +5690,6 @@ export async function onRequestPost(context) {
         ...(isDeveloperMode && { devMode: true }),
       });
       closeStream();
-     } catch (err) {
-      // [FIX — resilience] Every other layer in this pipeline absorbs its own
-      // exceptions (runStream's try/catch/finally in streamingProviders.mjs,
-      // raceKeyPool's per-attempt .catch, extractGeminiDelta's internal
-      // try/catch) and turns them into a normal {ok:false} result. This outer
-      // body had no equivalent: a throw here previously errored the
-      // ReadableStream directly, so the client's reader just saw the
-      // connection die with no SSE payload at all. Uses writeError() +
-      // writeDone() together, in that order — see the [FIX —
-      // resumable-sse regression] comments above for why a bare writeError()
-      // alone is not enough.
-      console.error('[chat.js] Unhandled exception inside stream start():', (err && err.stack) || String(err));
-      sseWriter.writeError(buildFriendlyError(lastProviderResult, workersAttempted, userMessage));
-      sseWriter.writeDone({});
-      closeStream();
-     }
     },
   });
 
