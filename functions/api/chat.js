@@ -1182,6 +1182,9 @@ import {
   isModelDead,
   markModelResult,
   getDeadModelReason,
+  isGroundingBroken,      // [PATCH — grounding fail-open]
+  markGroundingBroken,    // [PATCH — grounding fail-open]
+  classifyProviderResult, // [PATCH — consolidation, see OpenRouter/Groq blocks below]
 } from '../_lib/rotation.mjs';
 
 // [v27] Session save/load/list/delete logic — extracted to
@@ -4547,10 +4550,16 @@ function buildFriendlyError(lastProviderResult, workersAttempted, userMessage) {
       ? 'فيه مشكلة إعداد في حساب OpenRouter — لازم تفعيل "Free model publication" في openrouter.ai/settings/privacy عشان الموديلات المجانية تشتغل. ابعت اللينك ده للمسؤول: واتساب +201287232413 · aymneidasi@gmail.com.'
       : 'OpenRouter account setting issue — free-tier models require "Free model publication" enabled at openrouter.ai/settings/privacy. Please forward this to the site admin: WhatsApp +201287232413 · aymneidasi@gmail.com.';
   }
-  if (lastProviderResult.deadModelReason === 'MODEL_DECOMMISSIONED') {
+  // [PATCH] MODEL_NOT_FOUND (plain 404, e.g. OpenRouter "no endpoints
+  // found for <model>") needs the same admin-actionable message as
+  // MODEL_DECOMMISSIONED (400 + model_decommissioned) -- both mean "this
+  // exact model string doesn't resolve with its provider, fix it in code,"
+  // and previously only the latter was checked here, so a plain dead-model
+  // 404 fell through to the generic, unhelpful 404 message below.
+  if (['MODEL_DECOMMISSIONED', 'MODEL_NOT_FOUND'].includes(lastProviderResult.deadModelReason)) {
     return ar
-      ? 'موديل احتياطي بقى قديم عند المزود بتاعه ولازم تحديث في الكود، مش في الحساب. تواصل مع المسؤول: واتساب +201287232413 · aymneidasi@gmail.com.'
-      : 'A fallback AI model was retired by its provider and needs a code update, not an account fix. Contact site admin: WhatsApp +201287232413 · aymneidasi@gmail.com.';
+      ? 'موديل احتياطي مش شغال عند المزود بتاعه (اتلغى أو الاسم غلط) ولازم تحديث في الكود، مش في الحساب. تواصل مع المسؤول: واتساب +201287232413 · aymneidasi@gmail.com.'
+      : 'A fallback AI model isn\'t resolving with its provider (retired or a bad model string) and needs a code update, not an account fix. Contact site admin: WhatsApp +201287232413 · aymneidasi@gmail.com.';
   }
 
   const friendlyErrors = {
@@ -5291,7 +5300,14 @@ export async function onRequestPost(context) {
   // value and the runtime check agree; still OFF for unset/'0'/'false'/empty.
   const searchGroundingEnabled = ['1', 'true', 'yes', 'on']
     .includes(String(env.ENABLE_SEARCH_GROUNDING || '').trim().toLowerCase());
-  const baseSystemPrompt   = isFirstTurn ? buildSystemPrompt(isDeveloperMode, searchGroundingEnabled) : buildGeminiFollowupPrompt(isDeveloperMode, searchGroundingEnabled);
+  // [PATCH — grounding fail-open] Distinct from searchGroundingEnabled (the
+  // operator's intent) -- also reflects what streamingProviders.mjs has
+  // already proven broken this isolate (see groundingRetryProof below).
+  // Feeds both the prompt build (CAPABILITY HONESTY -- don't tell the model
+  // it has live search when the tool won't actually be attached) and the
+  // tool-attach call site itself.
+  const groundingUsable = searchGroundingEnabled && !isGroundingBroken('gemini');
+  const baseSystemPrompt   = isFirstTurn ? buildSystemPrompt(isDeveloperMode, groundingUsable) : buildGeminiFollowupPrompt(isDeveloperMode, groundingUsable);
 
   // v16: KB retrieval query — the live message, plus the immediately prior
   // model reply on follow-ups (gives the scorer context for short replies
@@ -5438,7 +5454,8 @@ export async function onRequestPost(context) {
               if (committedCanceller === null) { committedCanceller = cancelOthers; cancelOthers(); }
               if (committedCanceller !== cancelOthers) return; // a losing racer's delta — never relayed
               if (relay(text)) retractedThisTier = true;
-            }, signal, searchGroundingEnabled ? GOOGLE_SEARCH_TOOL : undefined); // [PATCH — search bridge]
+            }, signal, groundingUsable ? GOOGLE_SEARCH_TOOL : undefined); // [PATCH — grounding fail-open]
+            if (res.groundingRetryProof) markGroundingBroken('gemini'); // [PATCH — grounding fail-open]
             if (res.errStatus && res.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED' && res.errStatus !== 'RACE_CANCELLED') {
               // [FIX — diagnostics] errStatus/httpStatus alone cannot tell a
               // grounding-specific rejection (e.g. INVALID_ARGUMENT on the
@@ -5578,7 +5595,7 @@ export async function onRequestPost(context) {
                   if (groqCommittedCanceller !== cancelOthers) return;
                   if (relay(text)) groqRetracted = true;
                 }, signal, { maxTokens: 2048 });
-                if (res.errStatus === 'model_decommissioned') res.deadModelReason = 'MODEL_DECOMMISSIONED';
+                Object.assign(res, classifyProviderResult('groq', res)); // [PATCH — consolidation]
                 if (res.errStatus && res.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED' && res.errStatus !== 'RACE_CANCELLED') {
                   console.warn(`[chat.js] Groq key${originalIndex === 0 ? '' : originalIndex + 1} failed:`, res.errStatus, res.httpStatus);
                 }
@@ -5642,9 +5659,7 @@ export async function onRequestPost(context) {
                   if (orCommittedCanceller !== cancelOthers) return;
                   if (relay(text)) orRetracted = true;
                 }, signal, { maxTokens: 2048 });
-                if (res.httpStatus === 404 && /no endpoints found matching your data policy/i.test(res.errBody || '')) {
-                  res.accountConfigIssue = 'OPENROUTER_DATA_POLICY';
-                }
+                Object.assign(res, classifyProviderResult('openrouter', res)); // [PATCH — consolidation]
                 if (res.errStatus && res.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED' && res.errStatus !== 'RACE_CANCELLED') {
                   console.warn(`[chat.js] OpenRouter key${originalIndex === 0 ? '' : originalIndex + 1} failed:`, res.errStatus, res.httpStatus);
                 }
