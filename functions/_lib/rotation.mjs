@@ -323,3 +323,31 @@ export function markModelResult(provider, model, result) {
   deadModelUntil.set(key, Date.now() + DEAD_MODEL_TTL_MS);
   deadModelReason.set(key, reason);
 }
+
+// ── Grounding-broken cache (companion to streamingProviders.mjs's
+//    grounding-fail-open retry) ─────────────────────────────────────────
+// callGeminiStreaming empirically proves the `google_search` tool itself is
+// the failure cause on a key/project (RESOURCE_EXHAUSTED etc. clears the
+// instant the tool is dropped, same key, same request) by returning
+// `groundingRetryProof: true`. That is per-KEY proof, but grounding
+// eligibility is a project/billing-account property (see GOOGLE_SEARCH_TOOL's
+// cost note in chat.js), and this codebase's 13 Gemini keys are commonly
+// provisioned the same way -- so one proven-broken key is a strong signal
+// the rest of the pool is broken the same way too. Kept separate from the
+// dead-MODEL cache above: this is "the TOOL is unusable right now", not
+// "the MODEL STRING is unusable" -- gemini-3.5-flash itself is fine, only
+// grounded calls to it are failing. Own TTL (not reusing DEAD_MODEL_TTL_MS)
+// so the two can be tuned independently -- e.g. shortened later if this
+// mostly fires during transient Google-side grounding incidents rather
+// than the sustained billing-tier case this was written for.
+const GROUNDING_BROKEN_TTL_MS = 30 * 60 * 1000;
+const groundingBrokenUntil = new Map(); // "provider" -> epoch ms
+
+export function isGroundingBroken(provider) {
+  const until = groundingBrokenUntil.get(provider);
+  return typeof until === 'number' && Date.now() < until;
+}
+
+export function markGroundingBroken(provider) {
+  groundingBrokenUntil.set(provider, Date.now() + GROUNDING_BROKEN_TTL_MS);
+}

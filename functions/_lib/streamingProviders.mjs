@@ -148,60 +148,100 @@ async function runStream(res, { extractDelta, onDelta, isDoneMarker, signal }) {
 // tool is chat.js-only for now (see chat.js's own GOOGLE_SEARCH_TOOL
 // comment for why vision.js is deliberately excluded), and hardcoding it
 // here would silently turn it on for every future caller of this function.
+// [PATCH — grounding fail-open] Google's quota/permission error shapes for a
+// grounded request (RESOURCE_EXHAUSTED, INVALID_ARGUMENT on the `tools`
+// field, FAILED_PRECONDITION/PERMISSION_DENIED tied to the key's project —
+// see chat.js's own diagnostics comment at the raceKeyPool call site) are
+// byte-identical to the same codes for an ordinary non-grounded failure —
+// nothing in Google's error body says "this was the search tool's fault".
+// The only reliable test is empirical: strip the tool and retry the SAME
+// key once. Kept narrow (this exact status set, not blanket retry-on-any-
+// failure) so a key that is simply out of base quota doesn't silently eat a
+// second wasted subrequest proving nothing.
+const GROUNDING_RETRY_TRIGGERS = new Set([
+  'RESOURCE_EXHAUSTED', 'INVALID_ARGUMENT', 'PERMISSION_DENIED', 'FAILED_PRECONDITION',
+]);
+
 export async function callGeminiStreaming(apiKey, model, contents, systemPrompt, generationConfig, budget, onDelta, externalSignal, tools) {
-  if (!budget.take()) return { ok: false, httpStatus: 0, errStatus: 'SUBREQUEST_BUDGET_EXHAUSTED', errBody: '' };
-
-  const payload = JSON.stringify({
-    system_instruction: { parts: [{ text: systemPrompt }] },
-    contents,
-    generationConfig,
-    // Gemini API rejects mixing google_search with function-calling tools in
-    // one request (not applicable here — this codebase declares no function
-    // tools) but is otherwise a plain top-level sibling of generationConfig;
-    // confirmed against the current v1beta REST wire format, not the SDK's
-    // camelCase binding — this file talks to the raw endpoint directly.
-    ...(tools && { tools }),
-  });
-
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`;
   const RETRY_DELAYS_MS = [1500, 3500];
-  let attempt = 0;
-  for (;;) {
-    // [MERGE] budget-accounting fix: each retry is a REAL, separate
-    // fetch() and must draw its own unit from `budget`, or the app's own
-    // SUBREQUEST_BUDGET_FREE_PLAN counter (48, a 2-request margin under
-    // Cloudflare's real 50/invocation free-plan ceiling) undercounts
-    // actual usage by up to 2x whenever a key hits 500/503 and retries --
-    // large enough on its own to trip the platform's hard, non-catchable
-    // per-invocation limit while the app's tracker still reports budget
-    // remaining. Independent of, and additive with, this file's own
-    // reader.cancel()-based abort fix above.
-    if (attempt > 0 && !budget.take()) {
-      return { ok: false, httpStatus: 0, errStatus: 'SUBREQUEST_BUDGET_EXHAUSTED', errBody: '' };
-    }
-    const { signal, clearConnectTimeout, release } = timeoutSignal(8000, externalSignal);
-    let res;
-    try {
-      res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload, signal });
-    } catch (err) {
+
+  // One full HTTP attempt, including its own 500/503 backoff loop — the
+  // original function body, parametrized by whether `tools` rides along, so
+  // the grounding-fail-open wrapper below can call it twice against the
+  // SAME key without duplicating the retry/backoff machinery.
+  async function sendOnce(includeTools) {
+    if (!budget.take()) return { ok: false, httpStatus: 0, errStatus: 'SUBREQUEST_BUDGET_EXHAUSTED', errBody: '' };
+    const payload = JSON.stringify({
+      system_instruction: { parts: [{ text: systemPrompt }] },
+      contents,
+      generationConfig,
+      // Gemini API rejects mixing google_search with function-calling tools in
+      // one request (not applicable here — this codebase declares no function
+      // tools) but is otherwise a plain top-level sibling of generationConfig;
+      // confirmed against the current v1beta REST wire format, not the SDK's
+      // camelCase binding — this file talks to the raw endpoint directly.
+      ...(includeTools && tools && { tools }),
+    });
+    let retryN = 0;
+    for (;;) {
+      // [MERGE] budget-accounting fix: each retry is a REAL, separate
+      // fetch() and must draw its own unit from `budget`, or the app's own
+      // SUBREQUEST_BUDGET_FREE_PLAN counter (48, a 2-request margin under
+      // Cloudflare's real 50/invocation free-plan ceiling) undercounts
+      // actual usage by up to 2x whenever a key hits 500/503 and retries --
+      // large enough on its own to trip the platform's hard, non-catchable
+      // per-invocation limit while the app's tracker still reports budget
+      // remaining. Independent of, and additive with, this file's own
+      // reader.cancel()-based abort fix above.
+      if (retryN > 0 && !budget.take()) {
+        return { ok: false, httpStatus: 0, errStatus: 'SUBREQUEST_BUDGET_EXHAUSTED', errBody: '' };
+      }
+      const { signal, clearConnectTimeout, release } = timeoutSignal(8000, externalSignal);
+      let res;
+      try {
+        res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload, signal });
+      } catch (err) {
+        release();
+        if (externalSignal && externalSignal.aborted) return { ok: false, httpStatus: 0, errStatus: 'RACE_CANCELLED', errBody: '' };
+        return { ok: false, httpStatus: 0, errStatus: 'NETWORK_ERROR', errBody: String(err && err.message || err) };
+      }
+      if (res.ok) {
+        clearConnectTimeout();
+        return runStream(res, { extractDelta: extractGeminiDelta, onDelta, signal }).finally(release);
+      }
       release();
-      if (externalSignal && externalSignal.aborted) return { ok: false, httpStatus: 0, errStatus: 'RACE_CANCELLED', errBody: '' };
-      return { ok: false, httpStatus: 0, errStatus: 'NETWORK_ERROR', errBody: String(err && err.message || err) };
+      if ((res.status === 500 || res.status === 503) && retryN < RETRY_DELAYS_MS.length) {
+        await new Promise((r) => setTimeout(r, withJitterLocal(RETRY_DELAYS_MS[retryN])));
+        retryN++;
+        continue;
+      }
+      let errBody = '', errStatus = '';
+      try { errBody = await res.text(); errStatus = JSON.parse(errBody)?.error?.status || ''; } catch { /* non-JSON error body */ }
+      return { ok: false, httpStatus: res.status, errStatus, errBody };
     }
-    if (res.ok) {
-      clearConnectTimeout();
-      return runStream(res, { extractDelta: extractGeminiDelta, onDelta, signal }).finally(release);
-    }
-    release();
-    if ((res.status === 500 || res.status === 503) && attempt < RETRY_DELAYS_MS.length) {
-      await new Promise((r) => setTimeout(r, withJitterLocal(RETRY_DELAYS_MS[attempt])));
-      attempt++;
-      continue;
-    }
-    let errBody = '', errStatus = '';
-    try { errBody = await res.text(); errStatus = JSON.parse(errBody)?.error?.status || ''; } catch { /* non-JSON error body */ }
-    return { ok: false, httpStatus: res.status, errStatus, errBody };
   }
+
+  const first = await sendOnce(true);
+  // Only engages when: a tool was actually attached, the attempt truly
+  // failed (first.ok covers both clean success AND committed-interrupted —
+  // see COMMITMENT SEMANTICS above — so a mid-stream drop after commitment
+  // is correctly never retried), and the failure code is one grounding is
+  // known to produce. Bounded to exactly one extra subrequest per key: if
+  // it fires and still fails, `first` is returned unchanged — this can only
+  // turn a failure into a success, never the reverse, and is a complete
+  // no-op (zero extra cost) whenever searchGroundingEnabled is false,
+  // matching this file's existing off-by-default guarantee.
+  if (!tools || first.ok || !GROUNDING_RETRY_TRIGGERS.has(first.errStatus)) return first;
+
+  const retry = await sendOnce(false);
+  if (!retry.ok) return first; // tool wasn't the (sole) problem — report the original grounded failure upstream unchanged
+  // [PATCH — grounding fail-open] Empirical proof the tool itself was the
+  // failure cause on this key/project. groundingRetryProof lets the caller
+  // (chat.js) stop attaching the tool for the rest of this request and mark
+  // it broken in rotation.mjs's cache for subsequent requests — see
+  // isGroundingBroken/markGroundingBroken.
+  return { ...retry, groundingRetryProof: true };
 }
 
 // ── Groq / OpenRouter (OpenAI-compatible chat.completions, stream:true) ────
