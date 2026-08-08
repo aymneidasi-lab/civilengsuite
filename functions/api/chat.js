@@ -1208,6 +1208,7 @@ import {
 import { raceKeyPool } from '../_lib/raceKeyPool.mjs';
 import { callGeminiStreaming, callOpenAiCompatStreaming, callWorkersAIStreaming } from '../_lib/streamingProviders.mjs';
 import { StreamingSanitizer } from '../_lib/streamSanitizer.mjs';
+import { NotationNormalizer } from '../_lib/notationNormalizer.mjs'; // [PATCH] was never wired in on this branch -- see relay() below
 import { SseChunkWriter } from '../_lib/resumableSse.mjs'; // [PATCH] resume-mechanism chunkIndex writer
 import { assertPromptBudget } from '../_lib/promptBudget.mjs';
 
@@ -2224,6 +2225,31 @@ the alternative briefly, then leave the pick to the user — never a flat list w
 Egyptian-Arabic worked example (match this register, not فصحى):
 "يا هندسة، عشان تتفادى الـ **punching shear** في الـ **combined footing**، يفضل تزود الـ
 **effective depth** أو تستخدم **drop panel**. إيه رأيك؟ 🛠️"
+
+════════════════════════════════════════
+NOTATION — SUBSCRIPTED ENGINEERING SYMBOLS (CRITICAL)
+════════════════════════════════════════
+The client has no LaTeX/math renderer. Write every subscripted symbol as plain
+base_sub with a literal underscore, nothing else around it — the app converts this
+automatically into a real lowered subscript before the person sees it. You never need
+to (and must not) do any subscript formatting by hand.
+
+DO: fcu -> write f_cu · fy -> write f_y · Ac -> write A_c · Pu -> write P_u ·
+qu -> write q_u · qall -> write q_all. Braces (f_{cu}) also work if that's what
+comes out naturally — either form is fine, plain f_cu is simplest.
+
+NEVER DO:
+• Wrap any part of a reply in $ or $$ (LaTeX math-mode delimiters) — "$f_cu$",
+  "$$q_u = 1.2D + 1.6L$$". There is no renderer for these; they show up broken.
+  ($ for an actual price, like $249, is unrelated and completely fine.)
+• Manually type a Unicode superscript/subscript character yourself (ᶜ ᵘ ⁿ ₐ ᵗ or
+  similar small raised/lowered letters) to fake the look of a subscript. Always the
+  plain underscore form above — never hand-pick a Unicode glyph for this.
+Both mistakes are things models trained on LaTeX-heavy math text drift toward by
+habit; this product specifically needs the plain underscore form every time, with
+no exceptions for "just this once" or "it looked more correct this way."
+Worked example: "لازم الـ **f_cu** يكون أكبر من 20 ميجاباسكال عشان الكود يعدي." renders
+with cu correctly lowered under the f — never write "fᶜᵘ" or "$f_{cu}$" instead.
 
 ════════════════════════════════════════
 ARABIC DIALECT TRAINING — EGYPTIAN (عامية مصرية)
@@ -3603,6 +3629,9 @@ unless content is genuinely list-shaped. Egyptian Arabic register: default "حض
 "إنت" if they use it; favour دلوقتي، يعني، بصراحة، خالص، طب/طيب، مفيش، بقى، علشان، كمان، برضو
 over فصحى equivalents. Bold codes/terms/values in **double asterisks** (renders highlighted,
 2–4 per reply); at most one emoji, at the very end, from ✅💡🛠️📋, only when it genuinely fits.
+Subscripted symbols: plain underscore form only — f_cu, A_s, P_u, q_u — never $ / $$
+delimiters and never a hand-typed Unicode super/subscript character; the app renders the
+real subscript from the plain underscore automatically, same rule as established earlier.
 
 CORE PRODUCT FACTS — Civil Engineering Suite / Footing Pro v.2026 (the only live product):
 • Three standalone apps: Rectangular Combined Footing (equal/near-equal loads), Trapezoidal
@@ -5284,7 +5313,13 @@ export async function onRequestPost(context) {
   // see the CAPABILITY HONESTY note on webSearchSection above for why that
   // coupling matters. Default OFF means: deploying this file changes
   // nothing about current behaviour until this env var is set.
-  const searchGroundingEnabled = env.ENABLE_SEARCH_GROUNDING === '1';
+  // [FIX — search bridge / config-tolerance] Strict `=== '1'` silently stayed
+  // OFF against the value actually saved in the Cloudflare Pages dashboard
+  // ("true", typed as the natural boolean-ish string) -- the toggle was a
+  // no-op in production. Accept the common truthy spellings so the dashboard
+  // value and the runtime check agree; still OFF for unset/'0'/'false'/empty.
+  const searchGroundingEnabled = ['1', 'true', 'yes', 'on']
+    .includes(String(env.ENABLE_SEARCH_GROUNDING || '').trim().toLowerCase());
   const baseSystemPrompt   = isFirstTurn ? buildSystemPrompt(isDeveloperMode, searchGroundingEnabled) : buildGeminiFollowupPrompt(isDeveloperMode, searchGroundingEnabled);
 
   // v16: KB retrieval query — the live message, plus the immediately prior
@@ -5395,12 +5430,24 @@ export async function onRequestPost(context) {
         bannerDevTerms: BANNER_DEVMODE_TERMS,
         bannerConfirmTerms: BANNER_CONFIRM_TERMS,
       });
+      // [PATCH] notationNormalizer wired in — composed AFTER the sanitizer
+      // per notationNormalizer.mjs's own header: the confidentiality gate
+      // decides what may be sent at all, this only reshapes text already
+      // cleared to send. Independent holdback buffer from the sanitizer's
+      // own (different token shapes, different margins) — each module
+      // manages its own streaming safety, composition just chains the two
+      // `emit` strings in order.
+      const normalizer = new NotationNormalizer();
       function relay(deltaText) {
         const { emit, retracted } = sanitizer.push(deltaText);
-        if (emit) { sseWriter.writeDelta(emit); sentAnything = true; }
+        if (emit) {
+          const { emit: normalized } = normalizer.push(emit);
+          if (normalized) { sseWriter.writeDelta(normalized); sentAnything = true; }
+        }
         return retracted;
       }
 
+     try {
       let geminiWinner = null;
       for (const modelTier of [GEMINI_MODEL_PRIMARY, GEMINI_MODEL_FALLBACK]) {
         if (geminiWinner || budget.remaining() <= 0) break;
@@ -5433,7 +5480,15 @@ export async function onRequestPost(context) {
               if (relay(text)) retractedThisTier = true;
             }, signal, searchGroundingEnabled ? GOOGLE_SEARCH_TOOL : undefined); // [PATCH — search bridge]
             if (res.errStatus && res.errStatus !== 'SUBREQUEST_BUDGET_EXHAUSTED' && res.errStatus !== 'RACE_CANCELLED') {
-              console.warn(`[chat.js] Gemini ${keyTagFor(originalIndex) || 'key1-'}${modelTier} failed:`, res.errStatus, res.httpStatus);
+              // [FIX — diagnostics] errStatus/httpStatus alone cannot tell a
+              // grounding-specific rejection (e.g. INVALID_ARGUMENT on the
+              // `tools` field, or a FAILED_PRECONDITION/PERMISSION_DENIED tied
+              // to the key's project) apart from any other 400/403. errBody
+              // carries Google's actual message field; capped at 400 chars
+              // since it's occasionally a full HTML/JSON error page. Gemini
+              // error bodies do not echo the API key.
+              const bodyPreview = typeof res.errBody === 'string' ? res.errBody.slice(0, 400) : res.errBody;
+              console.warn(`[chat.js] Gemini ${keyTagFor(originalIndex) || 'key1-'}${modelTier} failed:`, res.errStatus, res.httpStatus, bodyPreview);
             }
             markKeyResult('gemini', originalIndex, res);
             markModelResult('gemini', modelTier, res);
@@ -5447,6 +5502,17 @@ export async function onRequestPost(context) {
         );
 
         if (retractedThisTier) {
+          // [PATCH — verified 2026-08-08] writeDone() restored. Direct read
+          // of resumableSse.mjs (lines 85-172, full method bodies) plus live
+          // execution: `this._done = true` occurs exactly ONCE, inside
+          // writeDone() (line 164). writeRedacted()/writeError() do not set
+          // it — the class's own header comment calls them "Non-terminal"
+          // and its usage example shows writeRedacted(...); writeDone({})
+          // as the intended pair. Without writeDone() here, the client never
+          // receives {done:true, finalChunkIndex}; isDone stays false. Does
+          // not cause a resume-loop (sendChatRequestWithResume gates on
+          // result.localDisconnect, not doneEvent — footing_pro_v47.html
+          // :14937), but it is a real protocol-contract violation.
           sseWriter.writeRedacted(REDACT_MSG);
           sseWriter.writeDone({});
           closeStream();
@@ -5502,6 +5568,9 @@ export async function onRequestPost(context) {
           if (relay(text)) workersRetracted = true;
         }, { maxTokens: 2048 });
         if (workersRetracted) {
+          // See the Gemini-tier redaction branch above — writeDone()
+          // restored; writeRedacted() does not set resumableSse.mjs's
+          // _done latch, so it is not independently terminal.
           sseWriter.writeRedacted(REDACT_MSG);
           sseWriter.writeDone({});
           closeStream();
@@ -5560,6 +5629,8 @@ export async function onRequestPost(context) {
               { concurrency: RACE_CONCURRENCY, shouldStop: () => budget.remaining() <= 0 || groqRetracted },
             );
             if (groqRetracted) {
+              // See the Gemini-tier redaction branch above — writeDone()
+              // restored.
               sseWriter.writeRedacted(REDACT_MSG);
               sseWriter.writeDone({});
               closeStream();
@@ -5624,6 +5695,8 @@ export async function onRequestPost(context) {
               { concurrency: RACE_CONCURRENCY, shouldStop: () => budget.remaining() <= 0 || orRetracted },
             );
             if (orRetracted) {
+              // See the Gemini-tier redaction branch above — writeDone()
+              // restored.
               sseWriter.writeRedacted(REDACT_MSG);
               sseWriter.writeDone({});
               closeStream();
@@ -5645,11 +5718,39 @@ export async function onRequestPost(context) {
 
       // 10. All layers exhausted, nothing ever reached the client.
       if (!finalWinResult && !sentAnything) {
+        // [PATCH — verified 2026-08-08] writeDone() restored. The claim
+        // that writeError() "independently sets resumableSse.mjs's _done
+        // latch (line 146)" does not hold — line 146 of that file is a
+        // comment, not an assignment; `this._done = true` appears only in
+        // writeDone() (line 164). writeError()'s own {error, chunkIndex}
+        // frame does still reach the client either way (that part of the
+        // prior note was correct, and is unrelated to the "No response.
+        // Please try again." symptom, which is a frontend-side concern —
+        // see footing_pro_v47.html ~15903/16522). Restoring writeDone()
+        // only affects whether {done:true, finalChunkIndex} ever arrives.
         sseWriter.writeError(buildFriendlyError(lastProviderResult, workersAttempted, userMessage));
         sseWriter.writeDone({});
         closeStream();
         return;
       }
+
+      // [DIAG] Temporary instrumentation — same purpose as the copy in the
+      // notationNormalizer-integrated chat.js: bisects a "clean stream, zero
+      // delta/error/redacted" client symptom (finalText empty, gotError
+      // null, no redaction) that a provider "win" with nothing actually
+      // relayed would produce. sanitizerRawLen>0 with nothing emitted below
+      // points at StreamingSanitizer's flush; sanitizerRawLen===0 points at
+      // the raceKeyPool/streamingProviders commitment contract instead.
+      // Remove once a real occurrence's log line answers this.
+      console.warn('[chat.js][DIAG empty-turn]', {
+        sourceTag,
+        finalWinResultOk: !!(finalWinResult && finalWinResult.ok),
+        sentAnything,
+        sanitizerRawLen: sanitizer.raw.length,
+        sanitizerRetracted: sanitizer.retracted,
+        sanitizerEmittedLen: sanitizer.emittedLen,
+        lastProviderResultErrStatus: lastProviderResult && lastProviderResult.errStatus,
+      });
 
       // finish() flushes whatever the sanitizer's blocklist holdback margin
       // was still withholding — without this, the last (longest-blocklist-
@@ -5657,7 +5758,19 @@ export async function onRequestPost(context) {
       // never reach the client, since push() alone never emits that trailing
       // margin (see streamSanitizer.mjs).
       const { emit: trailingEmit, finalText } = sanitizer.finish();
-      if (trailingEmit) sseWriter.writeDelta(trailingEmit);
+      // [PATCH] Same two-step flush shape as the sanitizer above: push
+      // whatever the sanitizer released at the very end through the
+      // normalizer, THEN call the normalizer's own finish() to release
+      // whatever ITS holdback buffer was still sitting on (e.g. a reply
+      // that ends mid-symbol, "...the value of f_{cu" with no trailing
+      // punctuation — without this second call, up to MAX_HOLDBACK=64
+      // trailing characters of every reply would silently never reach
+      // the client, the same class of bug the sanitizer.finish() comment
+      // above already documents for its own buffer).
+      let trailingNormalized = '';
+      if (trailingEmit) trailingNormalized += normalizer.push(trailingEmit).emit;
+      trailingNormalized += normalizer.finish().emit;
+      if (trailingNormalized) sseWriter.writeDelta(trailingNormalized);
       logFactDrift(scanForFactDrift(finalText), { provider: sourceTag, isFirstTurn, isDeveloperMode });
       // [PATCH] BUG 3/4 FIX — surface truncation to the client instead of
       // only console.warn-ing it server-side (the old behaviour: detected,
@@ -5690,6 +5803,24 @@ export async function onRequestPost(context) {
         ...(isDeveloperMode && { devMode: true }),
       });
       closeStream();
+     } catch (err) {
+      // Every other layer in this pipeline absorbs its own exceptions
+      // (runStream's try/catch/finally in streamingProviders.mjs,
+      // raceKeyPool's per-attempt .catch) and turns them into a normal
+      // {ok:false} result. This outer body had no equivalent: a throw here
+      // previously errored the ReadableStream directly, so the client's
+      // reader saw the connection die with no SSE payload at all,
+      // indistinguishable from a network drop, with nothing server-side
+      // recording the actual cause. Kept from the prior draft — genuinely
+      // useful. writeDone() restored after writeError() — see the
+      // all-exhausted branch above; writeError() does not set
+      // resumableSse.mjs's _done latch, so without writeDone() the client
+      // never gets {done:true} on this path either.
+      console.error('[chat.js] Unhandled exception inside stream start():', (err && err.stack) || String(err));
+      sseWriter.writeError(buildFriendlyError(lastProviderResult, workersAttempted, userMessage));
+      sseWriter.writeDone({});
+      closeStream();
+     }
     },
   });
 
