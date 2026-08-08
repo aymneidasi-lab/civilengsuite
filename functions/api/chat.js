@@ -1208,7 +1208,6 @@ import {
 import { raceKeyPool } from '../_lib/raceKeyPool.mjs';
 import { callGeminiStreaming, callOpenAiCompatStreaming, callWorkersAIStreaming } from '../_lib/streamingProviders.mjs';
 import { StreamingSanitizer } from '../_lib/streamSanitizer.mjs';
-import { SseChunkWriter } from '../_lib/resumableSse.mjs'; // [PATCH] resume-mechanism chunkIndex writer
 import { assertPromptBudget } from '../_lib/promptBudget.mjs';
 
 
@@ -5377,20 +5376,11 @@ export async function onRequestPost(context) {
       let streamClosed = false;
 
       function closeStream() { if (!streamClosed) { streamClosed = true; controller.close(); } }
-      // [PATCH] Manual `data: ...` framing replaced by SseChunkWriter (see
-      // functions/_lib/resumableSse.mjs) — assigns the client-facing
-      // chunkIndex/finalChunkIndex the frontend's resume handshake reads.
-      // The streamClosed guard + enqueue try/catch that used to live
-      // inside sendEvent() move into this write callback unchanged: they
-      // guard this Worker invocation's own controller, which
-      // SseChunkWriter is deliberately agnostic to (see its constructor's
-      // `write` param doc) — not a loss of resilience, just relocated one
-      // level out to where streamClosed/controller already live.
-      const sseWriter = new SseChunkWriter((chunk) => {
+      function sendEvent(obj) {
         if (streamClosed) return; // a losing racer's callback arrived after we already finished
-        try { controller.enqueue(chunk); }
+        try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`)); }
         catch { streamClosed = true; } // controller already closed by the runtime underneath us
-      }, encoder);
+      }
       const REDACT_MSG = isArabicText(userMessage)
         ? 'الموضوع ده متعلق ببنية الموقع الداخلية، وأنا مش بتكلم فيه بره وضع المطور. تحب نرجع لسؤالك الهندسي؟'
         : "That's about the site's internal setup, which isn't something I discuss outside developer mode. Want to get back to your engineering question?";
@@ -5403,7 +5393,7 @@ export async function onRequestPost(context) {
       });
       function relay(deltaText) {
         const { emit, retracted } = sanitizer.push(deltaText);
-        if (emit) { sseWriter.writeDelta(emit); sentAnything = true; }
+        if (emit) { sendEvent({ delta: emit }); sentAnything = true; }
         return retracted;
       }
 
@@ -5462,14 +5452,8 @@ export async function onRequestPost(context) {
         );
 
         if (retractedThisTier) {
-          // Re-verified against resumableSse.mjs directly (byte read + live
-          // node execution): `this._done = true` appears in writeRedacted(),
-          // writeError(), AND writeDone() — 3 occurrences, not 1. A prior
-          // edit here claimed otherwise and re-added writeDone(); that
-          // claim does not match the source and the call was a no-op again
-          // (confirmed: writeDone() returns false, zero frame emitted,
-          // after writeRedacted() has already run). Removed once more.
-          sseWriter.writeRedacted(REDACT_MSG);
+          sendEvent({ redacted: true, reply: REDACT_MSG });
+          sendEvent({ done: true });
           closeStream();
           return;
         }
@@ -5523,10 +5507,8 @@ export async function onRequestPost(context) {
           if (relay(text)) workersRetracted = true;
         }, { maxTokens: 2048 });
         if (workersRetracted) {
-          // See the Gemini-tier redaction branch above — the "writeDone()
-          // must follow" claim was re-checked against resumableSse.mjs and
-          // doesn't hold; writeRedacted() is independently terminal.
-          sseWriter.writeRedacted(REDACT_MSG);
+          sendEvent({ redacted: true, reply: REDACT_MSG });
+          sendEvent({ done: true });
           closeStream();
           return;
         }
@@ -5583,9 +5565,8 @@ export async function onRequestPost(context) {
               { concurrency: RACE_CONCURRENCY, shouldStop: () => budget.remaining() <= 0 || groqRetracted },
             );
             if (groqRetracted) {
-              // See the Gemini-tier redaction branch above — re-verified,
-              // writeRedacted() is independently terminal.
-              sseWriter.writeRedacted(REDACT_MSG);
+              sendEvent({ redacted: true, reply: REDACT_MSG });
+              sendEvent({ done: true });
               closeStream();
               return;
             }
@@ -5648,9 +5629,8 @@ export async function onRequestPost(context) {
               { concurrency: RACE_CONCURRENCY, shouldStop: () => budget.remaining() <= 0 || orRetracted },
             );
             if (orRetracted) {
-              // See the Gemini-tier redaction branch above — re-verified,
-              // writeRedacted() is independently terminal.
-              sseWriter.writeRedacted(REDACT_MSG);
+              sendEvent({ redacted: true, reply: REDACT_MSG });
+              sendEvent({ done: true });
               closeStream();
               return;
             }
@@ -5670,37 +5650,11 @@ export async function onRequestPost(context) {
 
       // 10. All layers exhausted, nothing ever reached the client.
       if (!finalWinResult && !sentAnything) {
-        // Re-verified: writeError() independently sets resumableSse.mjs's
-        // _done latch (line 146 of that file) and its own {error,
-        // chunkIndex} frame reaches the client whether or not writeDone()
-        // is called after it — confirmed both by reading the source and by
-        // running it. It also isn't the cause of the "No response. Please
-        // try again." symptom specifically: that frontend fallback
-        // (footing_pro_v47.html ~15903) only fires when result.gotError is
-        // falsy, and gotError is populated straight from this writeError()
-        // frame regardless of the writeDone() call that follows it.
-        sseWriter.writeError(buildFriendlyError(lastProviderResult, workersAttempted, userMessage));
+        sendEvent({ error: buildFriendlyError(lastProviderResult, workersAttempted, userMessage) });
+        sendEvent({ done: true });
         closeStream();
         return;
       }
-
-      // [DIAG] Temporary instrumentation — same purpose as the copy in the
-      // notationNormalizer-integrated chat.js: bisects a "clean stream, zero
-      // delta/error/redacted" client symptom (finalText empty, gotError
-      // null, no redaction) that a provider "win" with nothing actually
-      // relayed would produce. sanitizerRawLen>0 with nothing emitted below
-      // points at StreamingSanitizer's flush; sanitizerRawLen===0 points at
-      // the raceKeyPool/streamingProviders commitment contract instead.
-      // Remove once a real occurrence's log line answers this.
-      console.warn('[chat.js][DIAG empty-turn]', {
-        sourceTag,
-        finalWinResultOk: !!(finalWinResult && finalWinResult.ok),
-        sentAnything,
-        sanitizerRawLen: sanitizer.raw.length,
-        sanitizerRetracted: sanitizer.retracted,
-        sanitizerEmittedLen: sanitizer.emittedLen,
-        lastProviderResultErrStatus: lastProviderResult && lastProviderResult.errStatus,
-      });
 
       // finish() flushes whatever the sanitizer's blocklist holdback margin
       // was still withholding — without this, the last (longest-blocklist-
@@ -5708,7 +5662,7 @@ export async function onRequestPost(context) {
       // never reach the client, since push() alone never emits that trailing
       // margin (see streamSanitizer.mjs).
       const { emit: trailingEmit, finalText } = sanitizer.finish();
-      if (trailingEmit) sseWriter.writeDelta(trailingEmit);
+      if (trailingEmit) sendEvent({ delta: trailingEmit });
       logFactDrift(scanForFactDrift(finalText), { provider: sourceTag, isFirstTurn, isDeveloperMode });
       // [PATCH] BUG 3/4 FIX — surface truncation to the client instead of
       // only console.warn-ing it server-side (the old behaviour: detected,
@@ -5733,7 +5687,8 @@ export async function onRequestPost(context) {
       const sources = finalWinResult
         ? extractGroundingSources(finalWinResult.groundingMetadata)
         : [];
-      sseWriter.writeDone({
+      sendEvent({
+        done: true,
         source: sourceTag,
         truncated,
         interrupted: !!(finalWinResult && finalWinResult.interrupted),
@@ -5742,20 +5697,16 @@ export async function onRequestPost(context) {
       });
       closeStream();
      } catch (err) {
-      // Every other layer in this pipeline absorbs its own exceptions
-      // (runStream's try/catch/finally in streamingProviders.mjs,
-      // raceKeyPool's per-attempt .catch) and turns them into a normal
-      // {ok:false} result. This outer body had no equivalent: a throw here
-      // previously errored the ReadableStream directly, so the client's
-      // reader saw the connection die with no SSE payload at all,
-      // indistinguishable from a network drop, with nothing server-side
-      // recording the actual cause. Kept from the prior draft — genuinely
-      // useful. writeDone() after writeError() removed: re-verified against
-      // resumableSse.mjs (see the all-exhausted branch above) that
-      // writeError() alone already reaches the client and is independently
-      // terminal; the extra call was a no-op, not "not enough."
+      // [FIX — resilience] Every other layer in this pipeline absorbs its own
+      // exceptions (runStream's try/catch/finally in streamingProviders.mjs,
+      // raceKeyPool's per-attempt .catch, extractGeminiDelta's internal
+      // try/catch) and turns them into a normal {ok:false} result. This outer
+      // body had no equivalent: a throw here previously errored the
+      // ReadableStream directly, so the client's reader just saw the
+      // connection die with no SSE payload — indistinguishable from a network
+      // drop — and nothing server-side recorded the actual cause.
       console.error('[chat.js] Unhandled exception inside stream start():', (err && err.stack) || String(err));
-      sseWriter.writeError(buildFriendlyError(lastProviderResult, workersAttempted, userMessage));
+      sendEvent({ error: buildFriendlyError(lastProviderResult, workersAttempted, userMessage) });
       closeStream();
      }
     },
