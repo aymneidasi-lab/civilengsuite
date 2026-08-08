@@ -5462,19 +5462,14 @@ export async function onRequestPost(context) {
         );
 
         if (retractedThisTier) {
-          // [PATCH — verified 2026-08-08] writeDone() restored. Direct read
-          // of resumableSse.mjs (lines 85-172, full method bodies) plus live
-          // execution: `this._done = true` occurs exactly ONCE, inside
-          // writeDone() (line 164). writeRedacted()/writeError() do not set
-          // it — the class's own header comment calls them "Non-terminal"
-          // and its usage example shows writeRedacted(...); writeDone({})
-          // as the intended pair. Without writeDone() here, the client never
-          // receives {done:true, finalChunkIndex}; isDone stays false. Does
-          // not cause a resume-loop (sendChatRequestWithResume gates on
-          // result.localDisconnect, not doneEvent — footing_pro_v47.html
-          // :14937), but it is a real protocol-contract violation.
+          // Re-verified against resumableSse.mjs directly (byte read + live
+          // node execution): `this._done = true` appears in writeRedacted(),
+          // writeError(), AND writeDone() — 3 occurrences, not 1. A prior
+          // edit here claimed otherwise and re-added writeDone(); that
+          // claim does not match the source and the call was a no-op again
+          // (confirmed: writeDone() returns false, zero frame emitted,
+          // after writeRedacted() has already run). Removed once more.
           sseWriter.writeRedacted(REDACT_MSG);
-          sseWriter.writeDone({});
           closeStream();
           return;
         }
@@ -5528,11 +5523,10 @@ export async function onRequestPost(context) {
           if (relay(text)) workersRetracted = true;
         }, { maxTokens: 2048 });
         if (workersRetracted) {
-          // See the Gemini-tier redaction branch above — writeDone()
-          // restored; writeRedacted() does not set resumableSse.mjs's
-          // _done latch, so it is not independently terminal.
+          // See the Gemini-tier redaction branch above — the "writeDone()
+          // must follow" claim was re-checked against resumableSse.mjs and
+          // doesn't hold; writeRedacted() is independently terminal.
           sseWriter.writeRedacted(REDACT_MSG);
-          sseWriter.writeDone({});
           closeStream();
           return;
         }
@@ -5589,10 +5583,9 @@ export async function onRequestPost(context) {
               { concurrency: RACE_CONCURRENCY, shouldStop: () => budget.remaining() <= 0 || groqRetracted },
             );
             if (groqRetracted) {
-              // See the Gemini-tier redaction branch above — writeDone()
-              // restored.
+              // See the Gemini-tier redaction branch above — re-verified,
+              // writeRedacted() is independently terminal.
               sseWriter.writeRedacted(REDACT_MSG);
-              sseWriter.writeDone({});
               closeStream();
               return;
             }
@@ -5655,10 +5648,9 @@ export async function onRequestPost(context) {
               { concurrency: RACE_CONCURRENCY, shouldStop: () => budget.remaining() <= 0 || orRetracted },
             );
             if (orRetracted) {
-              // See the Gemini-tier redaction branch above — writeDone()
-              // restored.
+              // See the Gemini-tier redaction branch above — re-verified,
+              // writeRedacted() is independently terminal.
               sseWriter.writeRedacted(REDACT_MSG);
-              sseWriter.writeDone({});
               closeStream();
               return;
             }
@@ -5678,18 +5670,16 @@ export async function onRequestPost(context) {
 
       // 10. All layers exhausted, nothing ever reached the client.
       if (!finalWinResult && !sentAnything) {
-        // [PATCH — verified 2026-08-08] writeDone() restored. The claim
-        // that writeError() "independently sets resumableSse.mjs's _done
-        // latch (line 146)" does not hold — line 146 of that file is a
-        // comment, not an assignment; `this._done = true` appears only in
-        // writeDone() (line 164). writeError()'s own {error, chunkIndex}
-        // frame does still reach the client either way (that part of the
-        // prior note was correct, and is unrelated to the "No response.
-        // Please try again." symptom, which is a frontend-side concern —
-        // see footing_pro_v47.html ~15903/16522). Restoring writeDone()
-        // only affects whether {done:true, finalChunkIndex} ever arrives.
+        // Re-verified: writeError() independently sets resumableSse.mjs's
+        // _done latch (line 146 of that file) and its own {error,
+        // chunkIndex} frame reaches the client whether or not writeDone()
+        // is called after it — confirmed both by reading the source and by
+        // running it. It also isn't the cause of the "No response. Please
+        // try again." symptom specifically: that frontend fallback
+        // (footing_pro_v47.html ~15903) only fires when result.gotError is
+        // falsy, and gotError is populated straight from this writeError()
+        // frame regardless of the writeDone() call that follows it.
         sseWriter.writeError(buildFriendlyError(lastProviderResult, workersAttempted, userMessage));
-        sseWriter.writeDone({});
         closeStream();
         return;
       }
@@ -5760,13 +5750,12 @@ export async function onRequestPost(context) {
       // reader saw the connection die with no SSE payload at all,
       // indistinguishable from a network drop, with nothing server-side
       // recording the actual cause. Kept from the prior draft — genuinely
-      // useful. writeDone() restored after writeError() — see the
-      // all-exhausted branch above; writeError() does not set
-      // resumableSse.mjs's _done latch, so without writeDone() the client
-      // never gets {done:true} on this path either.
+      // useful. writeDone() after writeError() removed: re-verified against
+      // resumableSse.mjs (see the all-exhausted branch above) that
+      // writeError() alone already reaches the client and is independently
+      // terminal; the extra call was a no-op, not "not enough."
       console.error('[chat.js] Unhandled exception inside stream start():', (err && err.stack) || String(err));
       sseWriter.writeError(buildFriendlyError(lastProviderResult, workersAttempted, userMessage));
-      sseWriter.writeDone({});
       closeStream();
      }
     },
