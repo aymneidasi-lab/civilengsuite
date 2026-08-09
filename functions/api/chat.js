@@ -5271,7 +5271,9 @@ export async function onRequestPost(context) {
         return json(
           {
             ok: false,
-            error: 'Image generation is not configured on the server (missing Workers AI binding).',
+            error: likelyArabic
+              ? 'توليد الصور مش شغال دلوقتي على السيرفر (ناقص إعداد Workers AI).'
+              : 'Image generation is not configured on the server (missing Workers AI binding).',
             code: 'AI_NOT_BOUND',
           },
           500, undefined, request,
