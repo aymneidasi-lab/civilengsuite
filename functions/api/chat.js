@@ -5409,14 +5409,14 @@ export async function onRequestPost(context) {
   // Applied unconditionally (not just when searchGroundingEnabled is true):
   // a higher ceiling on a smaller, off-state prompt is harmless headroom,
   // not a bug — simpler than making the ceiling itself conditional too.
-  // [PATCH — budget reconciliation] Ceilings were never raised when the
-  // NOTATION — SUBSCRIPTED ENGINEERING SYMBOLS block (full tier, ~1,552
-  // chars/~407 tokens) and its condensed one-paragraph counterpart (~360
-  // chars/~95 tokens) were added above -- both tiers were asserting against
-  // a ceiling that predates content already present in the string being
-  // measured. Bumped by the exact measured size of each, same convention
-  // as the WEB SEARCH ceiling bump elsewhere in this file.
-  assertPromptBudget('geminiSystemPrompt', geminiSystemPrompt, isFirstTurn ? 14107 : 1345, env);
+  // [PATCH — budget reconciliation, 2nd pass] Same gap, same cause, second
+  // occurrence: the Arabic-phonetic-transliteration guard ("no إف سي يو for
+  // f_cu") was added to the NOTATION block in all three tiers without a
+  // matching ceiling bump. Measured directly from the diff rather than
+  // re-deriving from scratch: full tier +445 chars/~117 tokens, condensed
+  // +86 chars/~23 tokens, workers +74 chars/~20 tokens, applied on top of
+  // the previous bump (14107/1345/1065) at all three call sites.
+  assertPromptBudget('geminiSystemPrompt', geminiSystemPrompt, isFirstTurn ? 14224 : 1368, env);
 
   const geminiKeysIndexed = buildGeminiKeyPool(env);
 
@@ -5604,9 +5604,11 @@ export async function onRequestPost(context) {
         const workersSystemContent = (isDeveloperMode
           ? DEVELOPER_SYSTEM_PROMPT + baseWorkersPrompt
           : baseWorkersPrompt) + workersKbFacts + clientDateBlock;
-        // [PATCH — budget reconciliation] +132 chars/~35 tokens for the
-        // notation reminder just added to this tier (see buildWorkersAiSystemPrompt).
-        assertPromptBudget('workersSystemContent', workersSystemContent, 1065, env);
+        // [PATCH — budget reconciliation, 2nd pass] +74 chars/~20 tokens for
+        // the Arabic-transliteration-guard addition to this tier's notation
+        // reminder (see buildWorkersAiSystemPrompt and the geminiSystemPrompt
+        // budget comment above for the other two tiers' matching bumps).
+        assertPromptBudget('workersSystemContent', workersSystemContent, 1085, env);
         const workersMsgs = [
           { role: 'system', content: workersSystemContent },
           ...turns.map(t => ({
