@@ -2248,17 +2248,11 @@ NEVER DO:
 • Manually type a Unicode superscript/subscript character yourself (ᶜ ᵘ ⁿ ₐ ᵗ or
   similar small raised/lowered letters) to fake the look of a subscript. Always the
   plain underscore form above — never hand-pick a Unicode glyph for this.
-• In an Arabic reply, spell the symbol out phonetically in Arabic letters instead of
-  writing the Latin token — "إف سي يو" or "أف سي يو" for f_cu, "بي يو" for P_u. f_cu
-  is a Latin engineering symbol, not an English word to transliterate; embed it as-is
-  inside the Arabic sentence, exactly like ACI 318-19 or ECP 203 stay untransliterated.
-All three mistakes are things models drift toward by habit — the first two from
-LaTeX-heavy math training data, the third from transliterating technical terms when
-writing in Arabic prose. This product needs the plain Latin underscore form every
-time, with no exceptions for "just this once" or "it looked more correct this way."
+Both mistakes are things models trained on LaTeX-heavy math text drift toward by
+habit; this product specifically needs the plain underscore form every time, with
+no exceptions for "just this once" or "it looked more correct this way."
 Worked example: "لازم الـ **f_cu** يكون أكبر من 20 ميجاباسكال عشان الكود يعدي." renders
-with cu correctly lowered under the f — never write "fᶜᵘ", "$f_{cu}$", or "إف سي يو"
-instead.
+with cu correctly lowered under the f — never write "fᶜᵘ" or "$f_{cu}$" instead.
 
 ════════════════════════════════════════
 ARABIC DIALECT TRAINING — EGYPTIAN (عامية مصرية)
@@ -3639,9 +3633,8 @@ unless content is genuinely list-shaped. Egyptian Arabic register: default "حض
 over فصحى equivalents. Bold codes/terms/values in **double asterisks** (renders highlighted,
 2–4 per reply); at most one emoji, at the very end, from ✅💡🛠️📋, only when it genuinely fits.
 Subscripted symbols: plain underscore form only — f_cu, A_s, P_u, q_u — never $ / $$
-delimiters, never a hand-typed Unicode super/subscript character, and never spelled out
-phonetically in Arabic letters (no "إف سي يو" for f_cu) — keep the Latin token as-is in
-Arabic sentences; the app renders the real subscript automatically, same rule as earlier.
+delimiters and never a hand-typed Unicode super/subscript character; the app renders the
+real subscript from the plain underscore automatically, same rule as established earlier.
 
 CORE PRODUCT FACTS — Civil Engineering Suite / Footing Pro v.2026 (the only live product):
 • Three standalone apps: Rectangular Combined Footing (equal/near-equal loads), Trapezoidal
@@ -3753,9 +3746,8 @@ LANGUAGE RULE (critical): Arabic message → reply only in Egyptian Arabic diale
 (عامية مصرية), never Modern Standard Arabic. English message → reply only in English.
 Never mix languages in one reply.
 
-Subscripted symbols: plain underscore only — f_cu, A_s, P_u, q_all — never $ / $$, a
-hand-typed Unicode super/subscript character, or an Arabic phonetic spelling like
-"إف سي يو" — keep the Latin token as-is.
+Subscripted symbols: plain underscore only — f_cu, A_s, P_u, q_all — never $ / $$ or a
+hand-typed Unicode super/subscript character.
 
 ${isDeveloperMode ? '' : `\
 CONFIDENTIALITY: never name/discuss your own backend, API, Cloudflare, hosting, or provider —
@@ -5409,14 +5401,14 @@ export async function onRequestPost(context) {
   // Applied unconditionally (not just when searchGroundingEnabled is true):
   // a higher ceiling on a smaller, off-state prompt is harmless headroom,
   // not a bug — simpler than making the ceiling itself conditional too.
-  // [PATCH — budget reconciliation, 2nd pass] Same gap, same cause, second
-  // occurrence: the Arabic-phonetic-transliteration guard ("no إف سي يو for
-  // f_cu") was added to the NOTATION block in all three tiers without a
-  // matching ceiling bump. Measured directly from the diff rather than
-  // re-deriving from scratch: full tier +445 chars/~117 tokens, condensed
-  // +86 chars/~23 tokens, workers +74 chars/~20 tokens, applied on top of
-  // the previous bump (14107/1345/1065) at all three call sites.
-  assertPromptBudget('geminiSystemPrompt', geminiSystemPrompt, isFirstTurn ? 14224 : 1368, env);
+  // [PATCH — budget reconciliation] Ceilings were never raised when the
+  // NOTATION — SUBSCRIPTED ENGINEERING SYMBOLS block (full tier, ~1,552
+  // chars/~407 tokens) and its condensed one-paragraph counterpart (~360
+  // chars/~95 tokens) were added above -- both tiers were asserting against
+  // a ceiling that predates content already present in the string being
+  // measured. Bumped by the exact measured size of each, same convention
+  // as the WEB SEARCH ceiling bump elsewhere in this file.
+  assertPromptBudget('geminiSystemPrompt', geminiSystemPrompt, isFirstTurn ? 14107 : 1345, env);
 
   const geminiKeysIndexed = buildGeminiKeyPool(env);
 
@@ -5604,11 +5596,9 @@ export async function onRequestPost(context) {
         const workersSystemContent = (isDeveloperMode
           ? DEVELOPER_SYSTEM_PROMPT + baseWorkersPrompt
           : baseWorkersPrompt) + workersKbFacts + clientDateBlock;
-        // [PATCH — budget reconciliation, 2nd pass] +74 chars/~20 tokens for
-        // the Arabic-transliteration-guard addition to this tier's notation
-        // reminder (see buildWorkersAiSystemPrompt and the geminiSystemPrompt
-        // budget comment above for the other two tiers' matching bumps).
-        assertPromptBudget('workersSystemContent', workersSystemContent, 1085, env);
+        // [PATCH — budget reconciliation] +132 chars/~35 tokens for the
+        // notation reminder just added to this tier (see buildWorkersAiSystemPrompt).
+        assertPromptBudget('workersSystemContent', workersSystemContent, 1065, env);
         const workersMsgs = [
           { role: 'system', content: workersSystemContent },
           ...turns.map(t => ({
