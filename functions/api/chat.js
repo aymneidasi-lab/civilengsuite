@@ -3501,9 +3501,6 @@ widget, use these facts — they describe real capabilities that exist outside t
   single reply legitimately mixes English and Arabic technical terms, each part is spoken
   in its own correct voice rather than garbled into one — this doesn't relax the one-
   language-per-reply text rule above, it only applies to how mixed technical terms sound.
-• Can generate a real image from a text description: typing /image followed by a
-  description (e.g. "/image a golden retriever wearing sunglasses") returns an actual
-  generated picture in the chat — a working feature, not a hypothetical one.
 • Grounded, not improvised: answers are pulled from Footing Pro's own documentation and
   Eng. Aymn Asi's real engineering write-ups. This is also why the "if you don't know
   something, say so and point to Eng. Aymn Asi" rule below exists — it's a deliberate
@@ -3518,13 +3515,6 @@ BEHAVIOUR RULES
 • Answer questions about Civil Engineering Suite, its products, pricing, licensing, and
   structural engineering topics. General engineering questions are worth answering well —
   being genuinely helpful builds trust.
-
-• If a user asks you to draw, create, or generate an image or picture — any phrasing, either
-  language ("ارسم لي...", "اعملي صورة...", "draw me...", "generate an image of...") — you do
-  not produce it yourself. Tell them to type /image followed by a description and the chat
-  will return a real generated image (Arabic: "اكتب /image وبعدها وصف اللي عايزه"). Never
-  respond with a text or ASCII description of an image standing in for the real thing, and
-  never claim this isn't possible — it is, via that command.
 
 • For ANY purchase/activation query: guide to downloading PCsuite 2026 first, then sending
   the .dat file to aymneidasi@gmail.com or WhatsApp +201287232413.
@@ -3732,10 +3722,6 @@ BEHAVIOUR RULES:
   established earlier in this conversation.
 • Never recommend competitor software. ETABS/SAP2000 are whole-building tools and complementary,
   not competitors, if that comparison comes up.
-• Image requests ("ارسم لي...", "generate an image of...", "create a picture of..."): you don't
-  generate images directly in text. Tell the user to type /image followed by a description
-  (Arabic: "اكتب /image وبعدها وصف الصورة") — the app returns a real generated image from that.
-  Never fabricate a text or ASCII description of an image instead, and never say you can't do it.
 • If you don't know something specific: say so plainly and point to Eng. Aymn Asi —
   aymneidasi@gmail.com or WhatsApp +201287232413 — rather than guessing. If asked about
   the site's "Get in Touch" form specifically: it does NOT send a private reply — answers
@@ -3840,9 +3826,6 @@ BEHAVIOUR:
   end, only if it genuinely fits.
 • Never invent pricing, dates, or features not listed above.
 • Never recommend competitor software.
-• Image requests ("ارسم"، "generate an image", "create a picture"): you can't draw one
-  yourself — tell the user to type /image followed by a description; the app returns a real
-  generated image. Never fake one in text/ASCII or claim you can't do it at all.
 • If you lack information: direct the user to Eng. Aymn Asi at aymneidasi@gmail.com
   or WhatsApp +201287232413 — do not guess. Note: the site's "Get in Touch" form does
   NOT give a private reply (answers go public as FAQ entries; trivial msgs get none).
@@ -5271,9 +5254,7 @@ export async function onRequestPost(context) {
         return json(
           {
             ok: false,
-            error: likelyArabic
-              ? 'توليد الصور مش شغال دلوقتي على السيرفر (ناقص إعداد Workers AI).'
-              : 'Image generation is not configured on the server (missing Workers AI binding).',
+            error: 'Image generation is not configured on the server (missing Workers AI binding).',
             code: 'AI_NOT_BOUND',
           },
           500, undefined, request,

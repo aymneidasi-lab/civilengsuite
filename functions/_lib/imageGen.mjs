@@ -7,30 +7,40 @@
 // on callWorkersAIStreaming for the identical point re: text) — so
 // nothing here takes a `budget` param.
 //
-// MODEL: '@cf/black-forest-labs/flux-1-schnell' only. Verified against
-// developers.cloudflare.com/workers-ai/models/flux-1-schnell (Aug 2026):
-// Input { prompt: string, required, max 2048 chars; steps: 1-8, default
-// 4 }. Output { image: <base64-encoded JPEG> }.
+// TWO MODELS, TRIED IN ORDER, SAME env.AI BINDING, SAME FREE NEURON POOL:
+//   1. '@cf/black-forest-labs/flux-1-schnell' — fast, cheap (4 steps by
+//      design), primary.
+//   2. '@cf/bytedance/stable-diffusion-xl-lightning' — different model
+//      family, used only if #1 throws/times out/returns something
+//      unusable. A different model, not a same-model retry: recovers
+//      from an outage or deprecation of #1 specifically, which a retry
+//      against the same model does nothing for.
 //
-// NO FALLBACK MODEL, DELIBERATELY. The obvious second choice,
-// '@cf/bytedance/stable-diffusion-xl-lightning', does NOT share this
-// output contract — Cloudflare's own usage example for it returns the
-// raw binary response directly:
-//   const response = await env.AI.run("@cf/bytedance/...-lightning", inputs);
-//   return new Response(response, { headers: { "content-type": "image/jpg" } });
-// — not `{ image: <base64> }`. A same-shape fallback wired in without
-// handling that conversion (stream/ArrayBuffer -> base64, chunked to
-// avoid a stack overflow on `String.fromCharCode(...largeArray)` for a
-// multi-hundred-KB image) would silently return EMPTY_IMAGE on every
-// fallback attempt. It also takes `num_steps` (default 20, max 20), not
-// `steps` — a second reason a shared call path across both models is not
-// a small change. A correctly-handled fallback is a reasonable future
-// addition; it needs its own conversion path, not a shared one with this
-// function.
-const IMAGE_MODEL = '@cf/black-forest-labs/flux-1-schnell';
-const IMAGE_GEN_STEPS = 4;    // model default; hard ceiling per docs is 8
+// A single-model version of this file (and two independent attempts at
+// adding this exact fallback before it) assumed both models return
+// { image: <base64 string> }. Verified against Cloudflare's own docs and
+// two independent official usage examples that this is wrong for #2:
+//   - developers.cloudflare.com/workers-ai/models/stable-diffusion-xl-base-1.0
+//     and .../stable-diffusion-v1-5-img2img (same Stable Diffusion
+//     pipeline family as the Lightning model): "The binding returns a
+//     ReadableStream with the output."
+//   - Cloudflare's own blog usage example for that family:
+//       const response = await env.AI.run("@cf/bytedance/stable-diffusion-xl-lightning", inputs);
+//       return new Response(response, { headers: { "content-type": "image/jpg" } });
+//     — response is passed directly as a Response body, not read as
+//     response.image.
+// normalizeImageResult() below handles both shapes so this fallback
+// actually works instead of silently returning EMPTY_IMAGE whenever it's
+// reached. It also takes `num_steps` (not `steps`) — a second, unrelated
+// reason a shared call path across both models needs to be parameterized
+// per-model, not copy-pasted.
+const MODEL_ATTEMPTS = [
+  { model: '@cf/black-forest-labs/flux-1-schnell',        params: { steps: 4 } },     // max 8 per docs; 4 is the model's own default
+  { model: '@cf/bytedance/stable-diffusion-xl-lightning',  params: { num_steps: 4 } }, // max 20 per docs; 4 is the commonly-recommended value for this "few-step" model, not its own default of 20
+];
+
 const MAX_PROMPT_CHARS = 500; // UX bound for a chat text field, not a cost lever — diffusion cost scales with steps/resolution, not prompt length
-const RETRY_DELAY_MS = 1200;  // matches callWorkersAIWithRetry's own retry delay
+const RETRY_DELAY_MS = 1200;  // matches callWorkersAIWithRetry's own retry delay, applied between model attempts
 
 // Returns { ok: true, prompt } or { ok: false, code, maxChars? }. Codes
 // only, no user-facing text — chat.js already owns the likelyArabic /
@@ -49,50 +59,92 @@ export function validateImagePrompt(raw) {
   return { ok: true, prompt };
 }
 
-// One attempt, bounded by a non-cancelling timeout — env.AI.run() has no
-// documented AbortSignal parameter (verified Aug 2026), so this only
-// bounds how long THIS function waits, not the call's own server-side
-// lifetime (see chat.js's Resource Lifecycle notes at the call site).
-// Both handlers are attached directly to aiBinding.run()'s own promise —
-// not a bare Promise.race against a timer with the run() promise left
-// bare — so a late settlement after the timeout has already won never
-// has zero listeners; nothing here can produce an unhandled-rejection
-// warning.
-function runOnce(aiBinding, prompt, timeoutMs) {
+// String.fromCharCode.apply(null, hugeArray) can overflow the call stack
+// for a full-size image (a few hundred KB of bytes) — chunking keeps
+// every call well under any engine's argument-count limit. btoa/
+// ReadableStream/Response are Workers-runtime globals; no import needed.
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const CHUNK = 8192;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+// Normalizes either of Workers AI's known text-to-image output shapes —
+// { image: <base64> } (flux-1-schnell) or a ReadableStream / ArrayBuffer /
+// TypedArray of raw bytes (the Stable-Diffusion-family models, including
+// stable-diffusion-xl-lightning — see the header comment) — to a plain
+// base64 string. Returns null, not a throw, if the shape is unrecognized:
+// an unrecognized response is a "try the next model" condition for the
+// caller, not a hard failure.
+async function normalizeImageResult(result) {
+  if (result && typeof result.image === 'string' && result.image) {
+    return result.image;
+  }
+  let buffer = null;
+  if (result instanceof ReadableStream) {
+    buffer = await new Response(result).arrayBuffer();
+  } else if (result instanceof ArrayBuffer) {
+    buffer = result;
+  } else if (ArrayBuffer.isView(result)) {
+    buffer = result.buffer.slice(result.byteOffset, result.byteOffset + result.byteLength);
+  }
+  if (!buffer || buffer.byteLength === 0) return null;
+  return arrayBufferToBase64(buffer);
+}
+
+// One attempt against one model, bounded by a non-cancelling timeout —
+// env.AI.run() has no documented AbortSignal parameter (verified Aug
+// 2026), so this only bounds how long THIS function waits, not the
+// call's own server-side lifetime (see chat.js's Resource Lifecycle notes
+// at the call site). Both handlers are attached directly to
+// aiBinding.run()'s own promise — not a bare Promise.race against a timer
+// with the run() promise left bare — so a late settlement after the
+// timeout has already won never has zero listeners; nothing here can
+// produce an unhandled-rejection warning.
+function runOnce(aiBinding, model, prompt, params, timeoutMs) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('WORKERS_AI_IMAGE_TIMEOUT')), timeoutMs);
-    aiBinding.run(IMAGE_MODEL, { prompt, steps: IMAGE_GEN_STEPS }).then(
+    aiBinding.run(model, { prompt, ...params }).then(
       (res) => { clearTimeout(timer); resolve(res); },
       (err) => { clearTimeout(timer); reject(err); },
     );
   });
 }
 
-// Returns { ok: true, base64, mime, model } or
-//         { ok: false, httpStatus: 0, errStatus, errBody }
+// Tries each entry in MODEL_ATTEMPTS in order, moving to the next on
+// either a thrown error (timeout, transient Workers AI failure) or a
+// successful call whose output normalizeImageResult() can't parse.
+// Returns { ok: true, base64, mime, model } — model is whichever one
+// actually produced the image, for the response's `source` field and
+// server-side logs — or { ok: false, httpStatus: 0, errStatus, errBody }
+// once every entry has failed.
 export async function generateImageWorkersAI(aiBinding, prompt, opts = {}) {
   if (!aiBinding) {
     return { ok: false, httpStatus: 0, errStatus: 'NOT_BOUND', errBody: 'env.AI is not bound on this Pages project.' };
   }
   const timeoutMs = opts.timeoutMs ?? 20000; // diffusion is slower than chat.js's PROVIDER_TIMEOUT_MS (8000ms, sized for an LLM text reply)
 
-  let result;
-  try {
-    result = await runOnce(aiBinding, prompt, timeoutMs);
-  } catch (err) {
-    console.warn('[imageGen.mjs] attempt 1 failed:', err.message);
-    await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+  let lastErr = '';
+  for (let i = 0; i < MODEL_ATTEMPTS.length; i++) {
+    const { model, params } = MODEL_ATTEMPTS[i];
+    if (i > 0) await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
     try {
-      result = await runOnce(aiBinding, prompt, timeoutMs);
-    } catch (err2) {
-      console.error('[imageGen.mjs] failed after retry:', err2.message);
-      return { ok: false, httpStatus: 0, errStatus: 'WORKERS_AI_IMAGE_ERROR', errBody: err2.message };
+      const raw = await runOnce(aiBinding, model, prompt, params, timeoutMs);
+      const base64 = await normalizeImageResult(raw);
+      if (base64) {
+        return { ok: true, base64, mime: 'image/jpeg', model };
+      }
+      lastErr = `${model}: response had no recognizable image payload`;
+      console.warn(`[imageGen.mjs] ${lastErr}`);
+    } catch (err) {
+      lastErr = `${model}: ${err.message}`;
+      console.warn(`[imageGen.mjs] attempt failed — ${lastErr}`);
     }
   }
-
-  const base64 = result && typeof result.image === 'string' ? result.image : '';
-  if (!base64) {
-    return { ok: false, httpStatus: 0, errStatus: 'EMPTY_IMAGE', errBody: '' };
-  }
-  return { ok: true, base64, mime: 'image/jpeg', model: IMAGE_MODEL };
+  console.error('[imageGen.mjs] all models failed:', lastErr);
+  return { ok: false, httpStatus: 0, errStatus: 'WORKERS_AI_IMAGE_ERROR', errBody: lastErr };
 }
