@@ -112,17 +112,27 @@ const BARE_LATEX_MACROS = {
   '\\alpha': '\u03B1', '\\beta': '\u03B2', '\\gamma': '\u03B3', '\\delta': '\u03B4',
   '\\phi': '\u03C6', '\\rho': '\u03C1', '\\lambda': '\u03BB', '\\mu': '\u03BC',
   '\\sigma': '\u03C3', '\\tau': '\u03C4', '\\Delta': '\u0394',
+  '\\psi': '\u03C8', '\\epsilon': '\u03B5', '\\varepsilon': '\u03B5',
 };
 
-// Greek bases that can carry an engineering subscript in this domain (γc,
-// γs -- ECP 203 concrete/steel partial safety factors). Deliberately just
-// gamma for now, not the full BARE_LATEX_MACROS Greek set: phi/rho/etc.
-// subscript usage hasn't been requested and adding them un-asked would be
-// untested surface area. Add more keys here (mapping macro -> literal
-// glyph) if/when another Greek base needs the same treatment; nothing else
-// below needs to change to support it, this table is the single source
-// the rest of Pass -1/Pass 0 read from.
-const GREEK_SUBSCRIPT_BASES = { '\\gamma': '\u03B3' };
+// Greek bases that can carry an engineering subscript in this domain (γ_c,
+// ψ_t -- ECP 203 partial safety factors, ACI 318 development-length
+// modification factors). Was gamma-only, pending evidence another base
+// needed it; ces-reply-2026-08-09T08-42-05.txt (a real captured reply) is
+// that evidence -- it uses λ, ψ, ρ, γ, β, τ, ε as bases across its ACI
+// 318 / ECP 203 formulas. ψ_t/ψ_e/ψ_s specifically go from literal
+// underscore to a true lowered subscript with this change (t/e/s are all
+// covered letters); γ_c/ρ_b/β_c/τ_bd stay on the underscore fallback
+// either way (c/b/d are uncovered) but now correctly reach the frontend's
+// <sub>-tag upgrade pass instead of stopping here as dead literal text --
+// see the matching change in _cesRenderBotHtml (footing_pro/pc_suite).
+// Add more keys here if another base shows up in a future reply; nothing
+// else below needs to change to support it, this table is the single
+// source the rest of Pass -1/Pass 0 read from.
+const GREEK_SUBSCRIPT_BASES = {
+  '\\gamma': '\u03B3', '\\lambda': '\u03BB', '\\psi': '\u03C8',
+  '\\rho': '\u03C1', '\\beta': '\u03B2', '\\tau': '\u03C4', '\\epsilon': '\u03B5',
+};
 const GREEK_BASE_GLYPHS = Object.values(GREEK_SUBSCRIPT_BASES).join('');
 
 // ── Pass -1: bare Greek macro -> literal glyph, for bases only ─────────
