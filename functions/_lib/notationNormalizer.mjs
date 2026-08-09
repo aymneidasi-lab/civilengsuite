@@ -4,7 +4,12 @@
 // the confidentiality gate decides what may be sent at all; this only
 // reshapes text that has already been cleared for sending.
 //
-// THREE correction passes, all pattern-boundary guarded, in this order:
+// FOUR correction passes, all pattern-boundary guarded, in this order:
+// -1. Bare Greek base macro -> literal glyph, for bases that can carry a
+//     subscript (currently just \gamma -> γ, see GREEK_SUBSCRIPT_BASES).
+//     Runs first so "\gamma_c" and a directly-typed "γ_c" converge onto
+//     the exact same Pass 0 code path instead of needing a second,
+//     macro-aware subscript grammar.
 //  0. LaTeX subscript SYNTAX -> normalized form. Handles Base_{Sub} and
 //     bare Base_Sub (single trailing char, real LaTeX grammar) BEFORE the
 //     flat-abbreviation pass below, because "fcu" is not a contiguous
@@ -12,17 +17,22 @@
 //     a flat "fcu" trigger can ever match text that already contains a
 //     literal underscore/brace splitting the letters apart. This pass
 //     closes that gap directly by parsing the LaTeX construct itself.
+//     Base may be a single ASCII letter or a Greek base glyph already
+//     expanded by Pass -1.
 //  1. ASCII engineering shorthand -> Unicode subscript (fcu -> f + true
 //     subscript c+u where available, plain "f_cu" fallback where not --
 //     see SUBSCRIPT_LETTER_MAP: Unicode has NO subscript codepoint for
-//     b/c/d/f/g/q/w/y/z, so fcu/fy/Ac/Asc/Ag/Mcr/Vc/bw/wd/Ec can never be
-//     rendered as pure-Unicode subscript; superscript "modifier letter"
-//     codepoints exist for those letters, which is what the PREVIOUS
-//     version of this table used by mistake -- that is the exact fᶜᵘ/fʸ
-//     bug this rewrite fixes, not a regex issue).
+//     b/c/d/f/g/q/w/y/z, so fcu/fy/Ac/Asc/Ag/Mcr/Vc/bw/wd/Ec (and γc, for
+//     the same reason -- no subscript 'c') can never be rendered as
+//     pure-Unicode subscript; superscript "modifier letter" codepoints
+//     exist for those letters, which is what the PREVIOUS version of
+//     this table used by mistake -- that is the exact fᶜᵘ/fʸ bug this
+//     rewrite fixes, not a regex issue. Do not reintroduce it for Greek
+//     bases either (i.e. never emit γᶜ using U+1D9C) -- same bug, same
+//     reason it's wrong, one Unicode block over.
 //  2. Bare LaTeX macros with no braces/arguments -> plain Unicode
 //     (\times -> x, \phi -> \u03c6, etc.)
-// All three are FIXED, FINITE-LENGTH-BOUNDED, so all are safe to
+// All four are FIXED, FINITE-LENGTH-BOUNDED, so all are safe to
 // holdback-buffer with a character-class-derived margin. Anything
 // requiring unbounded lookahead (\frac{a}{b} argument extraction,
 // nested braces) is deliberately NOT attempted here -- the prompt-level
@@ -104,16 +114,52 @@ const BARE_LATEX_MACROS = {
   '\\sigma': '\u03C3', '\\tau': '\u03C4', '\\Delta': '\u0394',
 };
 
+// Greek bases that can carry an engineering subscript in this domain (γc,
+// γs -- ECP 203 concrete/steel partial safety factors). Deliberately just
+// gamma for now, not the full BARE_LATEX_MACROS Greek set: phi/rho/etc.
+// subscript usage hasn't been requested and adding them un-asked would be
+// untested surface area. Add more keys here (mapping macro -> literal
+// glyph) if/when another Greek base needs the same treatment; nothing else
+// below needs to change to support it, this table is the single source
+// the rest of Pass -1/Pass 0 read from.
+const GREEK_SUBSCRIPT_BASES = { '\\gamma': '\u03B3' };
+const GREEK_BASE_GLYPHS = Object.values(GREEK_SUBSCRIPT_BASES).join('');
+
+// ── Pass -1: bare Greek macro -> literal glyph, for bases only ─────────
+// Runs BEFORE Pass 0 so "\gamma_c" and "γ_c" hit the exact same code path
+// below instead of needing a second, parallel LaTeX-macro-aware subscript
+// regex. Guarded the same way the Pass 2 macro replacement guards itself
+// (no trailing letter -- (?![a-zA-Z])) so this can never fire on a longer,
+// unrelated macro name. This does NOT touch \phi/\rho/etc.; those still
+// go through Pass 2 only, unchanged, until/unless they're added to
+// GREEK_SUBSCRIPT_BASES above.
+const GREEK_MACRO_RE = new RegExp(
+  Object.keys(GREEK_SUBSCRIPT_BASES).map((m) => m.replace(/\\/g, '\\\\')).join('|') + '(?![a-zA-Z])',
+  'g',
+);
+function expandGreekSubscriptBases(text) {
+  return text.replace(GREEK_MACRO_RE, (m) => GREEK_SUBSCRIPT_BASES[m]);
+}
+
 // ── Pass 0: LaTeX subscript SYNTAX ──────────────────────────────────────
 // Base_{Sub} (braced, up to 8 subscript letters) or bare Base_Sub (1-3
 // trailing letters, capped -- NOT real LaTeX grammar, which only ever binds
-// a single bare token; widened deliberately, see below). Base is restricted
-// to a single letter, matching every base symbol actually used in this
-// domain (f, A, P, M, V, b, q, w, E) -- this is also what keeps the pattern
+// a single bare token; widened deliberately, see below). Base is a single
+// ASCII letter OR a literal Greek base glyph from GREEK_SUBSCRIPT_BASES
+// (already expanded from its macro form by Pass -1 above by the time this
+// runs). Restricting to single-character bases is what keeps the pattern
 // from firing inside multi-letter identifiers like DEVELOPER_PASSWORD or
-// RACE_CONCURRENCY (a \b boundary can only land before a single-char token,
-// and none of the letters inside those identifiers are themselves preceded
-// by a boundary).
+// RACE_CONCURRENCY.
+//
+// Left boundary is an explicit negative lookbehind, NOT \b: JS's \b is
+// defined purely against the ASCII \w class ([A-Za-z0-9_]). γ is \W under
+// that definition, so \b can NEVER match immediately before it -- not
+// after a space, not after another Greek letter, not even at the very
+// start of the string (verified: \b requires a \w on at least one side of
+// the transition; string-start-then-\W is not a transition). A plain
+// `\bγ_c` pattern would therefore match nothing, ever, silently -- this
+// was checked by direct execution, not inferred. The lookbehind form
+// below works identically for ASCII and Greek bases and has no such gap.
 //
 // Bare-form cap is 1-3, NOT 1: the prompt-level instruction (chat.js's
 // NOTATION rule) explicitly teaches the model bare "q_all" / "f_cu" as the
@@ -130,7 +176,10 @@ const BARE_LATEX_MACROS = {
 // Braced form stays capped separately at 8: '{' immediately after '_' is
 // essentially never a real identifier, so it can safely stay more
 // permissive than the ambiguous bare form.
-const LATEX_SUBSCRIPT_RE = /\b([A-Za-z])_(?:\{([A-Za-z]{1,8})\}|([A-Za-z]{1,3})(?![A-Za-z]))/g;
+const LATEX_SUBSCRIPT_RE = new RegExp(
+  `(?<![A-Za-z0-9_])([A-Za-z${GREEK_BASE_GLYPHS}])_(?:\\{([A-Za-z]{1,8})\\}|([A-Za-z]{1,3})(?![A-Za-z]))`,
+  'g',
+);
 
 function convertLatexSubscripts(text) {
   return text.replace(LATEX_SUBSCRIPT_RE, (_m, base, braced, bare) => {
@@ -205,12 +254,13 @@ function stripBareDollar(text) {
 // '}' is deliberately left OUT of the protected set: a closing brace fully
 // terminates a Base_{Sub} construct, so cutting right after it is safe and
 // avoids adding latency the construct's own grammar doesn't require.
-const NOT_TOKEN_CHAR_RE = /[^A-Za-z\\$_{]/;
+const NOT_TOKEN_CHAR_RE = new RegExp(`[^A-Za-z${GREEK_BASE_GLYPHS}\\\\$_{]`);
 const MAX_HOLDBACK = 64; // safety valve: bound worst-case latency if a
                          // pathological chunk has no separator at all
-                         // (MAX_TRIGGER_LEN=4, longest LaTeX construct
-                         // capped at 1+1+1+8+1=12 chars -- 64 is headroom,
-                         // not a tight fit).
+                         // (MAX_TRIGGER_LEN=4, longest LaTeX construct now
+                         // "\gamma_{xxxxxxxx}" = 17 chars including the
+                         // macro form Pass -1 consumes -- 64 is still
+                         // ample headroom, not a tight fit).
 
 function findSafeCutIndex(buf) {
   for (let i = buf.length - 1; i >= 0; i--) {
@@ -274,14 +324,14 @@ export class NotationNormalizer {
     if (cut === 0) return { emit: '' };
     const safePart = this._buf.slice(0, cut);
     this._buf = this._buf.slice(cut);
-    const emit = stripBareDollar(applyReplacements(convertLatexSubscripts(safePart)));
+    const emit = stripBareDollar(applyReplacements(convertLatexSubscripts(expandGreekSubscriptBases(safePart))));
     return { emit };
   }
 
   finish() {
     const rest = this._buf;
     this._buf = '';
-    const emit = stripBareDollar(applyReplacements(convertLatexSubscripts(rest)));
+    const emit = stripBareDollar(applyReplacements(convertLatexSubscripts(expandGreekSubscriptBases(rest))));
     return { emit };
   }
 }
