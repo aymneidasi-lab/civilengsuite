@@ -54,10 +54,29 @@
 // of a dimensionally-correct or professionally-accurate engineering
 // drawing — both are fast/cheap models traded for speed over precision,
 // and neither should be treated as a substitute for actual drafting.
+// PROMPT ITERATION 2 (after a second live report): the v1 template above
+// asked for "labeled cross-section, dimension lines" — which is exactly
+// what produced a diagram with a fake "50mm" width callout, a "6m" label
+// on an unrelated segment, and garbled text ("bem", "Slad", "Slap" for
+// "beam"/"slab") dressed up in confident technical typography. This is
+// not a prompt-wording problem: diffusion models of this class do not
+// compose or spell text reliably at all — they paint plausible-looking
+// glyph shapes, not characters — and neither model here has any grounding
+// in real structural magnitudes to begin with, so any number they render
+// is invented regardless of phrasing. A wrong-but-confident-looking
+// dimension on a foundation is worse than no dimension, so the fix is to
+// stop asking for labels/numbers entirely rather than trying to get them
+// right. buildEngineeringPrompt() below asks for a clean unlabeled
+// outline; NEGATIVE_PROMPT explicitly excludes text/digits for the model
+// that supports it. The frontend also carries a fixed disclaimer under
+// every generated image now (see appendBotImageBubble in pc_suite/
+// footing_pro) — this reduces the odds of fabricated numbers, it does
+// not guarantee a completely text-free result, and a user should never
+// treat a generated image as a source of actual dimensions.
 function buildEngineeringPrompt(userPrompt) {
-  return `Technical civil/structural engineering blueprint diagram, drafting style, black-and-white line drawing: ${userPrompt}. Interpret every term in a civil engineering and construction context (e.g. "footing", "column", "beam", "pile", "slab" are structural or foundation elements — not feet, furniture, light, or unrelated meanings). Clean CAD-style vector illustration, labeled cross-section, dimension lines, white background, professional technical schematic.`;
+  return `Technical civil/structural engineering line-art diagram, drafting/blueprint style, black-and-white: ${userPrompt}. Interpret every term in a civil engineering and construction context (e.g. "footing", "column", "beam", "pile", "slab" are structural or foundation elements — not feet, furniture, light, or unrelated meanings). Clean geometric outline only, hatching to indicate concrete/material sections, no text, no numbers, no dimension labels, no measurements, no annotations, no watermark — a pure unlabeled line-art schematic on a white background.`;
 }
-const NEGATIVE_PROMPT = 'cartoon, comic, anime, photo, photorealistic, people, hands, faces, feet, shoes, sports, sketchbook, colored pencils, watercolor, painting, colorful, playful, cute, watermark, signature, handwritten text, blurry';
+const NEGATIVE_PROMPT = 'cartoon, comic, anime, photo, photorealistic, people, hands, faces, feet, shoes, sports, sketchbook, colored pencils, watercolor, painting, colorful, playful, cute, watermark, signature, text, numbers, digits, dimension labels, measurements, handwritten text, illegible writing, gibberish text, blurry';
 
 const MODEL_ATTEMPTS = [
   { model: '@cf/black-forest-labs/flux-1-schnell',
