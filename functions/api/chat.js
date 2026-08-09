@@ -2239,11 +2239,7 @@ to (and must not) do any subscript formatting by hand.
 
 DO: fcu -> write f_cu · fy -> write f_y · Ac -> write A_c · Pu -> write P_u ·
 qu -> write q_u · qall -> write q_all. Braces (f_{cu}) also work if that's what
-comes out naturally — either form is fine, plain f_cu is simplest. Same rule for
-Greek partial-safety-factor symbols: γc (concrete) -> write γ_c · γs (steel) ->
-write γ_s. Type the actual Greek letter γ, not "\gamma" — either is converted
-correctly, but the literal glyph is simpler and matches how you'd write every
-other Greek symbol (φ, ρ, etc.) elsewhere in a reply.
+comes out naturally — either form is fine, plain f_cu is simplest.
 
 NEVER DO:
 • Wrap any part of a reply in $ or $$ (LaTeX math-mode delimiters) — "$f_cu$",
@@ -2251,9 +2247,7 @@ NEVER DO:
   ($ for an actual price, like $249, is unrelated and completely fine.)
 • Manually type a Unicode superscript/subscript character yourself (ᶜ ᵘ ⁿ ₐ ᵗ or
   similar small raised/lowered letters) to fake the look of a subscript. Always the
-  plain underscore form above — never hand-pick a Unicode glyph for this. This
-  includes γc — never write "γᶜ"; the converter's own output for it is "γ_c" with
-  a plain underscore, because Unicode has no true subscript "c" either.
+  plain underscore form above — never hand-pick a Unicode glyph for this.
 • In an Arabic reply, spell the symbol out phonetically in Arabic letters instead of
   writing the Latin token — "إف سي يو" or "أف سي يو" for f_cu, "بي يو" for P_u. f_cu
   is a Latin engineering symbol, not an English word to transliterate; embed it as-is
