@@ -1177,9 +1177,6 @@ import {
   SUBREQUEST_BUDGET_FREE_PLAN,
   fetchWithTimeout,
   checkRateLimit,
-} from '../_lib/rotation.mjs';
-import { validateImagePrompt, generateImageWorkersAI } from '../_lib/imageGen.mjs';
-import {
   buildGeminiKeyPool,
   keyTagFor,
   isModelDead,
@@ -2251,11 +2248,17 @@ NEVER DO:
 • Manually type a Unicode superscript/subscript character yourself (ᶜ ᵘ ⁿ ₐ ᵗ or
   similar small raised/lowered letters) to fake the look of a subscript. Always the
   plain underscore form above — never hand-pick a Unicode glyph for this.
-Both mistakes are things models trained on LaTeX-heavy math text drift toward by
-habit; this product specifically needs the plain underscore form every time, with
-no exceptions for "just this once" or "it looked more correct this way."
+• In an Arabic reply, spell the symbol out phonetically in Arabic letters instead of
+  writing the Latin token — "إف سي يو" or "أف سي يو" for f_cu, "بي يو" for P_u. f_cu
+  is a Latin engineering symbol, not an English word to transliterate; embed it as-is
+  inside the Arabic sentence, exactly like ACI 318-19 or ECP 203 stay untransliterated.
+All three mistakes are things models drift toward by habit — the first two from
+LaTeX-heavy math training data, the third from transliterating technical terms when
+writing in Arabic prose. This product needs the plain Latin underscore form every
+time, with no exceptions for "just this once" or "it looked more correct this way."
 Worked example: "لازم الـ **f_cu** يكون أكبر من 20 ميجاباسكال عشان الكود يعدي." renders
-with cu correctly lowered under the f — never write "fᶜᵘ" or "$f_{cu}$" instead.
+with cu correctly lowered under the f — never write "fᶜᵘ", "$f_{cu}$", or "إف سي يو"
+instead.
 
 ════════════════════════════════════════
 ARABIC DIALECT TRAINING — EGYPTIAN (عامية مصرية)
@@ -3636,8 +3639,9 @@ unless content is genuinely list-shaped. Egyptian Arabic register: default "حض
 over فصحى equivalents. Bold codes/terms/values in **double asterisks** (renders highlighted,
 2–4 per reply); at most one emoji, at the very end, from ✅💡🛠️📋, only when it genuinely fits.
 Subscripted symbols: plain underscore form only — f_cu, A_s, P_u, q_u — never $ / $$
-delimiters and never a hand-typed Unicode super/subscript character; the app renders the
-real subscript from the plain underscore automatically, same rule as established earlier.
+delimiters, never a hand-typed Unicode super/subscript character, and never spelled out
+phonetically in Arabic letters (no "إف سي يو" for f_cu) — keep the Latin token as-is in
+Arabic sentences; the app renders the real subscript automatically, same rule as earlier.
 
 CORE PRODUCT FACTS — Civil Engineering Suite / Footing Pro v.2026 (the only live product):
 • Three standalone apps: Rectangular Combined Footing (equal/near-equal loads), Trapezoidal
@@ -3748,6 +3752,10 @@ ${KEY_ENGINEERING_REFERENCE}
 LANGUAGE RULE (critical): Arabic message → reply only in Egyptian Arabic dialect
 (عامية مصرية), never Modern Standard Arabic. English message → reply only in English.
 Never mix languages in one reply.
+
+Subscripted symbols: plain underscore only — f_cu, A_s, P_u, q_all — never $ / $$, a
+hand-typed Unicode super/subscript character, or an Arabic phonetic spelling like
+"إف سي يو" — keep the Latin token as-is.
 
 ${isDeveloperMode ? '' : `\
 CONFIDENTIALITY: never name/discuss your own backend, API, Cloudflare, hosting, or provider —
@@ -5189,105 +5197,6 @@ export async function onRequestPost(context) {
     );
   }
 
-  // 3b-5. Image generation short-circuit. [NEW — Image Generation feature]
-  //     Client sends { mode: 'image', prompt: '<text>' }. A dedicated
-  //     field, not a repurposed body.message: this branch sits after the
-  //     natural-language save/load/list triggers (3b-2/3/4) above, which
-  //     inspect body.message — reusing that field here would let an image
-  //     prompt that happened to match one of those regexes (e.g. while
-  //     devMode is on) get silently hijacked into a session command
-  //     instead of reaching this branch.
-  //     Deliberately NOT devMode-gated — the chat cascade below is public
-  //     too (see checkRateLimit's own comment: availability for real
-  //     visitors outranks strict enforcement for a sales/support chatbot).
-  //     Returns ONE buffered JSON response — not the SSE stream every
-  //     other reply on this endpoint uses — specifically so a non-browser
-  //     caller (an Excel VBA UserForm over MSXML2.XMLHTTP/WinHTTP, no
-  //     chunked-stream reader available) can POST this same body shape
-  //     and parse the same flat JSON fields a browser client does, with
-  //     zero VBA-side SSE handling ever needing to exist. Runs through
-  //     env.AI only, via _lib/imageGen.mjs — no Gemini/Groq/OpenRouter
-  //     fallback if Workers AI is unavailable, by design: falling back to
-  //     a paid-capable provider here would quietly break the zero-cost
-  //     guarantee this feature exists under.
-  if (body.mode === 'image') {
-    const promptCheck = validateImagePrompt(body.prompt);
-    if (!promptCheck.ok) {
-      const msg = promptCheck.code === 'PROMPT_TOO_LONG'
-        ? (likelyArabic
-          ? `الوصف لازم يكون ${promptCheck.maxChars} حرف أو أقل.`
-          : `Prompt must be ${promptCheck.maxChars} characters or fewer.`)
-        : (likelyArabic
-          ? 'من فضلك اوصف الصورة اللي عايزها.'
-          : 'Please describe the image you want.');
-      return json({ ok: false, error: msg, code: promptCheck.code }, 400, undefined, request);
-    }
-
-    // Independent of, and stricter than, the general 8-per-60s limiter
-    // step 1 applies to every request. One flux-1-schnell image costs on
-    // the order of several dozen Workers AI neurons — well above one
-    // Layer-3 text reply — against the SAME shared 10,000-neuron/day free
-    // pool, so the general limiter alone does not adequately bound this
-    // feature's worst-case draw on it. Keyed with a ':image' suffix (not
-    // just clientIp) so this bucket is namespaced independently of the
-    // general limiter's own KV keys by construction — not by relying on
-    // two different windowSeconds values happening to produce different
-    // bucket numbers most of the time.
-    const imageRateCheck = await checkRateLimit(env, clientIp + ':image', { windowSeconds: 3600, maxPerWindow: 3 });
-    if (imageRateCheck.limited) {
-      return json(
-        {
-          ok: false,
-          error: likelyArabic
-            ? 'صور كتير بسرعة. استنى شوية وحاول تاني.'
-            : 'Too many image requests too quickly. Please wait a bit and try again.',
-          code: 'IMAGE_RATE_LIMITED',
-        },
-        429, undefined, request,
-      );
-    }
-
-    const imageResult = await generateImageWorkersAI(env.AI, promptCheck.prompt);
-    if (!imageResult.ok) {
-      console.error('[chat.js] Image generation failed:', imageResult.errStatus, imageResult.errBody);
-      if (imageResult.errStatus === 'NOT_BOUND') {
-        return json(
-          {
-            ok: false,
-            error: 'Image generation is not configured on the server (missing Workers AI binding).',
-            code: 'AI_NOT_BOUND',
-          },
-          500, undefined, request,
-        );
-      }
-      return json(
-        {
-          ok: false,
-          error: likelyArabic
-            ? 'تعذر إنشاء الصورة دلوقتي. حاول تاني كمان شوية.'
-            : 'Could not generate the image right now. Please try again shortly.',
-          code: imageResult.errStatus || 'IMAGE_GEN_FAILED',
-        },
-        502, undefined, request,
-      );
-    }
-
-    // Flat, single-level JSON on purpose — a hand-rolled VBA JSON reader,
-    // not just a browser client, has to parse this. dataUri is
-    // display-ready as-is: <img src="..."> on the web with zero string
-    // work; a VBA caller base64-decodes the substring after the comma and
-    // writes the bytes to a temp file for LoadPicture.
-    return json(
-      {
-        ok      : true,
-        dataUri : `data:${imageResult.mime};base64,${imageResult.base64}`,
-        mimeType: imageResult.mime,
-        source  : imageResult.model,
-      },
-      200, undefined, request,
-    );
-  }
-
   // 3c. userMessage extraction + validation. [v20: unchanged logic, now runs
   //     after 3a/3b instead of immediately after step 3 — see Change 5.]
   const userMessage = typeof body.message === 'string' ? body.message.trim() : '';
@@ -5500,7 +5409,14 @@ export async function onRequestPost(context) {
   // Applied unconditionally (not just when searchGroundingEnabled is true):
   // a higher ceiling on a smaller, off-state prompt is harmless headroom,
   // not a bug — simpler than making the ceiling itself conditional too.
-  assertPromptBudget('geminiSystemPrompt', geminiSystemPrompt, isFirstTurn ? 13700 : 1250, env);
+  // [PATCH — budget reconciliation] Ceilings were never raised when the
+  // NOTATION — SUBSCRIPTED ENGINEERING SYMBOLS block (full tier, ~1,552
+  // chars/~407 tokens) and its condensed one-paragraph counterpart (~360
+  // chars/~95 tokens) were added above -- both tiers were asserting against
+  // a ceiling that predates content already present in the string being
+  // measured. Bumped by the exact measured size of each, same convention
+  // as the WEB SEARCH ceiling bump elsewhere in this file.
+  assertPromptBudget('geminiSystemPrompt', geminiSystemPrompt, isFirstTurn ? 14107 : 1345, env);
 
   const geminiKeysIndexed = buildGeminiKeyPool(env);
 
@@ -5559,8 +5475,26 @@ export async function onRequestPost(context) {
       function relay(deltaText) {
         const { emit, retracted } = sanitizer.push(deltaText);
         if (emit) {
+          // [FIX — 3rd occurrence in this codebase's history, see repo notes
+          // for the other two] sentAnything fires here, on the sanitizer's
+          // own emit — never move it inside `if (normalized)` below. The
+          // normalizer's holdback buffer can legitimately emit '' across one
+          // or more calls (e.g. a reply opening directly with "Pu = ..." has
+          // nothing to flush before that still-forming token). If the
+          // upstream provider dies before the normalizer's buffer ever
+          // releases anything, sentAnything must still reflect that this
+          // provider already committed real content — otherwise the
+          // fallback gate a few dozen lines below
+          // (`!finalWinResult && !sentAnything`) invokes a second provider
+          // into the SAME sanitizer+normalizer instances and concatenates
+          // its reply onto the first the moment either buffer next flushes.
+          // Matches streamingProviders.mjs's own documented COMMITMENT
+          // SEMANTICS: committed = true the instant the FIRST delta is
+          // emitted — that's this sanitizer emit, not the normalizer's
+          // separate downstream re-buffering of it.
+          sentAnything = true;
           const { emit: normalized } = normalizer.push(emit);
-          if (normalized) { sseWriter.writeDelta(normalized); sentAnything = true; }
+          if (normalized) sseWriter.writeDelta(normalized);
         }
         return retracted;
       }
@@ -5670,7 +5604,9 @@ export async function onRequestPost(context) {
         const workersSystemContent = (isDeveloperMode
           ? DEVELOPER_SYSTEM_PROMPT + baseWorkersPrompt
           : baseWorkersPrompt) + workersKbFacts + clientDateBlock;
-        assertPromptBudget('workersSystemContent', workersSystemContent, 1030, env);
+        // [PATCH — budget reconciliation] +132 chars/~35 tokens for the
+        // notation reminder just added to this tier (see buildWorkersAiSystemPrompt).
+        assertPromptBudget('workersSystemContent', workersSystemContent, 1065, env);
         const workersMsgs = [
           { role: 'system', content: workersSystemContent },
           ...turns.map(t => ({
