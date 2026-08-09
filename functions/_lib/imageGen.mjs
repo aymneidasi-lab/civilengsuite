@@ -34,9 +34,36 @@
 // reached. It also takes `num_steps` (not `steps`) — a second, unrelated
 // reason a shared call path across both models needs to be parameterized
 // per-model, not copy-pasted.
+//
+// PROMPT STEERING (added after a live-traffic report: "draw combined
+// footing" produced a cartoon foot kicking a ball, not a foundation
+// diagram). Both models are general-purpose consumer/art diffusion
+// models — neither has meaningful training on engineering-drawing
+// datasets — so raw user prompts get mapped to whatever the model's
+// broadest, most common association with the words is. That is
+// especially bad for this app specifically: "footing" (this app's own
+// namesake term) reads as feet/shoes/sports far more often in general
+// image-caption data than as a foundation element. buildEngineeringPrompt()
+// wraps every prompt in blueprint/line-drawing style framing plus an
+// explicit civil-engineering reading of the common ambiguous terms; the
+// Stable-Diffusion-family fallback additionally gets a real
+// negative_prompt (flux-1-schnell's documented input schema is prompt +
+// steps only — no negative_prompt field — so its steering is
+// positive-language-only). This raises the odds of an on-topic,
+// technical-looking illustration; it does not make either model capable
+// of a dimensionally-correct or professionally-accurate engineering
+// drawing — both are fast/cheap models traded for speed over precision,
+// and neither should be treated as a substitute for actual drafting.
+function buildEngineeringPrompt(userPrompt) {
+  return `Technical civil/structural engineering blueprint diagram, drafting style, black-and-white line drawing: ${userPrompt}. Interpret every term in a civil engineering and construction context (e.g. "footing", "column", "beam", "pile", "slab" are structural or foundation elements — not feet, furniture, light, or unrelated meanings). Clean CAD-style vector illustration, labeled cross-section, dimension lines, white background, professional technical schematic.`;
+}
+const NEGATIVE_PROMPT = 'cartoon, comic, anime, photo, photorealistic, people, hands, faces, feet, shoes, sports, sketchbook, colored pencils, watercolor, painting, colorful, playful, cute, watermark, signature, handwritten text, blurry';
+
 const MODEL_ATTEMPTS = [
-  { model: '@cf/black-forest-labs/flux-1-schnell',        params: { steps: 4 } },     // max 8 per docs; 4 is the model's own default
-  { model: '@cf/bytedance/stable-diffusion-xl-lightning',  params: { num_steps: 4 } }, // max 20 per docs; 4 is the commonly-recommended value for this "few-step" model, not its own default of 20
+  { model: '@cf/black-forest-labs/flux-1-schnell',
+    buildParams: (p) => ({ prompt: buildEngineeringPrompt(p), steps: 4 }) },                                              // max 8 per docs; 4 is the model's own default
+  { model: '@cf/bytedance/stable-diffusion-xl-lightning',
+    buildParams: (p) => ({ prompt: buildEngineeringPrompt(p), num_steps: 4, negative_prompt: NEGATIVE_PROMPT }) },        // max 20 per docs; 4 is the commonly-recommended value for this "few-step" model, not its own default of 20
 ];
 
 const MAX_PROMPT_CHARS = 500; // UX bound for a chat text field, not a cost lever — diffusion cost scales with steps/resolution, not prompt length
@@ -105,10 +132,10 @@ async function normalizeImageResult(result) {
 // with the run() promise left bare — so a late settlement after the
 // timeout has already won never has zero listeners; nothing here can
 // produce an unhandled-rejection warning.
-function runOnce(aiBinding, model, prompt, params, timeoutMs) {
+function runOnce(aiBinding, model, params, timeoutMs) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('WORKERS_AI_IMAGE_TIMEOUT')), timeoutMs);
-    aiBinding.run(model, { prompt, ...params }).then(
+    aiBinding.run(model, params).then(
       (res) => { clearTimeout(timer); resolve(res); },
       (err) => { clearTimeout(timer); reject(err); },
     );
@@ -130,10 +157,10 @@ export async function generateImageWorkersAI(aiBinding, prompt, opts = {}) {
 
   let lastErr = '';
   for (let i = 0; i < MODEL_ATTEMPTS.length; i++) {
-    const { model, params } = MODEL_ATTEMPTS[i];
+    const { model, buildParams } = MODEL_ATTEMPTS[i];
     if (i > 0) await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
     try {
-      const raw = await runOnce(aiBinding, model, prompt, params, timeoutMs);
+      const raw = await runOnce(aiBinding, model, buildParams(prompt), timeoutMs);
       const base64 = await normalizeImageResult(raw);
       if (base64) {
         return { ok: true, base64, mime: 'image/jpeg', model };
