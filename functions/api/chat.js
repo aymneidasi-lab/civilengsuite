@@ -1187,6 +1187,7 @@ import {
   classifyProviderResult, // [PATCH — consolidation, see OpenRouter/Groq blocks below]
 } from '../_lib/rotation.mjs';
 import { validateImagePrompt, generateImageWorkersAI } from '../_lib/imageGen.mjs';
+import { classifyFootingDiagram, buildFootingDiagramSvg, svgToDataUri } from '../_lib/footingDiagram.mjs';
 
 // [v27] Session save/load/list/delete logic — extracted to
 // functions/_lib/sessions.mjs so chat.js and the dedicated
@@ -5222,6 +5223,40 @@ export async function onRequestPost(context) {
           ? 'من فضلك اوصف الصورة اللي عايزها.'
           : 'Please describe the image you want.');
       return json({ ok: false, error: msg, code: promptCheck.code }, 400, undefined, request);
+    }
+
+    // Deterministic-diagram short-circuit. [NEW — fixes the live bug
+    // report: "draw combined footing" returning an unrelated
+    // building-interior sketch.] Checked BEFORE the Workers-AI rate
+    // bucket below and BEFORE generateImageWorkersAI() is ever called —
+    // not a post-hoc filter on the diffusion model's output. See
+    // _lib/footingDiagram.mjs's header for why this is a routing fix, not
+    // a prompt-wording fix: flux-1-schnell / stable-diffusion-xl-lightning
+    // have ~no training signal for "combined footing"-class content, so
+    // no prompt string fixes it — the two prior prompt patches documented
+    // in imageGen.mjs each fixed a different symptom of the same
+    // underlying gap without closing it. For the closed set of structural
+    // elements this product actually ships, skip the model entirely and
+    // return a hand-authored SVG instead: free (no Workers AI neurons
+    // spent, so it does not touch the :image rate bucket below — only
+    // the general per-IP limiter already applied earlier in this handler
+    // covers it), instant, and correct by construction every time instead
+    // of on a per-request roll of a 4-step diffusion model. Any prompt
+    // that does NOT match a known type — imageGen.mjs's own "golden
+    // retriever wearing sunglasses" example — falls through unchanged to
+    // the exact diffusion path that existed before this patch.
+    const diagramType = classifyFootingDiagram(promptCheck.prompt);
+    if (diagramType) {
+      const svg = buildFootingDiagramSvg(diagramType, likelyArabic ? 'ar' : 'en');
+      return json(
+        {
+          ok      : true,
+          dataUri : svgToDataUri(svg),
+          mimeType: 'image/svg+xml',
+          source  : 'deterministic-template:' + diagramType,
+        },
+        200, undefined, request,
+      );
     }
 
     // Independent of, and stricter than, the general 8-per-60s limiter
