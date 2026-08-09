@@ -4,7 +4,7 @@
 // the confidentiality gate decides what may be sent at all; this only
 // reshapes text that has already been cleared for sending.
 //
-// FOUR correction passes, all pattern-boundary guarded, in this order:
+// THREE correction passes, all pattern-boundary guarded, in this order:
 //  0. LaTeX subscript SYNTAX -> normalized form. Handles Base_{Sub} and
 //     bare Base_Sub (single trailing char, real LaTeX grammar) BEFORE the
 //     flat-abbreviation pass below, because "fcu" is not a contiguous
@@ -12,10 +12,6 @@
 //     a flat "fcu" trigger can ever match text that already contains a
 //     literal underscore/brace splitting the letters apart. This pass
 //     closes that gap directly by parsing the LaTeX construct itself.
-//     Base may be a single Latin letter, a single Greek letter, or one of
-//     BARE_LATEX_MACROS' Greek macro spellings (\gamma_c) -- see the block
-//     directly above LATEX_SUBSCRIPT_RE for why \b cannot be reused for
-//     the Greek case and what replaces it.
 //  1. ASCII engineering shorthand -> Unicode subscript (fcu -> f + true
 //     subscript c+u where available, plain "f_cu" fallback where not --
 //     see SUBSCRIPT_LETTER_MAP: Unicode has NO subscript codepoint for
@@ -26,14 +22,7 @@
 //     bug this rewrite fixes, not a regex issue).
 //  2. Bare LaTeX macros with no braces/arguments -> plain Unicode
 //     (\times -> x, \phi -> \u03c6, etc.)
-//  3. (folded into pass 0's regex, not a separate scan) Greek macro name
-//     directly followed by a subscript (\gamma_c) -- same drift BARE_
-//     LATEX_MACROS exists to catch for the no-subscript case, just as
-//     likely (arguably more likely, \gamma_c being the canonical LaTeX
-//     spelling of a partial-safety-factor symbol) once a subscript is
-//     attached, so it gets the same safety net rather than being left as
-//     a gap that only happens to close for the bare-macro case.
-// All passes are FIXED, FINITE-LENGTH-BOUNDED, so all are safe to
+// All three are FIXED, FINITE-LENGTH-BOUNDED, so all are safe to
 // holdback-buffer with a character-class-derived margin. Anything
 // requiring unbounded lookahead (\frac{a}{b} argument extraction,
 // nested braces) is deliberately NOT attempted here -- the prompt-level
@@ -115,80 +104,16 @@ const BARE_LATEX_MACROS = {
   '\\sigma': '\u03C3', '\\tau': '\u03C4', '\\Delta': '\u0394',
 };
 
-// Escapes a string for literal use as a regex ALTERNATION branch (outside
-// any character class -- backslash, braces, etc. all need escaping here).
-// Moved above LATEX_SUBSCRIPT_RE -- previously declared only where
-// COMBINED_RE needed it, further down -- because the Greek-macro
-// alternative below now needs the identical escaping at construction
-// time, and a second, differently-scoped copy is exactly the kind of
-// hand-duplication this file's own ENGINEERING_NOTATION_MAP comment above
-// already warns is how tables drift out of agreement.
-const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-// Separate, narrower escape for use INSIDE a character class ([...]),
-// where the only characters requiring escaping are ']', '\', '^' (if
-// first) and '-' (if not first/last) -- escapeRe's broader set is
-// unnecessary here and would double-escape safe characters like '.' or
-// '(' if reused as-is.
-const escapeClassChars = (s) => s.replace(/[\]\\^-]/g, '\\$&');
-
-// Greek base letters this product's engineering vocabulary actually uses
-// (partial safety factors gamma_c/gamma_s, capacity-reduction phi, etc.)
-// -- derived from BARE_LATEX_MACROS' own values rather than hand-
-// duplicated, so any Greek macro added to that table above becomes a
-// valid subscript Base here automatically. Filtered to the Greek/Coptic
-// Unicode block (U+0370-03FF) specifically so the table's non-letter
-// values ('x' for \times/\cdot, \leq/\geq/\pm's operator glyphs) are
-// excluded -- those were never candidates for a subscript Base.
-const GREEK_RANGE_RE = /[\u0370-\u03FF]/;
-const GREEK_BASE_CHARS = [...new Set(Object.values(BARE_LATEX_MACROS))]
-  .filter((ch) => GREEK_RANGE_RE.test(ch))
-  .join('');
-// The OTHER form the same LaTeX-habit drift takes: the macro spelling
-// with a subscript glued directly on (\gamma_c) instead of the literal
-// character (\gamma_c only differs from plain "\gamma" -- which
-// BARE_LATEX_MACROS/Pass 2 already catches -- by having "_c" attached).
-// Longest-first alternation for the same reason sortedTriggers below is:
-// no macro name here is currently a prefix of another, but sorting makes
-// that a structural guarantee instead of an accident of table order if
-// the table grows.
-const GREEK_MACRO_NAMES = Object.keys(BARE_LATEX_MACROS)
-  .filter((k) => GREEK_RANGE_RE.test(BARE_LATEX_MACROS[k]))
-  .sort((a, b) => b.length - a.length);
-const GREEK_MACRO_PATTERN = GREEK_MACRO_NAMES.map(escapeRe).join('|');
-
 // ── Pass 0: LaTeX subscript SYNTAX ──────────────────────────────────────
 // Base_{Sub} (braced, up to 8 subscript letters) or bare Base_Sub (1-3
 // trailing letters, capped -- NOT real LaTeX grammar, which only ever binds
 // a single bare token; widened deliberately, see below). Base is restricted
-// to a single Latin or Greek letter (or one Greek macro spelling, see
-// GREEK_MACRO_PATTERN above) -- matching every base symbol actually used in
-// this domain (f, A, P, M, V, b, q, w, E, plus gamma/phi/etc.) -- this is
-// also what keeps the pattern from firing inside multi-letter identifiers
-// like DEVELOPER_PASSWORD or RACE_CONCURRENCY.
-//
-// \b is NOT used for the single-letter alternative (this is the fix for
-// the Greek-base bug): \b is defined against ASCII \w ([A-Za-z0-9_]) only
-// -- a Greek letter is neither in \w nor does adjacency to one produce a
-// \B-vs-\b transition, so "\b" followed by a Greek letter can never match
-// at start-of-string, after a space, or after punctuation/markdown --
-// i.e. never, in any realistic position a Greek base actually occurs.
-// Widening only the character class while leaving \b in place (the fix as
-// first proposed) verifiably changes nothing; \b is the actual failure,
-// not the class. The negative lookbehind below replaces it with a
-// Unicode-correct equivalent: reject any position preceded by a Latin
-// letter, digit, underscore, OR Greek letter, independent of \w's
-// ASCII-only notion of "word character". This preserves the exact same
-// protection against mid-identifier firing (DEVELOPER_PASSWORD, Greek
-// run "\u03b1\u03b3_c") that \b gave the Latin-only case, and extends it
-// to Greek on both sides of the comparison.
-//
-// The Greek-macro alternative needs no left-guard of its own, for the
-// same reason COMBINED_RE's macroPattern branch further below needs none
-// on its left: a backslash is never itself a valid identifier character,
-// so there is no "mid-identifier" case for it to be adjacent to. Its
-// right-guard, (?![A-Za-z]), is the same maximal-munch guard COMBINED_RE
-// already uses for macro names generally (stops "\gamma" claiming a match
-// inside an unrelated, longer macro-like word such as "\gammaX").
+// to a single letter, matching every base symbol actually used in this
+// domain (f, A, P, M, V, b, q, w, E) -- this is also what keeps the pattern
+// from firing inside multi-letter identifiers like DEVELOPER_PASSWORD or
+// RACE_CONCURRENCY (a \b boundary can only land before a single-char token,
+// and none of the letters inside those identifiers are themselves preceded
+// by a boundary).
 //
 // Bare-form cap is 1-3, NOT 1: the prompt-level instruction (chat.js's
 // NOTATION rule) explicitly teaches the model bare "q_all" / "f_cu" as the
@@ -205,18 +130,10 @@ const GREEK_MACRO_PATTERN = GREEK_MACRO_NAMES.map(escapeRe).join('|');
 // Braced form stays capped separately at 8: '{' immediately after '_' is
 // essentially never a real identifier, so it can safely stay more
 // permissive than the ambiguous bare form.
-const GREEK_CLASS = escapeClassChars(GREEK_BASE_CHARS);
-const NOT_PRECEDING_BASE_RE = `[A-Za-z0-9_${GREEK_CLASS}]`;
-const LATEX_SUBSCRIPT_RE = new RegExp(
-  `(?:(?<!${NOT_PRECEDING_BASE_RE})([A-Za-z${GREEK_CLASS}])` +
-    (GREEK_MACRO_PATTERN ? `|(${GREEK_MACRO_PATTERN})(?![A-Za-z])` : '') +
-  `)_(?:\\{([A-Za-z]{1,8})\\}|([A-Za-z]{1,3})(?![A-Za-z]))`,
-  'g',
-);
+const LATEX_SUBSCRIPT_RE = /\b([A-Za-z])_(?:\{([A-Za-z]{1,8})\}|([A-Za-z]{1,3})(?![A-Za-z]))/g;
 
 function convertLatexSubscripts(text) {
-  return text.replace(LATEX_SUBSCRIPT_RE, (_m, charBase, macroBase, braced, bare) => {
-    const base = charBase || BARE_LATEX_MACROS[macroBase];
+  return text.replace(LATEX_SUBSCRIPT_RE, (_m, base, braced, bare) => {
     const sub = braced || bare;
     return subscriptOrFallback(base, sub);
   });
@@ -241,6 +158,7 @@ const MAX_TRIGGER_LEN = Math.max(...ALL_TRIGGERS.map(t => t.length)); // holdbac
 // followed by another lowercase word, which is the common case in running
 // text. No other trigger in this table is a standalone English word, so no
 // other trigger needs it.
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const sortedTriggers = ALL_TRIGGERS.slice().sort((a, b) => b.length - a.length);
 const wordTriggers = sortedTriggers.filter((t) => !t.startsWith('\\') && t !== 'As');
 const macroTriggers = sortedTriggers.filter((t) => t.startsWith('\\'));
@@ -287,27 +205,12 @@ function stripBareDollar(text) {
 // '}' is deliberately left OUT of the protected set: a closing brace fully
 // terminates a Base_{Sub} construct, so cutting right after it is safe and
 // avoids adding latency the construct's own grammar doesn't require.
-//
-// Greek letters (GREEK_BASE_CHARS) are now in the protected set too, for
-// the identical reason Latin letters already were: a chunk ending in a
-// bare "\u03b3" is exactly as capable of being a still-forming "\u03b3_c"
-// as a chunk ending in bare "f" is of being a still-forming "f_cu" --
-// without this, the Greek fix above is real but streaming-inert: push()
-// would emit the "\u03b3" alone on one call (nothing yet to disqualify it
-// as a safe cut) and receive "_c" alone on the next, and the two would
-// never occupy the same safePart for LATEX_SUBSCRIPT_RE to see together.
-// finish() does not depend on this at all (it flushes the whole remaining
-// buffer in one shot with no holdback decision), which is why this class
-// of bug is invisible in a non-streaming/whole-string test and only shows
-// up against push()-by-push() chunking -- see verification below.
-const NOT_TOKEN_CHAR_RE = new RegExp(`[^A-Za-z\\\\$_{${GREEK_CLASS}]`);
+const NOT_TOKEN_CHAR_RE = /[^A-Za-z\\$_{]/;
 const MAX_HOLDBACK = 64; // safety valve: bound worst-case latency if a
                          // pathological chunk has no separator at all
-                         // (MAX_TRIGGER_LEN=4; longest LaTeX construct is
-                         // now the longest Greek macro name, not a single
-                         // base letter -- '\lambda_{twelveletter}' caps at
-                         // 7(\lambda)+1(_)+1({)+8+1(}) = 18 chars -- 64 is
-                         // still comfortable headroom, not a tight fit).
+                         // (MAX_TRIGGER_LEN=4, longest LaTeX construct
+                         // capped at 1+1+1+8+1=12 chars -- 64 is headroom,
+                         // not a tight fit).
 
 function findSafeCutIndex(buf) {
   for (let i = buf.length - 1; i >= 0; i--) {
