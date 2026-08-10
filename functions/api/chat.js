@@ -1188,6 +1188,31 @@ import {
 } from '../_lib/rotation.mjs';
 import { validateImagePrompt, generateImageWorkersAI } from '../_lib/imageGen.mjs';
 import { classifyFootingDiagram, buildFootingDiagramSvg, svgToDataUri } from '../_lib/footingDiagram.mjs';
+import { parseDiagramCommand, renderFootingDiagramSVG } from '../_lib/computedFootingDiagram.mjs';
+
+// Bilingual wrapper for computedFootingDiagram.mjs's DiagramError codes
+// (+ parseDiagramCommand's own UNSUPPORTED_TYPE). English relays the
+// DiagramError message directly — it already names the exact bad
+// parameter and value, which a translated category label would only
+// obscure. Arabic gives the category in Arabic and keeps the same
+// specific (parameter-name/number) detail verbatim afterward, since
+// parameter names and numbers are Latin/ASCII by convention throughout
+// this feature (see computedFootingDiagram.mjs's header) and don't need
+// translating.
+function computedDiagramErrorMessage(code, englishDetail, arabic) {
+  if (!arabic) return englishDetail || 'Invalid diagram parameters.';
+  const AR = {
+    BAD_PARAM        : 'قيمة غير صالحة',
+    BAD_UNIT         : 'وحدة قياس غير معروفة',
+    COLUMN_TOO_WIDE  : 'عرض العمود أكبر من عرض القاعدة',
+    COLUMN_OUT_OF_BOUNDS: 'موضع العمود خارج حدود القاعدة',
+    COLUMNS_OVERLAP  : 'تداخل بين العمودين',
+    NO_ROOM_FOR_BARS : 'لا يوجد مسافة كافية لتسليح مع هذا الغطاء الخرساني وقطر السيخ',
+    UNSUPPORTED_TYPE : 'نوع القاعدة غير مدعوم — استخدم isolated أو combined',
+  };
+  const label = AR[code] || 'قيم غير صالحة';
+  return `${label} (${englishDetail || code})`;
+}
 
 // [v27] Session save/load/list/delete logic — extracted to
 // functions/_lib/sessions.mjs so chat.js and the dedicated
@@ -5256,6 +5281,60 @@ export async function onRequestPost(context) {
           source  : 'deterministic-template:' + diagramType,
         },
         200, undefined, request,
+      );
+    }
+
+    // Computed-diagram short-circuit. [NEW] Same rationale as the
+    // deterministic-template block just above — answer directly instead
+    // of asking a diffusion model to draw something it has no reliable
+    // training signal for — but for isolated/combined footings built
+    // from the exact numbers a user supplies (B=/L=/D=/cover=/dia=/
+    // spacing=/...), not a fixed catalog of three generic types. See
+    // _lib/computedFootingDiagram.mjs's header: that module was already
+    // fully built and tested but unreachable from any live route — it
+    // and footingDiagram.mjs both used to claim the same import path,
+    // so only one was ever importable.
+    //
+    // Strict ASCII `type key=value key=value ...` syntax only
+    // (parseDiagramCommand's own rationale: no NLP ambiguity on the
+    // numbers that matter). BAD_SYNTAX means the prompt wasn't an
+    // attempt at this syntax at all — falls through unchanged to
+    // classifyFootingDiagram above / the diffusion model below, exactly
+    // like every other prompt. Any OTHER failure code means the user
+    // clearly attempted the command syntax and got a parameter wrong;
+    // that is answered directly, not handed to the diffusion model as a
+    // raw "isolated b=... l=..." art prompt (which would both burn a
+    // rate-limited image slot and produce nothing useful).
+    let diagramCmd;
+    try {
+      diagramCmd = parseDiagramCommand(promptCheck.prompt);
+    } catch (err) {
+      // Programmer-error path only (see that function's own catch block
+      // — a genuine DiagramError never reaches here). Log and fall
+      // through to the existing behavior rather than 500 the request.
+      console.error('[chat.js] parseDiagramCommand threw unexpectedly:', err);
+      diagramCmd = { ok: false, code: 'BAD_SYNTAX' };
+    }
+    if (diagramCmd.ok) {
+      const svg = renderFootingDiagramSVG(diagramCmd.geometry, { lang: likelyArabic ? 'ar' : 'en' });
+      return json(
+        {
+          ok      : true,
+          dataUri : svgToDataUri(svg),
+          mimeType: 'image/svg+xml',
+          source  : 'computed-template:' + diagramCmd.type,
+        },
+        200, undefined, request,
+      );
+    }
+    if (diagramCmd.code !== 'BAD_SYNTAX') {
+      return json(
+        {
+          ok   : false,
+          error: computedDiagramErrorMessage(diagramCmd.code, diagramCmd.message, likelyArabic),
+          code : diagramCmd.code,
+        },
+        400, undefined, request,
       );
     }
 

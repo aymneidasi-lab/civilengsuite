@@ -1,4 +1,14 @@
-// functions/_lib/footingDiagram.mjs
+// functions/_lib/computedFootingDiagram.mjs
+//
+// RENAMED from a draft that carried the header
+// "functions/_lib/footingDiagram.mjs" verbatim — the same path
+// footingDiagram.mjs itself claims. Two independent modules asserting the
+// same canonical path is not a cosmetic mistake: it is why this module was
+// never imported into chat.js (an import from '../_lib/footingDiagram.mjs'
+// resolves to the OTHER file, the symbolic-only one — see that file's own
+// header) and therefore never reachable from a live request despite being
+// functionally complete and tested. Fixed by giving this module its own
+// real name and its own import path.
 //
 // Deterministic, zero-AI, zero-neuron-cost SVG generator for footing
 // schematics. This is the complement to imageGen.mjs's /image path, not
@@ -12,36 +22,21 @@
 // a quick conceptual/artistic image (it will not draw anything for
 // which it wasn't given explicit numeric parameters).
 //
-// SCOPE: four footing types share one compute*Geometry ->
-// renderFootingDiagramSVG pipeline, built around computeSectionGeometry
-// as the common section-view engine:
-//   'isolated' — single-column spread footing.
-//   'combined' — two-column rectangular footing (col1/col2).
-//   'strip'    — continuous rectangular footing under a row of 2..
-//                MAX_COLUMNS columns (combined generalized to N
-//                columns, still constant-width, still every column on
-//                the B midline). NOT a wall strip footing: a footing
-//                with no columns at all, continuous under a bearing
-//                wall, is a distinct sub-case and is not modeled —
-//                calling with fewer than 2 columns is a BAD_PARAM, not a
-//                wall footing.
-//   'raft'     — single-thickness mat slab under 2..MAX_COLUMNS columns
-//                positioned anywhere in plan (2-D offx/offy), not just
-//                along one centerline. The section cut is a straight cut
-//                through one chosen column only — a representative
-//                section, not a claim about every other column's depth
-//                along that same cut line.
-// Calling with an unknown type throws DiagramError('UNSUPPORTED_TYPE',
-// ...) rather than silently drawing the wrong thing.
+// Column/view/caption product-identity strings come from footingLabels.mjs,
+// shared with footingDiagram.mjs — see that file's header for why (it is
+// the direct fix for a live "col1"/"col2" label leak: this module used to
+// print its own internal column identifiers straight to the drawing
+// instead of "COLUMN A"/"COLUMN B" — عمود أ/عمود ب, because it had no
+// shared vocabulary with the other renderer to draw from).
 //
-// STILL NOT MODELED, on purpose, because drawing them correctly needs a
-// parametrization this module has never been given (guessing one would
-// be exactly the "confident but wrong" failure imageGen.mjs's own header
-// documents fixing — see PROMPT ITERATION 2 there): trapezoidal-plan or
-// strap-beam-connected combined footings (footing_pro's own product copy
-// lists Rectangular / Trapezoidal / Strap as its three live combined
-// footing types — this module's 'combined' only ever draws the
-// rectangular one), pile caps, and top/shear reinforcement of any kind.
+// SCOPE: 'isolated' (single-column spread footing) and 'combined'
+// (two-column footing) types only. Strip and raft footings are
+// architecturally supportable by the same
+// compute*Geometry -> renderFootingDiagramSVG pipeline (see
+// computeSectionGeometry, which both implemented types already share)
+// but are not implemented — calling with an unknown type throws
+// DiagramError('UNSUPPORTED_TYPE', ...) rather than silently drawing the
+// wrong thing.
 //
 // This is a schematic, not a shop/construction drawing. Reinforcement is
 // shown as one representative bottom-mesh layer only — no top steel, no
@@ -52,6 +47,8 @@
 // footing_pro/pc_suite integration notes for why it must never be
 // stripped out by a caller.
 
+import { FOOTING_LABELS, sectionThroughLabel } from './footingLabels.mjs';
+
 export class DiagramError extends Error {
   constructor(code, message) {
     super(message);
@@ -61,14 +58,6 @@ export class DiagramError extends Error {
 }
 
 const MM_PER_UNIT = { mm: 1, cm: 10, m: 1000 };
-
-// Sanity cap on the multi-column types (strip/raft) — this is a quick
-// schematic tool driven by a single ASCII command string with a 2000-
-// char server-side limit (see chat.js's mode:'diagram' handler), not a
-// CAD system; a raft or strip with more columns than this needs a real
-// drafting tool, not this one. isolated/combined are unaffected (fixed
-// at 1 and 2 columns respectively, unchanged).
-const MAX_COLUMNS = 12;
 
 function toMm(value, unit) {
   const factor = MM_PER_UNIT[unit];
@@ -94,12 +83,11 @@ function fmt(mmValue, unit, decimals = 0) {
 }
 
 // ── Shared section-view geometry ────────────────────────────────────────
-// Used identically by all four footing types — isolated (its only
-// column), and combined/strip/raft (through whichever column
-// sectionThrough selects). widthMM is the in-plan dimension visible in
-// this cut (the short axis for isolated; B for combined/strip/raft,
-// since all three assume constant width B along their length/footprint —
-// documented in each compute*Geometry function).
+// Used identically by isolated (its only column) and combined (through
+// whichever column sectionThrough selects) — see file header. widthMM is
+// the in-plan dimension visible in this cut (the short axis for
+// isolated; B for combined, since combined assumes constant width along
+// its length — documented in computeCombinedFootingGeometry).
 //
 // Bar centers are distributed evenly across the cover-to-cover envelope
 // rather than laid out at exactly the nominal input spacing starting
@@ -269,245 +257,12 @@ export function computeCombinedFootingGeometry(rawParams) {
   };
 }
 
-// ── Multi-column overlap helpers (shared by strip and raft) ─────────────
-// Combined's own overlap check (above) is hand-written for exactly two
-// columns and is left untouched — these generalize the same idea to
-// 2..MAX_COLUMNS columns for strip (1-D, along L only — every strip
-// column sits on the B midline, same assumption combined makes) and raft
-// (2-D, along both L and B, since raft columns can sit anywhere in
-// plan). assertNoOverlap1D sorts a COPY of the array to check only
-// adjacent pairs after sorting (sufficient and O(n log n) for 1-D
-// interval overlap); tags in any thrown message still refer to the
-// caller's original col1/col2/... labels, not sorted position.
-function assertNoOverlap1D(columns) {
-  const sorted = columns.slice().sort((a, b) => a.off - b.off);
-  for (let i = 0; i < sorted.length - 1; i++) {
-    const a = sorted[i], b = sorted[i + 1];
-    if (a.off + a.l / 2 > b.off - b.l / 2) {
-      throw new DiagramError('COLUMNS_OVERLAP', `${a.tag} and ${b.tag} overlap along L given their offsets and lengths.`);
-    }
-  }
-}
-
-function assertNoOverlap2D(columns) {
-  for (let i = 0; i < columns.length; i++) {
-    for (let j = i + 1; j < columns.length; j++) {
-      const a = columns[i], b = columns[j];
-      const sepX = Math.abs(a.offx - b.offx) >= (a.l + b.l) / 2;
-      const sepY = Math.abs(a.offy - b.offy) >= (a.b + b.b) / 2;
-      if (!sepX && !sepY) {
-        throw new DiagramError('COLUMNS_OVERLAP', `${a.tag} and ${b.tag} overlap given their positions and dimensions.`);
-      }
-    }
-  }
-}
-
-// ── Strip (continuous multi-column) footing ─────────────────────────────
-// rawParams (all lengths in `unit`, default 'mm'):
-//   B, L, D                footing width (constant along its length —
-//                           same constant-width assumption combined
-//                           makes), overall length spanning every
-//                           column, depth
-//   columns                array of { b, l, off }, length 2..MAX_COLUMNS
-//                           — each column's plan cross-section and its
-//                           centerline distance from the L=0 edge, same
-//                           convention as combined's col1/col2. All
-//                           columns are centered on the B midline (same
-//                           assumption combined makes) — a strip with
-//                           columns offset across B as well as along L
-//                           is not modeled here. Tags (col1, col2, ...)
-//                           are assigned by array order, not by sorted
-//                           position along L — matches how combined's
-//                           col1/col2 are caller-chosen labels, not
-//                           positions.
-//   cover, dia, spacing, unit     as combined
-//   sectionThrough          1..columns.length, default 1 — which column
-//                           (by array order) the section cut passes
-//                           through
-//
-// This is combined's two-column case generalized to 2..MAX_COLUMNS — a
-// continuous footing under a row of columns. It is NOT a wall strip
-// footing: a continuous footing with zero columns, under a bearing wall
-// rather than discrete columns, is a distinct sub-case and is not
-// modeled — `columns` must have at least 2 entries.
-export function computeStripFootingGeometry(rawParams) {
-  const unit = rawParams.unit || 'mm';
-  const B = toMm(rawParams.B, unit);
-  const L = toMm(rawParams.L, unit);
-  const D = toMm(rawParams.D, unit);
-  const cover = toMm(rawParams.cover, unit);
-  const dia = toMm(rawParams.dia, unit);
-  const spacing = toMm(rawParams.spacing, unit);
-  const sectionThrough = Number.isInteger(rawParams.sectionThrough) && rawParams.sectionThrough >= 1
-    ? rawParams.sectionThrough : 1;
-
-  for (const [name, v] of Object.entries({ B, L, D, cover, dia, spacing })) assertFinitePositive(name, v);
-
-  const rawColumns = rawParams.columns;
-  if (!Array.isArray(rawColumns) || rawColumns.length < 2) {
-    throw new DiagramError('BAD_PARAM', `"columns" must list at least 2 columns for a strip footing, got ${Array.isArray(rawColumns) ? rawColumns.length : JSON.stringify(rawColumns)}.`);
-  }
-  if (rawColumns.length > MAX_COLUMNS) {
-    throw new DiagramError('TOO_MANY_COLUMNS', `Strip footing supports at most ${MAX_COLUMNS} columns in this schematic, got ${rawColumns.length}.`);
-  }
-
-  const columns = rawColumns.map((c, i) => {
-    const tag = `col${i + 1}`;
-    const b = toMm(c.b, unit), l = toMm(c.l, unit), off = toMm(c.off, unit);
-    assertFinitePositive(`${tag}.b`, b);
-    assertFinitePositive(`${tag}.l`, l);
-    if (!Number.isFinite(off) || off <= 0) {
-      throw new DiagramError('BAD_PARAM', `"${tag}.off" must be a positive finite number, got ${JSON.stringify(c.off)}.`);
-    }
-    if (b >= B) throw new DiagramError('COLUMN_TOO_WIDE', `${tag}.b (${b}mm) must be smaller than B (${B}mm).`);
-    const lo = off - l / 2, hi = off + l / 2;
-    if (lo < 0 || hi > L) {
-      throw new DiagramError('COLUMN_OUT_OF_BOUNDS', `${tag} (offset ${off}mm, length ${l}mm) extends outside the footing's L=${L}mm extent.`);
-    }
-    return { tag, b, l, off };
-  });
-
-  assertNoOverlap1D(columns);
-
-  if (sectionThrough > columns.length) {
-    throw new DiagramError('BAD_PARAM', `"sectionThrough" (${sectionThrough}) exceeds the column count (${columns.length}).`);
-  }
-  const chosen = columns[sectionThrough - 1];
-  const section = computeSectionGeometry({
-    widthMM: B, depthMM: D, colWidthMM: chosen.b,
-    coverMM: cover, diaMM: dia, nominalSpacingMM: spacing,
-  });
-
-  return {
-    type: 'strip',
-    unit,
-    sectionThrough,
-    plan: {
-      longLabel: 'L', shortLabel: 'B', longMM: L, shortMM: B,
-      columns: columns.map((c) => ({ alongLongMM: c.l, alongShortMM: c.b, centerLongMM: c.off, tag: c.tag })),
-    },
-    section,
-    meta: { B, L, D, cover, dia, spacing, columns },
-  };
-}
-
-// ── Raft (mat) foundation ────────────────────────────────────────────────
-// rawParams (all lengths in `unit`, default 'mm'):
-//   B, L, D                raft plan width (short/vertical axis in the
-//                           drawing) and length (long/horizontal axis),
-//                           uniform thickness. Unlike isolated, axes are
-//                           never auto-swapped to "longer axis
-//                           horizontal": col offx/offy are given
-//                           relative to a fixed L/B convention, and
-//                           swapping which axis is called which would
-//                           silently invalidate every position the
-//                           caller supplied — same reasoning combined
-//                           already follows, for the same reason.
-//   columns                array of { b, l, offx, offy }, length
-//                           2..MAX_COLUMNS — b/l are the column's plan
-//                           cross-section (b along B, l along L, same
-//                           convention as colB/colL elsewhere in this
-//                           file); offx is the column centerline's
-//                           distance from the L=0 edge, offy from the
-//                           B=0 edge. Tags assigned by array order.
-//   cover, dia, spacing, unit     as combined — spacing applies to both
-//                           plan directions (isotropic mesh, same
-//                           simplification combined already makes)
-//   sectionThrough          1..columns.length, default 1 — which column
-//                           the section cut passes through. The cut is a
-//                           straight vertical line at that column's
-//                           offx, spanning the full B — a representative
-//                           section, not a claim about any other
-//                           column's actual depth along that same cut
-//                           line.
-export function computeRaftFootingGeometry(rawParams) {
-  const unit = rawParams.unit || 'mm';
-  const B = toMm(rawParams.B, unit);
-  const L = toMm(rawParams.L, unit);
-  const D = toMm(rawParams.D, unit);
-  const cover = toMm(rawParams.cover, unit);
-  const dia = toMm(rawParams.dia, unit);
-  const spacing = toMm(rawParams.spacing, unit);
-  const sectionThrough = Number.isInteger(rawParams.sectionThrough) && rawParams.sectionThrough >= 1
-    ? rawParams.sectionThrough : 1;
-
-  for (const [name, v] of Object.entries({ B, L, D, cover, dia, spacing })) assertFinitePositive(name, v);
-
-  const rawColumns = rawParams.columns;
-  if (!Array.isArray(rawColumns) || rawColumns.length < 2) {
-    throw new DiagramError('BAD_PARAM', `"columns" must list at least 2 columns for a raft foundation, got ${Array.isArray(rawColumns) ? rawColumns.length : JSON.stringify(rawColumns)}.`);
-  }
-  if (rawColumns.length > MAX_COLUMNS) {
-    throw new DiagramError('TOO_MANY_COLUMNS', `Raft foundation supports at most ${MAX_COLUMNS} columns in this schematic, got ${rawColumns.length}.`);
-  }
-
-  const columns = rawColumns.map((c, i) => {
-    const tag = `col${i + 1}`;
-    const b = toMm(c.b, unit), l = toMm(c.l, unit);
-    const offx = toMm(c.offx, unit), offy = toMm(c.offy, unit);
-    assertFinitePositive(`${tag}.b`, b);
-    assertFinitePositive(`${tag}.l`, l);
-    if (!Number.isFinite(offx) || offx <= 0) {
-      throw new DiagramError('BAD_PARAM', `"${tag}.offx" must be a positive finite number, got ${JSON.stringify(c.offx)}.`);
-    }
-    if (!Number.isFinite(offy) || offy <= 0) {
-      throw new DiagramError('BAD_PARAM', `"${tag}.offy" must be a positive finite number, got ${JSON.stringify(c.offy)}.`);
-    }
-    if (b >= B) throw new DiagramError('COLUMN_TOO_WIDE', `${tag}.b (${b}mm) must be smaller than B (${B}mm).`);
-    if (l >= L) throw new DiagramError('COLUMN_TOO_WIDE', `${tag}.l (${l}mm) must be smaller than L (${L}mm).`);
-    const loX = offx - l / 2, hiX = offx + l / 2;
-    const loY = offy - b / 2, hiY = offy + b / 2;
-    if (loX < 0 || hiX > L || loY < 0 || hiY > B) {
-      throw new DiagramError('COLUMN_OUT_OF_BOUNDS', `${tag} (offx ${offx}mm, offy ${offy}mm, ${l}x${b}mm) extends outside the raft's ${L}x${B}mm footprint.`);
-    }
-    return { tag, b, l, offx, offy };
-  });
-
-  assertNoOverlap2D(columns);
-
-  if (sectionThrough > columns.length) {
-    throw new DiagramError('BAD_PARAM', `"sectionThrough" (${sectionThrough}) exceeds the column count (${columns.length}).`);
-  }
-  const chosen = columns[sectionThrough - 1];
-  const section = computeSectionGeometry({
-    widthMM: B, depthMM: D, colWidthMM: chosen.b,
-    coverMM: cover, diaMM: dia, nominalSpacingMM: spacing,
-  });
-
-  return {
-    type: 'raft',
-    unit,
-    sectionThrough,
-    plan: {
-      longLabel: 'L', shortLabel: 'B', longMM: L, shortMM: B,
-      columns: columns.map((c) => ({
-        alongLongMM: c.l, alongShortMM: c.b, centerLongMM: c.offx, centerShortMM: c.offy, tag: c.tag,
-      })),
-    },
-    section,
-    meta: { B, L, D, cover, dia, spacing, columns },
-  };
-}
-
 // ── SVG rendering ─────────────────────────────────────────────────────
 const CANVAS = { w: 960, h: 760 };
 const PLAN_BOX = { x: 80, y: 60, w: 800, h: 280 };
 const SECTION_BOX = { x: 80, y: 420, w: 800, h: 240 };
 const MIN_BAR_PX_R = 3.2;      // bars stay legible even when geometry scales tiny
 const MIN_STROKE_PX = 1.2;
-
-// Types whose plan view carries more than one tagged column, and whose
-// section view is therefore "through col<N>" rather than an unlabeled
-// single cut. isolated has exactly one, unlabeled column and is
-// deliberately excluded — there is nothing to disambiguate.
-const NUMBERED_COLUMN_TYPES = new Set(['combined', 'strip', 'raft']);
-
-const TITLES = {
-  isolated: { en: 'Isolated Footing', ar: 'قاعدة منفردة' },
-  combined: { en: 'Combined Footing', ar: 'قاعدة مشتركة' },
-  strip: { en: 'Strip Footing', ar: 'قاعدة شريطية' },
-  raft: { en: 'Raft Foundation', ar: 'قاعدة لبشة' },
-};
 
 function esc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -537,8 +292,10 @@ function hatchDefs() {
     </pattern>`;
 }
 
-function renderPlanView(geometry, scale) {
+function renderPlanView(geometry, scale, lang) {
   const { plan } = geometry;
+  const labels = FOOTING_LABELS[lang === 'ar' ? 'ar' : 'en'];
+  const colDisplayLabel = { col1: labels.colA, col2: labels.colB };
   const originX = PLAN_BOX.x + (PLAN_BOX.w - plan.longMM * scale) / 2;
   const originY = PLAN_BOX.y + (PLAN_BOX.h - plan.shortMM * scale) / 2;
   const wPx = plan.longMM * scale, hPx = plan.shortMM * scale;
@@ -574,24 +331,23 @@ function renderPlanView(geometry, scale) {
   // Columns
   for (const col of plan.columns) {
     const cx = originX + col.centerLongMM * scale;
-    // raft columns carry their own centerShortMM (2-D position in
-    // plan); every other type omits it, which keeps them on the
-    // vertical center of the plan box exactly as before this field
-    // existed — isolated/combined/strip are unaffected.
-    const cy = col.centerShortMM != null ? originY + col.centerShortMM * scale : originY + hPx / 2;
+    const cy = originY + hPx / 2;
     const cw = col.alongLongMM * scale, ch = col.alongShortMM * scale;
     svg += `<rect x="${cx - cw / 2}" y="${cy - ch / 2}" width="${cw}" height="${ch}" class="column-outline"/>`;
     if (col.tag) {
-      svg += `<text x="${cx}" y="${cy + ch / 2 + 16}" text-anchor="middle" class="col-tag">${esc(col.tag)}</text>`;
+      // col.tag ('col1'/'col2') is an internal geometry identifier, not a
+      // display string — see file header. Map through the shared
+      // dictionary so this always says "COLUMN A"/"COLUMN B" (or the
+      // Arabic equivalent), matching footingDiagram.mjs's proven house
+      // style, never the raw tag.
+      const label = colDisplayLabel[col.tag] || col.tag;
+      svg += `<text x="${cx}" y="${cy + ch / 2 + 16}" text-anchor="middle" class="col-tag" dir="${lang === 'ar' ? 'rtl' : 'ltr'}">${esc(label)}</text>`;
     }
   }
 
-  // Section cut marker, so the section view below is traceable back to a
-  // specific column instead of floating unlabeled. Applies to every type
-  // with more than one numbered column (combined/strip/raft) — isolated
-  // has exactly one, unlabeled column, so there is nothing to
-  // disambiguate and no cut marker is drawn for it.
-  if (NUMBERED_COLUMN_TYPES.has(geometry.type)) {
+  // Section cut marker for combined footings, so the section view below
+  // is traceable back to a specific column instead of floating unlabeled.
+  if (geometry.type === 'combined') {
     const chosen = plan.columns[geometry.sectionThrough - 1];
     const cx = originX + chosen.centerLongMM * scale;
     svg += `<line x1="${cx}" y1="${originY - 14}" x2="${cx}" y2="${originY + hPx + 14}" class="cut-line"/>`;
@@ -603,12 +359,12 @@ function renderPlanView(geometry, scale) {
   svg += dimensionLine(originX, originY - 26, originX + wPx, originY - 26, `${plan.longLabel} = ${fmt(plan.longMM, geometry.unit, 2)}`, { orientation: 'h' });
   svg += dimensionLine(originX - 26, originY, originX - 26, originY + hPx, `${plan.shortLabel} = ${fmt(plan.shortMM, geometry.unit, 2)}`, { orientation: 'v' });
 
-  svg += `<text x="${originX + wPx / 2}" y="${originY + hPx + 46}" text-anchor="middle" class="view-title">PLAN</text>`;
+  svg += `<text x="${originX + wPx / 2}" y="${originY + hPx + 46}" text-anchor="middle" class="view-title" dir="${lang === 'ar' ? 'rtl' : 'ltr'}">${esc(labels.plan)}</text>`;
   svg += `</g>`;
   return svg;
 }
 
-function renderSectionView(geometry, scale) {
+function renderSectionView(geometry, scale, lang) {
   const { section } = geometry;
   const originX = SECTION_BOX.x + (SECTION_BOX.w - section.widthMM * scale) / 2;
   const baseY = SECTION_BOX.y + SECTION_BOX.h - 60; // leave room for soil hatch + labels below
@@ -646,10 +402,10 @@ function renderSectionView(geometry, scale) {
   svg += `<text x="${midX}" y="${barY - 26}" text-anchor="middle" class="dim-label">cover = ${fmt(section.coverMM, geometry.unit, 0)}</text>`;
   svg += `<text x="${midX}" y="${barY - 10}" text-anchor="middle" class="dim-label">${section.barCount} Ø${fmt(section.diaMM, geometry.unit, 0)} @ ${fmt(section.actualSpacingMM, geometry.unit, 0)}</text>`;
 
-  const sectionTitle = NUMBERED_COLUMN_TYPES.has(geometry.type)
-    ? `SECTION A-A (through ${geometry.plan.columns[geometry.sectionThrough - 1].tag})`
-    : 'SECTION A-A';
-  svg += `<text x="${originX + wPx / 2}" y="${baseY + 70}" text-anchor="middle" class="view-title">${sectionTitle}</text>`;
+  const sectionTitle = geometry.type === 'combined'
+    ? sectionThroughLabel(lang, geometry.sectionThrough)
+    : FOOTING_LABELS[lang === 'ar' ? 'ar' : 'en'].section;
+  svg += `<text x="${originX + wPx / 2}" y="${baseY + 70}" text-anchor="middle" class="view-title" dir="${lang === 'ar' ? 'rtl' : 'ltr'}">${esc(sectionTitle)}</text>`;
   svg += `</g>`;
   return svg;
 }
@@ -662,16 +418,19 @@ export function renderFootingDiagramSVG(geometry, opts = {}) {
   // (confirmed against cairosvg while testing this module). That cuts
   // both ways: an Arial-first stack drew Arabic title text as tofu; a
   // naive fix — putting 'Noto Naskh Arabic' first for the WHOLE drawing
-  // — then broke the Latin dimension labels (B=, PLAN, cover=, mm,
-  // col1...) instead, because that font doesn't carry a full Latin
-  // alphabet and nothing fell back for the missing glyphs. The actual
-  // fix is per-element, not global: every dimension/label string in this
-  // drawing (B=, L=, D=, cover=, mm, ⌀, PLAN, SECTION, col1/col2) is
-  // Latin+digits by engineering-notation convention regardless of
-  // `lang` — only the sheet title and caption ever contain Arabic
-  // script. defaultFontStack (Latin-first) is the blanket rule; only
-  // .sheet-title/.sheet-caption get scriptFontStack, and only when this
-  // render is actually Arabic.
+  // — would break the Latin dimension labels (B=, cover=, mm, Ø) instead,
+  // because that font doesn't carry a full Latin alphabet and nothing
+  // falls back for the missing glyphs. The fix is per-element, not
+  // global: pure engineering notation (B=, L=, D=, cover=, mm, ⌀, bar
+  // counts) is Latin+digits by international drafting convention
+  // regardless of `lang` and always uses defaultFontStack. Product-
+  // identity strings — sheet title, caption, PLAN/SECTION view titles,
+  // COLUMN A/B tags — come from footingLabels.mjs and DO localize,
+  // matching footingDiagram.mjs's proven, shipped house style (see the
+  // proof_*.png references this fix was checked against); those classes
+  // (.sheet-title/.sheet-caption/.view-title/.col-tag) get scriptFontStack,
+  // and only when this render is actually Arabic — never the blanket
+  // global change that caused the original tofu bug.
   const defaultFontStack = `Arial, Tahoma, 'Noto Sans Arabic', 'Noto Naskh Arabic', sans-serif`;
   const scriptFontStack = lang === 'ar'
     ? `'Noto Naskh Arabic', 'Noto Sans Arabic', Tahoma, Arial, sans-serif`
@@ -683,18 +442,9 @@ export function renderFootingDiagramSVG(geometry, opts = {}) {
     (SECTION_BOX.h - 60) / geometry.section.depthMM,
   ) * 0.85;
 
-  // The Arabic string avoids em-dash and parentheses on purpose — Noto
-  // Naskh Arabic (the font this render actually selects for Arabic
-  // script; see scriptFontStack above) has no glyph for either, found
-  // by isolated-glyph probing during testing, and this app cannot
-  // control which font a visitor's system ultimately substitutes.
-  // Punctuation actually confirmed present in that font (Arabic comma،
-  // period, shadda) is used instead.
-  const caption = lang === 'ar'
-    ? 'رسم تخطيطي محسوب من القيم المُدخلة، للتحقق فقط. التسليح مبسّط: شبكة سفلية واحدة فقط، بدون كانات أو أطوال ربط. هذا ليس رسم تنفيذي.'
-    : 'Schematic computed from the entered values — verify against your own design. Reinforcement is simplified (one bottom mesh layer, no stirrups/laps) — this is not a construction/shop drawing.';
-
-  const title = (TITLES[geometry.type] || TITLES.isolated)[lang];
+  const labels = FOOTING_LABELS[lang === 'ar' ? 'ar' : 'en'];
+  const caption = labels.captionComputed;
+  const title = geometry.type === 'combined' ? labels.footCombined : labels.footIsolated;
 
   return `<svg viewBox="0 0 ${CANVAS.w} ${CANVAS.h}" xmlns="http://www.w3.org/2000/svg" font-family="${defaultFontStack}">
   <defs>${hatchDefs()}</defs>
@@ -707,17 +457,17 @@ export function renderFootingDiagramSVG(geometry, opts = {}) {
     .dim-line        { stroke:#333; stroke-width:1; }
     .dim-tick        { stroke:#333; stroke-width:1; }
     .dim-label       { font-size:15px; fill:#111; }
-    .view-title      { font-size:16px; font-weight:bold; fill:#111; letter-spacing:1px; }
+    .view-title      { font-size:16px; font-weight:bold; fill:#111; letter-spacing:${lang === 'ar' ? 'normal' : '1px'}; font-family: ${scriptFontStack}; }
     .cut-line        { stroke:#1a1a1a; stroke-width:1.4; stroke-dasharray:6,3; }
     .cut-label       { font-size:14px; font-weight:bold; fill:#111; }
-    .col-tag         { font-size:12px; fill:#333; }
+    .col-tag         { font-size:12px; fill:#333; font-family: ${scriptFontStack}; }
     .sheet-title     { font-size:20px; font-weight:bold; fill:#111; font-family: ${scriptFontStack}; }
     .sheet-caption   { font-size:12.5px; fill:#444; font-family: ${scriptFontStack}; }
   </style>
   <rect x="0" y="0" width="${CANVAS.w}" height="${CANVAS.h}" fill="#ffffff"/>
   <text x="${CANVAS.w / 2}" y="30" text-anchor="middle" class="sheet-title" dir="${lang === 'ar' ? 'rtl' : 'ltr'}">${esc(title)}</text>
-  ${renderPlanView(geometry, scale)}
-  ${renderSectionView(geometry, scale)}
+  ${renderPlanView(geometry, scale, lang)}
+  ${renderSectionView(geometry, scale, lang)}
   <line x1="${PLAN_BOX.x}" y1="${SECTION_BOX.y - 30}" x2="${PLAN_BOX.x + PLAN_BOX.w}" y2="${SECTION_BOX.y - 30}" stroke="#ccc" stroke-width="1"/>
   ${renderCaption(caption, lang)}
 </svg>`;
@@ -763,12 +513,6 @@ function renderCaption(caption, lang) {
 // there is no NLP ambiguity on the numbers that matter):
 //   /diagram isolated B=1800 L=1800 D=500 colB=400 colL=400 cover=50 dia=16 spacing=150 [unit=mm]
 //   /diagram combined B=1200 L=4200 D=600 col1b=400 col1l=400 col1off=700 col2b=400 col2l=400 col2off=3500 cover=50 dia=16 spacing=150 [unit=mm]
-//   /diagram strip B=900 L=7500 D=450 cols=3 col1b=350 col1l=350 col1off=750 col2b=350 col2l=350 col2off=3750 col3b=350 col3l=350 col3off=6750 cover=50 dia=14 spacing=150 [unit=mm] [sectionthrough=2]
-//   /diagram raft B=6000 L=9000 D=500 cols=4 col1b=400 col1l=400 col1offx=1000 col1offy=1000 col2b=400 col2l=400 col2offx=1000 col2offy=8000 col3b=400 col3l=400 col3offx=5000 col3offy=1000 col4b=400 col4l=400 col4offx=5000 col4offy=8000 cover=75 dia=16 spacing=200 [unit=mm] [sectionthrough=1]
-// strip/raft additionally require cols=N (2..MAX_COLUMNS) up front, then
-// col1.. through colN.. of the fields shown above — colNoff for strip
-// (1-D, distance along L), colNoffx/colNoffy for raft (2-D, distance
-// along L / along B respectively).
 // Returns { ok:true, type, geometry } or { ok:false, code, message }.
 // Never throws — every DiagramError from the compute*Geometry functions
 // is caught and converted to the same { ok:false } shape validateImagePrompt()
@@ -776,11 +520,11 @@ function renderCaption(caption, lang) {
 export function parseDiagramCommand(text) {
   const trimmed = (text || '').trim();
   // Capture ANY leading token as the candidate type — deliberately not
-  // anchored to just isolated|combined|strip|raft — so an unimplemented-
-  // but-real type (e.g. "trapezoidal") reaches the UNSUPPORTED_TYPE
-  // branch below with a useful message instead of being misreported as
-  // unparseable syntax. BAD_SYNTAX is reserved for input with no
-  // leading-token/params shape at all.
+  // anchored to just isolated|combined — so an unimplemented-but-real
+  // type (e.g. "strip") reaches the UNSUPPORTED_TYPE branch below with a
+  // useful message instead of being misreported as unparseable syntax.
+  // BAD_SYNTAX is reserved for input with no leading-token/params shape
+  // at all.
   const m = trimmed.match(/^(\S+)\s+(.+)$/);
   if (!m || !m[2].includes('=')) {
     // No leading-token+rest shape at all, OR a rest with no "key=value"
@@ -788,7 +532,7 @@ export function parseDiagramCommand(text) {
     // full stop, as opposed to a recognized syntax with an unsupported
     // type keyword. Keeps "not a valid command" from being reported back
     // as if "not" were a real-but-unimplemented diagram type.
-    return { ok: false, code: 'BAD_SYNTAX', message: 'Expected: isolated|combined|strip|raft key=value key=value ...' };
+    return { ok: false, code: 'BAD_SYNTAX', message: 'Expected: isolated|combined key=value key=value ...' };
   }
   const type = m[1].toLowerCase();
   const kv = {};
@@ -798,31 +542,6 @@ export function parseDiagramCommand(text) {
     kv[tok.slice(0, eq).toLowerCase()] = tok.slice(eq + 1);
   }
   const num = (k) => (k in kv ? Number(kv[k]) : undefined);
-
-  // Shared by strip/raft: scan col1.., col2.., ... up to kv.cols and
-  // assemble the per-column param objects computeStripFootingGeometry/
-  // computeRaftFootingGeometry expect as a `columns` array — the flat-kv-
-  // to-nested-object step combined's branch already does by hand for
-  // exactly col1/col2, generalized here to an arbitrary field list and
-  // column count. Throws BAD_PARAM/TOO_MANY_COLUMNS directly; caught by
-  // this function's own try/catch below, same as every DiagramError
-  // thrown deeper inside the compute*Geometry functions.
-  function collectColumns(fields) {
-    const n = num('cols');
-    if (!Number.isFinite(n) || !Number.isInteger(n) || n < 2) {
-      throw new DiagramError('BAD_PARAM', `"cols" must be an integer of at least 2, got ${JSON.stringify(kv.cols)}.`);
-    }
-    if (n > MAX_COLUMNS) {
-      throw new DiagramError('TOO_MANY_COLUMNS', `At most ${MAX_COLUMNS} columns are supported in this schematic, got ${n}.`);
-    }
-    const columns = [];
-    for (let i = 1; i <= n; i++) {
-      const col = {};
-      for (const f of fields) col[f] = num(`col${i}${f}`);
-      columns.push(col);
-    }
-    return columns;
-  }
 
   try {
     let geometry;
@@ -843,26 +562,8 @@ export function parseDiagramCommand(text) {
         sectionThrough: num('sectionthrough') === 2 ? 2 : 1,
         unit: kv.unit || 'mm',
       });
-    } else if (type === 'strip') {
-      const st = num('sectionthrough');
-      geometry = computeStripFootingGeometry({
-        B: num('b'), L: num('l'), D: num('d'),
-        columns: collectColumns(['b', 'l', 'off']),
-        cover: num('cover'), dia: num('dia'), spacing: num('spacing'),
-        sectionThrough: Number.isFinite(st) ? st : 1,
-        unit: kv.unit || 'mm',
-      });
-    } else if (type === 'raft') {
-      const st = num('sectionthrough');
-      geometry = computeRaftFootingGeometry({
-        B: num('b'), L: num('l'), D: num('d'),
-        columns: collectColumns(['b', 'l', 'offx', 'offy']),
-        cover: num('cover'), dia: num('dia'), spacing: num('spacing'),
-        sectionThrough: Number.isFinite(st) ? st : 1,
-        unit: kv.unit || 'mm',
-      });
     } else {
-      return { ok: false, code: 'UNSUPPORTED_TYPE', message: `"${type}" is not supported. Use isolated, combined, strip, or raft.` };
+      return { ok: false, code: 'UNSUPPORTED_TYPE', message: `"${type}" is not supported. Use isolated or combined.` };
     }
     return { ok: true, type, geometry };
   } catch (err) {

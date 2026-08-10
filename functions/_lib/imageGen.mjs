@@ -73,8 +73,165 @@
 // footing_pro) — this reduces the odds of fabricated numbers, it does
 // not guarantee a completely text-free result, and a user should never
 // treat a generated image as a source of actual dimensions.
+//
+// PROMPT ITERATION 3 (root-caused from a separate live report: an Arabic
+// prompt — e.g. "قاعدة مشتركة" (combined footing) — came back completely
+// unrelated to the term, not just stylistically off the way iterations
+// 1-2 were). Different root cause from iterations 1-2, and stacking two
+// independent gaps, not one:
+//   1. The disambiguation clause below ("footing"/"column"/"beam"/... are
+//      structural, not feet/furniture/light) is English-only by
+//      construction. It does nothing for an Arabic token, because the
+//      model never sees a disambiguation for a word it can't match
+//      against that list in the first place.
+//   2. Both models here are general consumer/art checkpoints (see file
+//      header) with text encoders trained on overwhelmingly
+//      English-captioned data. A non-English token that isn't also
+//      common in English captions is weakly represented in that
+//      embedding space — the model doesn't error, it just falls back
+//      toward whatever the rest of the prompt weakly conditions it
+//      toward, which is why the result reads as "unrelated" rather than
+//      "wrong flavor of related."
+// ARABIC_ENGINEERING_GLOSSARY below is a fixed, bounded dictionary of
+// this app's own domain vocabulary (its own product line — footing /
+// beam / column / deflection / earthquake / wall / reinforcement /
+// section-property, per REPO_STRUCTURE's public/ product folders) mapped
+// to disambiguated English. translateKnownTerms() replaces every matched
+// Arabic phrase with its English gloss BEFORE the prompt is built,
+// longest-phrase-first, so "قاعدة مشتركة" matches as one unit instead of
+// "قاعدة" matching first and stranding "مشتركة" untranslated.
+// This is a fixed glossary, not machine translation — it covers this
+// app's own known vocabulary, not arbitrary Arabic text. A term outside
+// the glossary is left as-is; the English framing/disambiguation still
+// applies to whatever English text surrounds it, same as iteration 2.
+// This is deliberately NOT upgraded to a translation model call (e.g.
+// Workers AI's m2m100) — that is a new model invocation, a new failure
+// mode, and new latency/neuron cost stacked onto a path that is
+// explicitly budgeted as free; a scope boundary, not an oversight.
+// hadUnmappedArabic on translateKnownTerms()'s return is surfaced for
+// server-side logging only — chat.js does not currently branch on it.
+const ARABIC_ENGINEERING_GLOSSARY = [
+  ['قاعدة منفردة', 'isolated column footing (spread footing)'],
+  ['قاعدة منفصلة', 'isolated column footing (spread footing)'],
+  ['قاعدة مشتركة', 'combined footing (two columns on one footing base)'],
+  // 'شريطية' is genuinely ambiguous across the wider field (it's the
+  // standard textbook word for "strip/continuous" footing), but this
+  // specific product does not use it that way: footing_pro_v52.html's
+  // own FAQ copy names one of its three live products "القاعدة
+  // الشريطية (Strap)" — Strap spelled out in English, in their own
+  // Arabic text, presumably because they know the word is ambiguous too.
+  // Matching the site's own usage here, not the textbook-generic one, so
+  // this glossary doesn't disagree with the product it's actually
+  // sitting on. footingDiagram.mjs's classifyFootingDiagram() reaches
+  // the same call on the same evidence — see its own header comment —
+  // so this is the second of two places that decision had to be made
+  // consistently, not a one-off. Genuine strip/continuous-wall footing
+  // is a real, different, physically distinct element (long uniform
+  // strip under a wall or row of columns, unlike a strap's two
+  // separate footings tied by a beam with no soil bearing under the
+  // beam) — kept reachable under a more specific phrase below rather
+  // than dropped, since it is still correct engineering vocabulary,
+  // just not what this product means by the bare word.
+  ['قاعدة شريطية تحت حائط', 'strip footing / continuous wall footing (long uniform footing under a wall)'],
+  ['قاعدة شريطية', 'strap footing (a beam tying two separate footings together, no soil bearing under the beam)'],
+  ['قاعدة لبشة', 'raft foundation (mat foundation)'],
+  ['قاعدة حصيرة', 'raft foundation (mat foundation)'],
+  // Shape descriptors for the combined-footing product line specifically
+  // — added because "قاعدة مشتركة" alone left "مستطيلة"/"شبه منحرفة"
+  // stranded as untranslated residue on the site's own primary product
+  // name, "القاعدة المشتركة المستطيلة" ("مشتركة" matched, "المستطيلة"
+  // didn't). Scoped to this glossary's own domain, not general Arabic
+  // adjectives — "مستطيلة" out of context just means "rectangular", but
+  // every use of it in this app's chat is describing a footing.
+  ['مستطيلة', 'rectangular (footing shape)'],
+  ['شبه منحرفة', 'trapezoidal (tapered footing shape)'],
+  ['شبه منحرف', 'trapezoidal (tapered footing shape)'],
+  ['قبعة خوازيق', 'pile cap'],
+  ['كمرة رابطة', 'tie beam (grade beam)'],
+  ['كمرة ربط', 'tie beam (grade beam)'],
+  ['رقبة العمود', 'column pedestal (footing neck)'],
+  ['حائط استنادي', 'retaining wall'],
+  ['حائط قص', 'shear wall'],
+  ['غطاء خرساني', 'concrete cover'],
+  ['شبكة تسليح', 'reinforcement mesh'],
+  ['حديد تسليح', 'reinforcement steel bars (rebar)'],
+  ['تسليح خرساني', 'concrete reinforcement (rebar)'],
+  ['كانات', 'stirrups'],
+  ['خوازيق', 'piles'],
+  ['خازوق', 'pile'],
+  ['قاعدة', 'foundation footing'],
+  ['أساسات', 'foundations'],
+  ['أساس', 'foundation'],
+  ['أعمدة', 'structural columns'],
+  ['عمود', 'structural column'],
+  ['كمرات', 'structural beams'],
+  ['كمرة', 'structural beam'],
+  ['بلاطة', 'concrete slab'],
+  ['سقف', 'concrete slab / roof structure'],
+  ['خرسانة', 'concrete'],
+  ['تسليح', 'reinforcement (rebar)'],
+  ['حديد', 'steel reinforcement'],
+  ['حائط', 'wall'],
+  ['تربة', 'soil'],
+  ['هبوط', 'settlement / deflection'],
+];
+
+// Sorted once at module load — longest Arabic phrase first, independent
+// of the order the table above happens to be written in, so multi-word
+// entries are always tried before any single word they contain. Each
+// phrase becomes a regex, not a plain substring: every word in it gets
+// an optional leading '(?:ال)?' (the Arabic definite article), so
+// "القاعدة الشريطية" matches as one full unit — article included — the
+// same way "قاعدة شريطية" does. Without this, a SHORTER single-word
+// entry could still match inside a longer 'ال'-prefixed word a longer
+// phrase hadn't already consumed (e.g. plain "قاعدة" matching inside
+// "القاعدة"), stranding the leading 'ال' outside the match and
+// corrupting the result: "القاعدة الشريطية" produced "الfoundation
+// footing الشريطية" under the old .split()/.join() approach — caught by
+// testing this exact definite-article phrasing, not by inspection.
+// footingDiagram.mjs's classifyFootingDiagram() hit the identical root
+// cause (Arabic nouns are just as often written definite as indefinite,
+// and this product's own FAQ copy leans definite — "القاعدة المشتركة
+// المستطيلة", "القاعدة الشريطية"); that function fixed it by
+// normalizing the input once up front (stripAl()), which is safe there
+// because it only needs a yes/no classification. This function returns
+// the actual surrounding text, not just a verdict, so blanket-stripping
+// 'ال' from every token in arbitrary user text would silently mangle
+// words that have nothing to do with this glossary — a per-phrase
+// regex match keeps the fix scoped to only the vocabulary this glossary
+// actually knows about.
+function buildArabicMatcher(phrase) {
+  const pattern = phrase.split(/\s+/).map((word) => `(?:ال)?${word}`).join('\\s+');
+  return new RegExp(pattern, 'g');
+}
+
+const SORTED_GLOSSARY = ARABIC_ENGINEERING_GLOSSARY
+  .slice()
+  .sort((a, b) => b[0].length - a[0].length)
+  .map(([arabic, english]) => [buildArabicMatcher(arabic), english]);
+
+const ARABIC_RANGE_RE = /[\u0600-\u06FF]/;
+
+// Exported for unit testing. Pure string function, no I/O.
+export function translateKnownTerms(text) {
+  let out = text;
+  for (const [matcher, english] of SORTED_GLOSSARY) {
+    out = out.replace(matcher, english);
+  }
+  return { text: out, hadUnmappedArabic: ARABIC_RANGE_RE.test(out) };
+}
+
 function buildEngineeringPrompt(userPrompt) {
-  return `Technical civil/structural engineering line-art diagram, drafting/blueprint style, black-and-white: ${userPrompt}. Interpret every term in a civil engineering and construction context (e.g. "footing", "column", "beam", "pile", "slab" are structural or foundation elements — not feet, furniture, light, or unrelated meanings). Clean geometric outline only, hatching to indicate concrete/material sections, no text, no numbers, no dimension labels, no measurements, no annotations, no watermark — a pure unlabeled line-art schematic on a white background.`;
+  const { text: translated, hadUnmappedArabic } = translateKnownTerms(userPrompt);
+  const base = `Technical civil/structural engineering line-art diagram, drafting/blueprint style, black-and-white: ${translated}. Interpret every term in a civil engineering and construction context (e.g. "footing", "column", "beam", "pile", "slab" are structural or foundation elements — not feet, furniture, light, or unrelated meanings). Clean geometric outline only, hatching to indicate concrete/material sections, no text, no numbers, no dimension labels, no measurements, no annotations, no watermark — a pure unlabeled line-art schematic on a white background.`;
+  // Belt-and-suspenders: if Arabic script survives the glossary pass (a
+  // term outside the fixed dictionary), add one more explicit steer
+  // rather than silently sending mixed-script text into an
+  // English-majority text encoder with zero framing around the
+  // untranslated part.
+  return hadUnmappedArabic
+    ? `${base} The description may still include Arabic engineering terminology alongside the English framing above; read any remaining non-English words as construction/civil-engineering vocabulary, never as unrelated everyday objects.`
+    : base;
 }
 const NEGATIVE_PROMPT = 'cartoon, comic, anime, photo, photorealistic, people, hands, faces, feet, shoes, sports, sketchbook, colored pencils, watercolor, painting, colorful, playful, cute, watermark, signature, text, numbers, digits, dimension labels, measurements, handwritten text, illegible writing, gibberish text, blurry';
 
