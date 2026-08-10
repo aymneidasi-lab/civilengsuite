@@ -1187,6 +1187,34 @@ import {
   classifyProviderResult, // [PATCH — consolidation, see OpenRouter/Groq blocks below]
 } from '../_lib/rotation.mjs';
 import { validateImagePrompt, generateImageWorkersAI } from '../_lib/imageGen.mjs';
+import {
+  classifyFootingDiagram, buildFootingDiagramSvg, svgToDataUri,
+  parseDiagramCommand, renderFootingDiagramSVG,
+} from '../_lib/footingDiagram.mjs';
+
+// Bilingual wrapper for footingDiagram.mjs's DiagramError codes (+
+// parseDiagramCommand's own UNSUPPORTED_TYPE). English relays the
+// DiagramError message directly — it already names the exact bad
+// parameter and value, which a translated category label would only
+// obscure. Arabic gives the category in Arabic and keeps the same
+// specific (parameter-name/number) detail verbatim afterward, since
+// parameter names and numbers are Latin/ASCII by convention throughout
+// this feature (see footingDiagram.mjs's header) and don't need
+// translating.
+function computedDiagramErrorMessage(code, englishDetail, arabic) {
+  if (!arabic) return englishDetail || 'Invalid diagram parameters.';
+  const AR = {
+    BAD_PARAM        : 'قيمة غير صالحة',
+    BAD_UNIT         : 'وحدة قياس غير معروفة',
+    COLUMN_TOO_WIDE  : 'عرض العمود أكبر من عرض القاعدة',
+    COLUMN_OUT_OF_BOUNDS: 'موضع العمود خارج حدود القاعدة',
+    COLUMNS_OVERLAP  : 'تداخل بين العمودين',
+    NO_ROOM_FOR_BARS : 'لا يوجد مسافة كافية لتسليح مع هذا الغطاء الخرساني وقطر السيخ',
+    UNSUPPORTED_TYPE : 'نوع القاعدة غير مدعوم — استخدم isolated أو combined',
+  };
+  const label = AR[code] || 'قيم غير صالحة';
+  return `${label} (${englishDetail || code})`;
+}
 
 // [v27] Session save/load/list/delete logic — extracted to
 // functions/_lib/sessions.mjs so chat.js and the dedicated
@@ -5222,6 +5250,129 @@ export async function onRequestPost(context) {
           ? 'من فضلك اوصف الصورة اللي عايزها.'
           : 'Please describe the image you want.');
       return json({ ok: false, error: msg, code: promptCheck.code }, 400, undefined, request);
+    }
+
+    // Deterministic-diagram short-circuit. [NEW — fixes the live bug
+    // report: "draw combined footing" returning an unrelated
+    // building-interior sketch.] Checked BEFORE the Workers-AI rate
+    // bucket below and BEFORE generateImageWorkersAI() is ever called —
+    // not a post-hoc filter on the diffusion model's output. See
+    // _lib/footingDiagram.mjs's header for why this is a routing fix, not
+    // a prompt-wording fix: flux-1-schnell / stable-diffusion-xl-lightning
+    // have ~no training signal for "combined footing"-class content, so
+    // no prompt string fixes it — the two prior prompt patches documented
+    // in imageGen.mjs each fixed a different symptom of the same
+    // underlying gap without closing it. For the closed set of structural
+    // elements this product actually ships, skip the model entirely and
+    // return a hand-authored SVG instead: free (no Workers AI neurons
+    // spent, so it does not touch the :image rate bucket below — only
+    // the general per-IP limiter already applied earlier in this handler
+    // covers it), instant, and correct by construction every time instead
+    // of on a per-request roll of a 4-step diffusion model. Any prompt
+    // that does NOT match a known type — imageGen.mjs's own "golden
+    // retriever wearing sunglasses" example — falls through unchanged to
+    // the exact diffusion path that existed before this patch.
+    const diagramType = classifyFootingDiagram(promptCheck.prompt);
+
+    // strip and raft ARE real, fully-supported /diagram types (see
+    // computeStripFootingGeometry / computeRaftFootingGeometry in
+    // footingDiagram.mjs) but their column count and layout vary too much
+    // between real projects for a fixed "generic" picture to be honestly
+    // representative the way the other four types' generic templates are
+    // — a combined footing is always exactly 2 columns on one centerline;
+    // a strip or raft could be 2 columns or 8, in a row or a grid.
+    // Guessing a layout here would be exactly the "confident but wrong"
+    // failure imageGen.mjs's PROMPT ITERATION 2 comment already documents
+    // fixing once, just relocated from a diffusion model's pixels to this
+    // module's arithmetic. classifyFootingDiagram still recognizes both
+    // (so the request doesn't silently fall through to the diffusion
+    // model for a term the glossary below already disambiguates
+    // correctly) but points at the tool that actually needs from the user
+    // instead of drawing something that might not match what they meant.
+    if (diagramType === 'strip' || diagramType === 'raft') {
+      const example = diagramType === 'strip'
+        ? '/diagram strip B=900 L=7500 D=450 cols=3 col1b=350 col1l=350 col1off=750 col2b=350 col2l=350 col2off=3750 col3b=350 col3l=350 col3off=6750 cover=50 dia=14 spacing=150'
+        : '/diagram raft B=6000 L=9000 D=500 cols=4 col1b=400 col1l=400 col1offx=1000 col1offy=1000 col2b=400 col2l=400 col2offx=1000 col2offy=5000 col3b=400 col3l=400 col3offx=5000 col3offy=1000 col4b=400 col4l=400 col4offx=5000 col4offy=5000 cover=75 dia=16 spacing=200';
+      const arType = diagramType === 'strip' ? 'القاعدة الشريطية تحت الحائط' : 'قاعدة اللبشة';
+      return json(
+        {
+          ok   : false,
+          code : 'USE_DIAGRAM_COMMAND',
+          error: likelyArabic
+            ? `${arType} بتختلف كتير في عدد وترتيب الأعمدة من مشروع لمشروع، فمينفعش نرسملها شكل عام. استخدم أمر /diagram بأبعادك الفعلية، مثلاً:\n${example}`
+            : `${diagramType === 'strip' ? 'Strip' : 'Raft'} footings vary too much in column count/layout for a generic drawing. Use the /diagram command with your actual dimensions, for example:\n${example}`,
+        },
+        400, undefined, request,
+      );
+    }
+    if (diagramType) {
+      const svg = buildFootingDiagramSvg(diagramType, likelyArabic ? 'ar' : 'en');
+      return json(
+        {
+          ok      : true,
+          dataUri : svgToDataUri(svg),
+          mimeType: 'image/svg+xml',
+          source  : 'deterministic-template:' + diagramType,
+        },
+        200, undefined, request,
+      );
+    }
+
+    // Computed-diagram short-circuit. Same rationale as the
+    // deterministic-template block just above — answer directly instead
+    // of asking a diffusion model to draw something it has no reliable
+    // training signal for — but for isolated/combined/strip/raft footings
+    // built from the exact numbers a user supplies (B=/L=/D=/cover=/dia=/
+    // spacing=/...), not a fixed catalog of generic types. Both this
+    // block and classifyFootingDiagram above now import from the single
+    // footingDiagram.mjs (see that import at the top of this file) — they
+    // used to resolve to two different files that both claimed the same
+    // import path, which silently broke this endpoint's module load
+    // entirely (an ES import of a name the target module doesn't export
+    // is a load-time failure, not a runtime null) until the export names
+    // and the import path were reconciled into one file.
+    //
+    // Strict ASCII `type key=value key=value ...` syntax only
+    // (parseDiagramCommand's own rationale: no NLP ambiguity on the
+    // numbers that matter). BAD_SYNTAX means the prompt wasn't an
+    // attempt at this syntax at all — falls through unchanged to
+    // classifyFootingDiagram above / the diffusion model below, exactly
+    // like every other prompt. Any OTHER failure code means the user
+    // clearly attempted the command syntax and got a parameter wrong;
+    // that is answered directly, not handed to the diffusion model as a
+    // raw "isolated b=... l=..." art prompt (which would both burn a
+    // rate-limited image slot and produce nothing useful).
+    let diagramCmd;
+    try {
+      diagramCmd = parseDiagramCommand(promptCheck.prompt);
+    } catch (err) {
+      // Programmer-error path only (see that function's own catch block
+      // — a genuine DiagramError never reaches here). Log and fall
+      // through to the existing behavior rather than 500 the request.
+      console.error('[chat.js] parseDiagramCommand threw unexpectedly:', err);
+      diagramCmd = { ok: false, code: 'BAD_SYNTAX' };
+    }
+    if (diagramCmd.ok) {
+      const svg = renderFootingDiagramSVG(diagramCmd.geometry, { lang: likelyArabic ? 'ar' : 'en' });
+      return json(
+        {
+          ok      : true,
+          dataUri : svgToDataUri(svg),
+          mimeType: 'image/svg+xml',
+          source  : 'computed-template:' + diagramCmd.type,
+        },
+        200, undefined, request,
+      );
+    }
+    if (diagramCmd.code !== 'BAD_SYNTAX') {
+      return json(
+        {
+          ok   : false,
+          error: computedDiagramErrorMessage(diagramCmd.code, diagramCmd.message, likelyArabic),
+          code : diagramCmd.code,
+        },
+        400, undefined, request,
+      );
     }
 
     // Independent of, and stricter than, the general 8-per-60s limiter

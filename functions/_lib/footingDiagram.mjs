@@ -764,7 +764,7 @@ function renderCaption(caption, lang) {
 //   /diagram isolated B=1800 L=1800 D=500 colB=400 colL=400 cover=50 dia=16 spacing=150 [unit=mm]
 //   /diagram combined B=1200 L=4200 D=600 col1b=400 col1l=400 col1off=700 col2b=400 col2l=400 col2off=3500 cover=50 dia=16 spacing=150 [unit=mm]
 //   /diagram strip B=900 L=7500 D=450 cols=3 col1b=350 col1l=350 col1off=750 col2b=350 col2l=350 col2off=3750 col3b=350 col3l=350 col3off=6750 cover=50 dia=14 spacing=150 [unit=mm] [sectionthrough=2]
-//   /diagram raft B=6000 L=9000 D=500 cols=4 col1b=400 col1l=400 col1offx=1000 col1offy=1000 col2b=400 col2l=400 col2offx=1000 col2offy=8000 col3b=400 col3l=400 col3offx=5000 col3offy=1000 col4b=400 col4l=400 col4offx=5000 col4offy=8000 cover=75 dia=16 spacing=200 [unit=mm] [sectionthrough=1]
+//   /diagram raft B=6000 L=9000 D=500 cols=4 col1b=400 col1l=400 col1offx=1000 col1offy=1000 col2b=400 col2l=400 col2offx=1000 col2offy=5000 col3b=400 col3l=400 col3offx=5000 col3offy=1000 col4b=400 col4l=400 col4offx=5000 col4offy=5000 cover=75 dia=16 spacing=200 [unit=mm] [sectionthrough=1]
 // strip/raft additionally require cols=N (2..MAX_COLUMNS) up front, then
 // col1.. through colN.. of the fields shown above — colNoff for strip
 // (1-D, distance along L), colNoffx/colNoffy for raft (2-D, distance
@@ -871,4 +871,430 @@ export function parseDiagramCommand(text) {
     }
     throw err; // programmer error (e.g. bad code path) — do not swallow silently
   }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// GENERIC (NO-NUMBERS) SCHEMATICS — natural-language /image short-circuit
+// ════════════════════════════════════════════════════════════════════════
+//
+// classifyFootingDiagram / buildFootingDiagramSvg / svgToDataUri —
+// referenced by name in this file's own header ("footingDiagram.mjs's
+// classifyFootingDiagram() reaches the same call — see its own header
+// comment") and in imageGen.mjs's ARABIC_ENGINEERING_GLOSSARY comments,
+// and imported by chat.js's mode:'image' handler — but not actually
+// defined anywhere in this file before this section. Restored here.
+//
+// Covers the closed set of structural elements this product's chat
+// surface can meaningfully draw WITHOUT numbers: isolated,
+// rectangular-combined, trapezoidal-combined, strap — each has one fixed
+// topology regardless of the specific project (a combined footing is
+// always exactly 2 columns on one centerline), so a generic drawing is
+// honestly representative. strip and raft are deliberately NOT drawn
+// generically — see the classifyFootingDiagram()/chat.js call site
+// comment below for why (column count/layout varies too much between
+// real projects for a fixed picture to be honest) — they're still
+// classified, just routed to a "use /diagram" response instead of a
+// guessed picture.
+//
+// Every dimension is a SYMBOL (L, B, D — a letter, never a digit) for the
+// same reason renderFootingDiagramSVG() above never fabricates a number
+// it wasn't given: this path has no real numbers to be honest WITH. A
+// silently-defaulted "B = 1200mm" here would be the same failure
+// imageGen.mjs's PROMPT ITERATION 2 comment describes for the diffusion
+// path (a confident-looking fabricated number), just relocated from a
+// diffusion model's pixels to this module's arithmetic.
+//
+// esc() is reused from above as-is: it doesn't escape `"`, but nothing
+// below places a fixed label string inside a quoted SVG attribute value,
+// only inside <text> element content, so the gap doesn't apply here.
+
+const GENERIC_FONT = "font-family:'Segoe UI',Arial,sans-serif;";
+
+const GENERIC_L = {
+  en: {
+    plan: 'PLAN VIEW', section: 'SECTION A\u2013A',
+    colA: 'COLUMN A', colB: 'COLUMN B', col: 'COLUMN',
+    footRect: 'RECTANGULAR COMBINED FOOTING', footTrap: 'TRAPEZOIDAL COMBINED FOOTING',
+    footStrap: 'STRAP FOOTING', footIso: 'ISOLATED FOOTING',
+    strapBeam: 'STRAP BEAM', edgeFooting: 'EDGE FOOTING', interiorFooting: 'INTERIOR FOOTING',
+    ground: 'GROUND LINE', rebarNote: 'REINFORCEMENT MAT (SCHEMATIC)',
+    caption: 'Generic reference schematic \u2014 not project-specific. For an exact, to-scale drawing use /diagram with your own dimensions. Verify every dimension against your own ECP 203 / ACI 318 design.',
+    dirAttr: 'ltr',
+  },
+  ar: {
+    plan: 'مسقط أفقي', section: 'قطاع أ-أ',
+    colA: 'عمود أ', colB: 'عمود ب', col: 'عمود',
+    footRect: 'قاعدة مشتركة مستطيلة', footTrap: 'قاعدة مشتركة شبه منحرفة',
+    footStrap: 'القاعدة الشريطية', footIso: 'قاعدة منفردة',
+    strapBeam: 'كمرة الربط', edgeFooting: 'القاعدة الطرفية', interiorFooting: 'القاعدة الداخلية',
+    ground: 'منسوب سطح الأرض', rebarNote: 'شبكة تسليح (توضيحية)',
+    caption: 'مخطط توضيحي عام وليس خاصاً بمشروع معين — لرسم دقيق بأبعادك الفعلية استخدم أمر /diagram. راجع جميع الأبعاد مع تصميمك الخاص وفق ECP 203 / ACI 318.',
+    dirAttr: 'rtl',
+  },
+};
+
+function genericDefs() {
+  return `<defs>
+    <pattern id="gConcreteHatch" width="8" height="8" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+      <rect width="8" height="8" fill="#ffffff"/>
+      <line x1="0" y1="0" x2="0" y2="8" stroke="#5b6b7a" stroke-width="1.1"/>
+    </pattern>
+    <pattern id="gSoilHatch" width="14" height="10" patternUnits="userSpaceOnUse">
+      <rect width="14" height="10" fill="#f4f1ea"/>
+      <line x1="0" y1="10" x2="7" y2="0" stroke="#9a8f78" stroke-width="1"/>
+      <line x1="7" y1="10" x2="14" y2="0" stroke="#9a8f78" stroke-width="1"/>
+    </pattern>
+    <marker id="gArrowStart" markerWidth="8" markerHeight="8" refX="1" refY="4" orient="auto">
+      <path d="M7,1 L1,4 L7,7 Z" fill="#1c2b3a"/>
+    </marker>
+    <marker id="gArrowEnd" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M1,1 L7,4 L1,7 Z" fill="#1c2b3a"/>
+    </marker>
+  </defs>`;
+}
+
+function gText(x, y, str, { size = 13, weight = 'normal', anchor = 'middle', color = '#1c2b3a', dir = 'ltr' } = {}) {
+  return `<text x="${x}" y="${y}" text-anchor="${anchor}" dir="${dir}" style="${GENERIC_FONT}font-size:${size}px;font-weight:${weight};fill:${color};">${esc(str)}</text>`;
+}
+
+function gDimH(x1, x2, y, label, dir) {
+  return `<line x1="${x1}" y1="${y}" x2="${x2}" y2="${y}" stroke="#1c2b3a" stroke-width="1" marker-start="url(#gArrowStart)" marker-end="url(#gArrowEnd)"/>
+    <line x1="${x1}" y1="${y - 6}" x2="${x1}" y2="${y + 6}" stroke="#1c2b3a" stroke-width="1"/>
+    <line x1="${x2}" y1="${y - 6}" x2="${x2}" y2="${y + 6}" stroke="#1c2b3a" stroke-width="1"/>
+    ${gText((x1 + x2) / 2, y - 8, label, { size: 14, weight: '700', dir })}`;
+}
+
+function gDimV(y1, y2, x, label, dir, side = 'left') {
+  const lx = side === 'left' ? x - 12 : x + 12;
+  const anchor = side === 'left' ? 'end' : 'start';
+  return `<line x1="${x}" y1="${y1}" x2="${x}" y2="${y2}" stroke="#1c2b3a" stroke-width="1" marker-start="url(#gArrowStart)" marker-end="url(#gArrowEnd)"/>
+    <line x1="${x - 6}" y1="${y1}" x2="${x + 6}" y2="${y1}" stroke="#1c2b3a" stroke-width="1"/>
+    <line x1="${x - 6}" y1="${y2}" x2="${x + 6}" y2="${y2}" stroke="#1c2b3a" stroke-width="1"/>
+    ${gText(lx, (y1 + y2) / 2 + 4, label, { size: 14, weight: '700', anchor, dir })}`;
+}
+
+function gRebarMeshPlan(x, y, w, h, step = 26) {
+  let out = '';
+  for (let gx = x; gx <= x + w + 0.01; gx += step) out += `<line x1="${gx}" y1="${y}" x2="${gx}" y2="${y + h}" stroke="#8fa3b8" stroke-width="0.75"/>`;
+  for (let gy = y; gy <= y + h + 0.01; gy += step) out += `<line x1="${x}" y1="${gy}" x2="${x + w}" y2="${gy}" stroke="#8fa3b8" stroke-width="0.75"/>`;
+  return `<g opacity="0.85">${out}</g>`;
+}
+
+function gRebarDotsRow(x1, x2, y, count = 7, r = 3.2) {
+  let out = '';
+  for (let i = 0; i < count; i++) {
+    const x = x1 + ((x2 - x1) * i) / (count - 1);
+    out += `<circle cx="${x}" cy="${y}" r="${r}" fill="#1c2b3a"/>`;
+  }
+  return out;
+}
+
+function gDowels(cx, colHalfW, topY, hookY, count = 4) {
+  let out = '';
+  const inset = colHalfW * 0.5;
+  for (let i = 0; i < count; i++) {
+    const x = cx - inset + (i * (2 * inset)) / (count - 1);
+    const hookDir = x < cx ? -1 : 1;
+    out += `<path d="M${x},${topY} L${x},${hookY} L${x + hookDir * 10},${hookY}" fill="none" stroke="#1c2b3a" stroke-width="1.3"/>`;
+  }
+  return out;
+}
+
+function gBreakSymbol(cx, y, halfW) {
+  const x1 = cx - halfW - 4, x2 = cx + halfW + 4;
+  return `<path d="M${x1},${y} L${x1 + 6},${y - 7} L${x1 + 14},${y + 7} L${x1 + 22},${y - 7} L${x1 + 30},${y}
+    M${x2 - 30},${y} L${x2 - 22},${y - 7} L${x2 - 14},${y + 7} L${x2 - 6},${y - 7} L${x2},${y}"
+    fill="none" stroke="#1c2b3a" stroke-width="1.2"/>`;
+}
+
+function gPanelFrame(x, y, w, h, caption, dir) {
+  return `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="none" stroke="#c7d2dc" stroke-width="1"/>
+    ${gText(x + w / 2, y + h + 22, caption, { size: 15, weight: '700', dir })}`;
+}
+
+// ── Isolated (single column) ────────────────────────────────────────────
+function genPlanIsolated(px, py, pw, ph, l) {
+  const fw = pw * 0.56, fh = ph * 0.62;
+  const fx = px + (pw - fw) / 2, fy = py + (ph - fh) / 2;
+  const cw = Math.min(fw, fh) * 0.34;
+  const cx = fx + fw / 2, cy = fy + fh / 2;
+  const cutX1 = cx, cutY1 = fy - 18, cutY2 = fy + fh + 18;
+  return `
+    ${gRebarMeshPlan(fx + 8, fy + 8, fw - 16, fh - 16)}
+    <rect x="${fx}" y="${fy}" width="${fw}" height="${fh}" fill="none" stroke="#1c2b3a" stroke-width="2.5"/>
+    <rect x="${cx - cw / 2}" y="${cy - cw / 2}" width="${cw}" height="${cw}" fill="url(#gConcreteHatch)" stroke="#1c2b3a" stroke-width="2"/>
+    ${gText(cx + cw / 2 + 10, cy + 4, l.col, { size: 12, weight: '700', anchor: 'start', dir: l.dirAttr })}
+    <line x1="${cutX1}" y1="${cutY1}" x2="${cutX1}" y2="${cutY2}" stroke="#8a2b2b" stroke-width="1.4" stroke-dasharray="10,4,2,4"/>
+    ${gText(cutX1, cutY1 - 8, 'A', { size: 13, weight: '700', color: '#8a2b2b', anchor: 'middle' })}
+    ${gText(cutX1 + 14, cutY2 + 5, 'A', { size: 13, weight: '700', color: '#8a2b2b', anchor: 'start' })}
+    ${gDimH(fx, fx + fw, fy + fh + 26, 'L', l.dirAttr)}
+    ${gDimV(fy, fy + fh, fx - 26, 'B', l.dirAttr, 'left')}
+  `;
+}
+
+function genSectionIsolated(px, py, pw, ph, l) {
+  const gy = py + ph * 0.42;
+  const fx = px + pw * 0.14, fw = pw * 0.72, fh = ph * 0.15, fy = gy;
+  const cw = fh * 0.85;
+  const cx = fx + fw / 2;
+  const colTop = py + ph * 0.06;
+  return `
+    <rect x="${px}" y="${gy}" width="${pw}" height="${py + ph - gy}" fill="url(#gSoilHatch)"/>
+    <line x1="${px}" y1="${gy}" x2="${px + pw}" y2="${gy}" stroke="#5b4a2f" stroke-width="1.5"/>
+    ${gText(px + pw - 4, gy - 6, l.ground, { size: 10, color: '#5b4a2f', anchor: 'end' })}
+    <rect x="${fx}" y="${fy}" width="${fw}" height="${fh}" fill="url(#gConcreteHatch)" stroke="#1c2b3a" stroke-width="2.5"/>
+    ${gRebarDotsRow(fx + 14, fx + fw - 14, fy + fh - 12)}
+    <rect x="${cx - cw / 2}" y="${colTop}" width="${cw}" height="${fy - colTop}" fill="url(#gConcreteHatch)" stroke="#1c2b3a" stroke-width="2"/>
+    ${gBreakSymbol(cx, colTop + 6, cw / 2)}
+    ${gDowels(cx, cw / 2, colTop + 14, fy + fh - 10)}
+    ${gText(cx, colTop - 8, l.col, { size: 12, weight: '700', dir: l.dirAttr })}
+    ${gDimH(fx, fx + fw, fy + fh + 26, 'B', l.dirAttr)}
+    ${gDimV(fy, fy + fh, fx - 26, 'D', l.dirAttr, 'left')}
+  `;
+}
+
+// ── Rectangular combined ────────────────────────────────────────────────
+function genPlanRectangular(px, py, pw, ph, l) {
+  const fx = px + pw * 0.10, fy = py + ph * 0.28, fw = pw * 0.80, fh = ph * 0.34;
+  const cw = fh * 0.42;
+  const cAx = fx + fw * 0.20, cBx = fx + fw * 0.80, cy = fy + fh / 2;
+  const cutY = cy, cutX1 = fx - 18, cutX2 = fx + fw + 18;
+  return `
+    ${gRebarMeshPlan(fx + 10, fy + 10, fw - 20, fh - 20)}
+    <rect x="${fx}" y="${fy}" width="${fw}" height="${fh}" fill="none" stroke="#1c2b3a" stroke-width="2.5"/>
+    <rect x="${cAx - cw / 2}" y="${cy - cw / 2}" width="${cw}" height="${cw}" fill="url(#gConcreteHatch)" stroke="#1c2b3a" stroke-width="2"/>
+    <rect x="${cBx - cw / 2}" y="${cy - cw / 2}" width="${cw}" height="${cw}" fill="url(#gConcreteHatch)" stroke="#1c2b3a" stroke-width="2"/>
+    ${gText(cAx, fy - 10, l.colA, { size: 12, weight: '700', dir: l.dirAttr })}
+    ${gText(cBx, fy - 10, l.colB, { size: 12, weight: '700', dir: l.dirAttr })}
+    <line x1="${cutX1}" y1="${cutY}" x2="${cutX2}" y2="${cutY}" stroke="#8a2b2b" stroke-width="1.4" stroke-dasharray="10,4,2,4"/>
+    ${gText(cutX1, cutY - 10, 'A', { size: 13, weight: '700', color: '#8a2b2b', anchor: 'middle' })}
+    ${gText(cutX2, cutY - 10, 'A', { size: 13, weight: '700', color: '#8a2b2b', anchor: 'middle' })}
+    ${gDimH(fx, fx + fw, fy + fh + 26, 'L', l.dirAttr)}
+    ${gDimV(fy, fy + fh, fx - 26, 'B', l.dirAttr, 'left')}
+  `;
+}
+
+function genSectionRectangular(px, py, pw, ph, l, extraNote) {
+  const gy = py + ph * 0.42;
+  const fx = px + pw * 0.10, fw = pw * 0.80, fh = ph * 0.15, fy = gy;
+  const cw = fh * 0.85;
+  const cAx = fx + fw * 0.20, cBx = fx + fw * 0.80;
+  const colTop = py + ph * 0.06;
+  const gapX = cAx + cw / 2 + 6, gapW = (cBx - cw / 2) - (cAx + cw / 2) - 12;
+  const noteTop = colTop + (fy - colTop) * 0.18;
+  const note = extraNote ? `
+    <rect x="${gapX}" y="${noteTop}" width="${gapW}" height="34" fill="#ffffff" opacity="0.9"/>
+    ${gText((cAx + cBx) / 2, noteTop + 14, extraNote[0], { size: 9.5, color: '#5b6b7a', dir: l.dirAttr })}
+    ${gText((cAx + cBx) / 2, noteTop + 27, extraNote[1], { size: 9.5, color: '#5b6b7a', dir: l.dirAttr })}
+  ` : '';
+  return `
+    <rect x="${px}" y="${gy}" width="${pw}" height="${py + ph - gy}" fill="url(#gSoilHatch)"/>
+    <line x1="${px}" y1="${gy}" x2="${px + pw}" y2="${gy}" stroke="#5b4a2f" stroke-width="1.5"/>
+    ${gText(px + pw - 4, gy - 6, l.ground, { size: 10, color: '#5b4a2f', anchor: 'end' })}
+    <rect x="${fx}" y="${fy}" width="${fw}" height="${fh}" fill="url(#gConcreteHatch)" stroke="#1c2b3a" stroke-width="2.5"/>
+    ${gRebarDotsRow(fx + 14, fx + fw - 14, fy + fh - 12)}
+    <rect x="${cAx - cw / 2}" y="${colTop}" width="${cw}" height="${fy - colTop}" fill="url(#gConcreteHatch)" stroke="#1c2b3a" stroke-width="2"/>
+    <rect x="${cBx - cw / 2}" y="${colTop}" width="${cw}" height="${fy - colTop}" fill="url(#gConcreteHatch)" stroke="#1c2b3a" stroke-width="2"/>
+    ${gBreakSymbol(cAx, colTop + 6, cw / 2)}
+    ${gBreakSymbol(cBx, colTop + 6, cw / 2)}
+    ${gDowels(cAx, cw / 2, colTop + 14, fy + fh - 10)}
+    ${gDowels(cBx, cw / 2, colTop + 14, fy + fh - 10)}
+    ${gText(cAx, colTop - 8, l.colA, { size: 12, weight: '700', dir: l.dirAttr })}
+    ${gText(cBx, colTop - 8, l.colB, { size: 12, weight: '700', dir: l.dirAttr })}
+    ${gDimH(fx, fx + fw, fy + fh + 26, 'L', l.dirAttr)}
+    ${gDimV(fy, fy + fh, fx - 26, 'D', l.dirAttr, 'left')}
+    ${note}
+  `;
+}
+
+// ── Trapezoidal combined ────────────────────────────────────────────────
+function genPlanTrapezoidal(px, py, pw, ph, l) {
+  const fx = px + pw * 0.10, fy = py + ph * 0.24, fw = pw * 0.80, fh1 = ph * 0.44, fh2 = ph * 0.22;
+  const topL = fy + (fh1 - fh2) / 2, botL = topL + fh2;
+  const topR = fy, botR = fy + fh1;
+  const cw = fh2 * 0.7;
+  const cAx = fx + fw * 0.16, cAy = (topL + botL) / 2;
+  const cBx = fx + fw * 0.82, cBy = (topR + botR) / 2;
+  const clipTop = Math.min(topL, topR), clipBot = Math.max(botL, botR);
+  return `
+    <clipPath id="gTrapClip"><polygon points="${fx},${topL} ${fx + fw},${topR} ${fx + fw},${botR} ${fx},${botL}"/></clipPath>
+    <g clip-path="url(#gTrapClip)">${gRebarMeshPlan(fx, clipTop, fw, clipBot - clipTop)}</g>
+    <polygon points="${fx},${topL} ${fx + fw},${topR} ${fx + fw},${botR} ${fx},${botL}" fill="none" stroke="#1c2b3a" stroke-width="2.5"/>
+    <rect x="${cAx - cw / 2}" y="${cAy - cw / 2}" width="${cw}" height="${cw}" fill="url(#gConcreteHatch)" stroke="#1c2b3a" stroke-width="2"/>
+    <rect x="${cBx - cw * 1.15 / 2}" y="${cBy - cw * 1.15 / 2}" width="${cw * 1.15}" height="${cw * 1.15}" fill="url(#gConcreteHatch)" stroke="#1c2b3a" stroke-width="2"/>
+    ${gText(cAx, topL - 12, l.colA, { size: 12, weight: '700', dir: l.dirAttr })}
+    ${gText(cBx, topR - 12, l.colB, { size: 12, weight: '700', dir: l.dirAttr })}
+    <line x1="${fx - 18}" y1="${cAy}" x2="${fx + fw + 18}" y2="${cBy}" stroke="#8a2b2b" stroke-width="1.4" stroke-dasharray="10,4,2,4"/>
+    ${gText(fx - 18, cAy - 10, 'A', { size: 13, weight: '700', color: '#8a2b2b', anchor: 'middle' })}
+    ${gText(fx + fw + 18, cBy - 10, 'A', { size: 13, weight: '700', color: '#8a2b2b', anchor: 'middle' })}
+    ${gDimH(fx, fx + fw, botR + 30, 'L', l.dirAttr)}
+    ${gDimV(topL, botL, fx - 26, 'B1', l.dirAttr, 'left')}
+    ${gDimV(topR, botR, fx + fw + 26, 'B2', l.dirAttr, 'right')}
+  `;
+}
+
+function genSectionTrapezoidal(px, py, pw, ph, l) {
+  const noteLines = l.dirAttr === 'rtl'
+    ? ['العرض يتغيّر مع الطول', 'انظر المسقط الأفقي']
+    : ['width tapers along length', '\u2014 see plan'];
+  return genSectionRectangular(px, py, pw, ph, l, noteLines);
+}
+
+// ── Strap (two separate pads + connecting beam) ─────────────────────────
+function genPlanStrap(px, py, pw, ph, l) {
+  const midY = py + ph * 0.5;
+  const edgeW = pw * 0.20, edgeH = ph * 0.30;
+  const intW = pw * 0.30, intH = ph * 0.42;
+  const edgeX = px + pw * 0.08, edgeY = midY - edgeH / 2;
+  const intX = px + pw * 0.72, intY = midY - intH / 2;
+  const strapX1 = edgeX + edgeW, strapX2 = intX, strapH = ph * 0.10;
+  const cw = Math.min(edgeH, intH) * 0.5;
+  return `
+    <rect x="${edgeX}" y="${edgeY}" width="${edgeW}" height="${edgeH}" fill="none" stroke="#1c2b3a" stroke-width="2.5"/>
+    <rect x="${intX}" y="${intY}" width="${intW}" height="${intH}" fill="none" stroke="#1c2b3a" stroke-width="2.5"/>
+    <rect x="${strapX1}" y="${midY - strapH / 2}" width="${strapX2 - strapX1}" height="${strapH}" fill="none" stroke="#1c2b3a" stroke-width="2" stroke-dasharray="6,3"/>
+    <rect x="${edgeX + edgeW * 0.30 - cw / 2}" y="${midY - cw / 2}" width="${cw}" height="${cw}" fill="url(#gConcreteHatch)" stroke="#1c2b3a" stroke-width="2"/>
+    <rect x="${intX + intW * 0.5 - cw * 1.1 / 2}" y="${midY - cw * 1.1 / 2}" width="${cw * 1.1}" height="${cw * 1.1}" fill="url(#gConcreteHatch)" stroke="#1c2b3a" stroke-width="2"/>
+    ${gText(edgeX + edgeW / 2, edgeY - 10, l.edgeFooting, { size: 11, weight: '700', dir: l.dirAttr })}
+    ${gText(intX + intW / 2, intY - 10, l.interiorFooting, { size: 11, weight: '700', dir: l.dirAttr })}
+    ${gText((strapX1 + strapX2) / 2, midY - strapH / 2 - 8, l.strapBeam, { size: 10, weight: '700', dir: l.dirAttr })}
+    <line x1="${edgeX - 16}" y1="${midY}" x2="${intX + intW + 16}" y2="${midY}" stroke="#8a2b2b" stroke-width="1.4" stroke-dasharray="10,4,2,4"/>
+    ${gText(edgeX - 24, midY + 4, 'A', { size: 13, weight: '700', color: '#8a2b2b', anchor: 'end' })}
+    ${gText(intX + intW + 24, midY + 4, 'A', { size: 13, weight: '700', color: '#8a2b2b', anchor: 'start' })}
+    ${gDimH(edgeX, intX + intW, Math.max(edgeY + edgeH, intY + intH) + 28, 'L', l.dirAttr)}
+  `;
+}
+
+function genSectionStrap(px, py, pw, ph, l) {
+  const gy = py + ph * 0.50;
+  const edgeW = pw * 0.16, edgeFh = ph * 0.10;
+  const intW = pw * 0.22, intFh = ph * 0.14;
+  const edgeX = px + pw * 0.10, edgeFy = gy - edgeFh * 0.3;
+  const intX = px + pw * 0.70, intFy = gy;
+  const gap = ph * 0.07;
+  const strapY = Math.min(edgeFy, intFy) - gap - ph * 0.06;
+  const strapH = ph * 0.06;
+  const colTop = py + ph * 0.04;
+  const cwE = edgeFh * 1.4, cwI = intFh * 1.1;
+  const edgeCx = edgeX + edgeW / 2, intCx = intX + intW / 2;
+  return `
+    <rect x="${px}" y="${gy}" width="${pw}" height="${py + ph - gy}" fill="url(#gSoilHatch)"/>
+    <line x1="${px}" y1="${gy}" x2="${px + pw}" y2="${gy}" stroke="#5b4a2f" stroke-width="1.5"/>
+    ${gText(px + pw - 4, gy - 6, l.ground, { size: 10, color: '#5b4a2f', anchor: 'end' })}
+    <rect x="${edgeX}" y="${edgeFy}" width="${edgeW}" height="${py + ph * 0.62 - edgeFy}" fill="url(#gConcreteHatch)" stroke="#1c2b3a" stroke-width="2.5"/>
+    <rect x="${intX}" y="${intFy}" width="${intW}" height="${py + ph * 0.68 - intFy}" fill="url(#gConcreteHatch)" stroke="#1c2b3a" stroke-width="2.5"/>
+    <rect x="${edgeX + edgeW - 6}" y="${strapY}" width="${intX - (edgeX + edgeW - 6) + 6}" height="${strapH}" fill="url(#gConcreteHatch)" stroke="#1c2b3a" stroke-width="2"/>
+    ${gText((edgeX + edgeW + intX) / 2, strapY - 8, l.strapBeam, { size: 10, weight: '700', dir: l.dirAttr })}
+    <rect x="${edgeCx - cwE / 2}" y="${colTop}" width="${cwE}" height="${strapY - colTop}" fill="url(#gConcreteHatch)" stroke="#1c2b3a" stroke-width="2"/>
+    <rect x="${intCx - cwI / 2}" y="${colTop}" width="${cwI}" height="${strapY - colTop}" fill="url(#gConcreteHatch)" stroke="#1c2b3a" stroke-width="2"/>
+    ${gBreakSymbol(edgeCx, colTop + 6, cwE / 2)}
+    ${gBreakSymbol(intCx, colTop + 6, cwI / 2)}
+    ${gRebarDotsRow(edgeX + 6, edgeX + edgeW - 6, py + ph * 0.62 - 8, 3, 2.6)}
+    ${gRebarDotsRow(intX + 6, intX + intW - 6, py + ph * 0.68 - 8, 4, 2.8)}
+    ${gText(edgeCx, colTop - 8, l.colA, { size: 11, weight: '700', dir: l.dirAttr })}
+    ${gText(intCx, colTop - 8, l.colB, { size: 11, weight: '700', dir: l.dirAttr })}
+  `;
+}
+
+const GENERIC_BUILDERS = {
+  isolated:    { title: 'footIso',   plan: genPlanIsolated,     section: genSectionIsolated },
+  rectangular: { title: 'footRect',  plan: genPlanRectangular,  section: genSectionRectangular },
+  trapezoidal: { title: 'footTrap',  plan: genPlanTrapezoidal,  section: genSectionTrapezoidal },
+  strap:       { title: 'footStrap', plan: genPlanStrap,        section: genSectionStrap },
+};
+
+// strip and raft are NOT in GENERIC_BUILDERS on purpose (see section
+// header) — classifyFootingDiagram() below still returns those two type
+// strings so chat.js can route them to a "use /diagram" response instead
+// of either drawing a possibly-wrong layout or silently falling through
+// to the diffusion model for a term the glossary already disambiguates.
+export function buildFootingDiagramSvg(type, lang) {
+  const l = GENERIC_L[lang === 'ar' ? 'ar' : 'en'];
+  const b = GENERIC_BUILDERS[type];
+  if (!b) return null;
+
+  const W = 1000, H = 640;
+  const PX0 = 50, PY0 = 118, PW = 400, PH = 380;
+  const SX0 = 560, SY0 = 118, SW = 400, SH = 380;
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="${esc(l[b.title])}">
+    <rect width="${W}" height="${H}" fill="#ffffff"/>
+    ${genericDefs()}
+    ${gText(W / 2, 42, l[b.title], { size: 22, weight: '700', dir: l.dirAttr })}
+    ${gText(W / 2, 64, l.rebarNote, { size: 11, color: '#5b6b7a', dir: l.dirAttr })}
+    ${gPanelFrame(PX0, PY0, PW, PH, l.plan, l.dirAttr)}
+    ${gPanelFrame(SX0, SY0, SW, SH, l.section, l.dirAttr)}
+    <g>${b.plan(PX0, PY0, PW, PH, l)}</g>
+    <g>${b.section(SX0, SY0, SW, SH, l)}</g>
+    <line x1="30" y1="${H - 34}" x2="${W - 30}" y2="${H - 34}" stroke="#e2e8ee" stroke-width="1"/>
+    ${gText(W / 2, H - 14, l.caption, { size: 10.5, color: '#7a8a9a', dir: l.dirAttr })}
+  </svg>`;
+}
+
+// Strips a leading Arabic definite article ("ال") from the front of every
+// whitespace-separated word in the input, once, before pattern matching.
+// This product's own copy is routinely written definite — "القاعدة
+// الشريطية", "القاعدة المشتركة المستطيلة" (both straight from
+// footing_pro's own meta/FAQ text) — and a plain pattern like
+// /قاعدة\s*شريطية/ does not match inside "القاعدة الشريطية": "قاعدة"
+// matches as a substring of "القاعدة", but the very next characters are
+// " ال" (space + the second word's own definite article), not the start
+// of "شريطية", so the two halves of the pattern never line up. Confirmed
+// by testing the exact live phrase, not assumed from reading the regex.
+//
+// imageGen.mjs's translateKnownTerms() hit the identical root cause and
+// fixed it differently — a per-phrase regex with an optional (?:ال)?
+// before every word (buildArabicMatcher there) — because that function
+// has to return the matched TEXT for substitution, so it cannot destroy
+// the original string up front. This function only returns a yes/no
+// classification, never the input text itself, so normalizing the INPUT
+// once up front is simpler and equally correct for this narrower job;
+// see that file's own comment cross-referencing this one.
+function stripAl(text) {
+  return String(text)
+    .split(/(\s+)/)
+    .map((tok) => (/^\s+$/.test(tok) ? tok : tok.replace(/^ال/, '')))
+    .join('');
+}
+
+// Ordered so the classifier checks the most specific terms first —
+// "trapezoidal" must win over a bare "footing"/"combined" match, "strip"
+// (with its wall-qualifier) must win before "strap" would otherwise catch
+// "قاعدة شريطية" as a substring, and "isolated"/"raft" are checked before
+// the bare "قاعدة" pattern could otherwise swallow them.
+//
+// 'قاعدة شريطية' alone (no wall-qualifier) maps to STRAP, not the
+// textbook-generic "strip/continuous" reading — matching this product's
+// own usage (footing_pro's FAQ literally glosses "القاعدة الشريطية" as
+// "Strap" in English, inline, in its own Arabic copy) and matching
+// imageGen.mjs's ARABIC_ENGINEERING_GLOSSARY, which had to make the
+// identical call on the identical evidence — this is the second of two
+// places that decision had to be made consistently, not a one-off (see
+// that file's own comment on this same point).
+const GENERIC_PATTERNS = [
+  { type: 'trapezoidal', re: /trapezoidal|trapezoid/i },
+  { type: 'trapezoidal', re: /شبه\s*منحرف/ },
+  { type: 'strip', re: /strip\s*footing/i },
+  { type: 'strip', re: /قاعدة\s*شريطية\s*تحت\s*حائط/ },
+  { type: 'raft', re: /raft\s*(foundation|footing)?|mat\s*foundation/i },
+  { type: 'raft', re: /قاعدة\s*(لبشة|حصيرة)/ },
+  { type: 'strap', re: /\bstrap\s*(footing|beam)?\b/i },
+  { type: 'strap', re: /قاعدة\s*رباط|قاعدة\s*شريطية|كمرة\s*رباط/ },
+  { type: 'isolated', re: /isolated\s*(column)?\s*footing|spread\s*footing/i },
+  { type: 'isolated', re: /قاعدة\s*(منفردة|منفصلة)/ },
+  { type: 'rectangular', re: /rectangular\s*(combined)?\s*footing/i },
+  { type: 'rectangular', re: /combined\s*footing/i },
+  { type: 'rectangular', re: /قاعدة\s*(مشتركة|مستطيلة)/ },
+];
+
+export function classifyFootingDiagram(rawPrompt) {
+  const p = stripAl(String(rawPrompt || ''));
+  for (const { type, re } of GENERIC_PATTERNS) {
+    if (re.test(p)) return type;
+  }
+  return null;
+}
+
+export function svgToDataUri(svgString) {
+  return 'data:image/svg+xml,' + encodeURIComponent(svgString);
 }
