@@ -72,6 +72,41 @@ function subscriptOrFallback(base, sub) {
   return sc ? base + sc : `${base}_${sub}`;
 }
 
+// Superscript counterpart. Deliberately covers ONLY digits + the five
+// bracket/operator codepoints from the U+2070-209F block (plus the three
+// legacy Latin-1 spillovers 00B2/00B3/00B9) -- the single oldest, most
+// universally-fonted Unicode range in this entire feature area. No
+// superscript LETTERS are included even though Unicode has them for all
+// 26 lowercase and most uppercase letters: those codepoints are scattered
+// across Spacing Modifier Letters (1996), Phonetic Extensions (2005),
+// Latin Extended-C/D (2008-2020), and -- for 'q' specifically -- a 2021
+// supplementary-plane addition (U+107A5) that needs a UTF-16 surrogate
+// pair and has negligible real-world font coverage. Letters always go
+// through the <sup> HTML path in _cesRenderBotHtml instead: same
+// no-font-risk, same reasoning as why subscript falls back to underscore
+// for b/c/d/f/g/q/w/y/z above, just applied preemptively to the whole
+// letter set rather than per-gap.
+const SUPERSCRIPT_CHAR_MAP = {
+  0: '\u2070', 1: '\u00B9', 2: '\u00B2', 3: '\u00B3', 4: '\u2074',
+  5: '\u2075', 6: '\u2076', 7: '\u2077', 8: '\u2078', 9: '\u2079',
+  '+': '\u207A', '-': '\u207B', '=': '\u207C', '(': '\u207D', ')': '\u207E',
+};
+
+function toSuperscriptForm(sup) {
+  let out = '';
+  for (const ch of sup) {
+    const sc = SUPERSCRIPT_CHAR_MAP[ch];
+    if (!sc) return null;
+    out += sc;
+  }
+  return out;
+}
+
+function superscriptOrFallback(base, sup) {
+  const sc = toSuperscriptForm(sup);
+  return sc ? base + sc : `${base}^${sup}`;
+}
+
 // [trigger, base, subscript] -- the OUTPUT string is now GENERATED via
 // subscriptOrFallback/SUBSCRIPT_LETTER_MAP instead of hand-transcribed
 // Unicode escapes. Hand-transcription is exactly how the previous table
@@ -198,6 +233,24 @@ function convertLatexSubscripts(text) {
   });
 }
 
+// Exponent content may be digits and/or the four safe operator glyphs;
+// bare form stays capped at 3 (matches subscript's own bare cap), braced
+// at 8. '=' and the parens are only meaningful/common inside braces
+// (nobody writes a bare "x^=2"), so the bare-form charset omits them --
+// mirrors why subscript's own bare form is letters-only with no operators
+// at all.
+const LATEX_SUPERSCRIPT_RE = new RegExp(
+  `(?<![A-Za-z0-9_])(\\d+|[A-Za-z${GREEK_BASE_GLYPHS}])\\^(?:\\{([A-Za-z0-9+\\-=()]{1,8})\\}|([A-Za-z0-9+\\-]{1,3})(?![A-Za-z0-9]))`,
+  'g',
+);
+
+function convertLatexSuperscripts(text) {
+  return text.replace(LATEX_SUPERSCRIPT_RE, (_m, base, braced, bare) => {
+    const sup = braced || bare;
+    return superscriptOrFallback(base, sup);
+  });
+}
+
 const ALL_TRIGGERS = [...Object.keys(ENGINEERING_NOTATION_MAP), ...Object.keys(BARE_LATEX_MACROS)];
 const MAX_TRIGGER_LEN = Math.max(...ALL_TRIGGERS.map(t => t.length)); // holdback margin (see NOT_TOKEN_CHAR_RE for the real cut logic)
 
@@ -264,7 +317,7 @@ function stripBareDollar(text) {
 // '}' is deliberately left OUT of the protected set: a closing brace fully
 // terminates a Base_{Sub} construct, so cutting right after it is safe and
 // avoids adding latency the construct's own grammar doesn't require.
-const NOT_TOKEN_CHAR_RE = new RegExp(`[^A-Za-z${GREEK_BASE_GLYPHS}\\\\$_{]`);
+const NOT_TOKEN_CHAR_RE = new RegExp(`[^A-Za-z${GREEK_BASE_GLYPHS}\\\\$_{^]`);
 const MAX_HOLDBACK = 64; // safety valve: bound worst-case latency if a
                          // pathological chunk has no separator at all
                          // (MAX_TRIGGER_LEN=4, longest LaTeX construct now
@@ -314,6 +367,28 @@ function adjustCutForAsLookahead(buf, cut) {
   return cut;
 }
 
+// '^' itself is protected above, so a *bare* trailing caret already can't
+// be cut. But digits and +-=() are NOT in the protected set -- adding them
+// there unconditionally would hold back every plain number and every
+// hyphen in ordinary prose (dates, code names like "ECP 203", "ACI
+// 318-19") for no reason, since the overwhelming majority of digits/
+// hyphens in this product's replies have nothing to do with an exponent.
+// So this stays a targeted, construct-scoped guard instead: if the
+// candidate safePart's tail is a base + '^' + zero-or-more still-valid
+// exponent characters with nothing after it yet (no confirmed
+// terminator), the whole run -- base included -- waits for the next
+// push. A tail that already closed with '}' is NOT matched here (mirrors
+// why '}' is deliberately left out of NOT_TOKEN_CHAR_RE for subscript:
+// the closing brace fully terminates the construct, so it's already safe).
+const SUPERSCRIPT_TAIL_RE = new RegExp(
+  `(?:\\d+|[A-Za-z${GREEK_BASE_GLYPHS}])\\^\\{?[A-Za-z0-9+\\-=()]*$`,
+);
+function adjustCutForSuperscriptLookahead(buf, cut) {
+  const scan = buf.slice(0, cut);
+  const m = SUPERSCRIPT_TAIL_RE.exec(scan);
+  return m ? m.index : cut;
+}
+
 export class NotationNormalizer {
   constructor() {
     this._buf = '';
@@ -327,6 +402,7 @@ export class NotationNormalizer {
     this._buf += deltaText;
     let cut = findSafeCutIndex(this._buf);
     cut = adjustCutForAsLookahead(this._buf, cut);
+    cut = adjustCutForSuperscriptLookahead(this._buf, cut);
     if (cut < 0) cut = 0;
     if (this._buf.length - cut > MAX_HOLDBACK) {
       cut = this._buf.length - MAX_HOLDBACK; // bounded worst case, see above
@@ -334,14 +410,14 @@ export class NotationNormalizer {
     if (cut === 0) return { emit: '' };
     const safePart = this._buf.slice(0, cut);
     this._buf = this._buf.slice(cut);
-    const emit = stripBareDollar(applyReplacements(convertLatexSubscripts(expandGreekSubscriptBases(safePart))));
+    const emit = stripBareDollar(applyReplacements(convertLatexSuperscripts(convertLatexSubscripts(expandGreekSubscriptBases(safePart)))));
     return { emit };
   }
 
   finish() {
     const rest = this._buf;
     this._buf = '';
-    const emit = stripBareDollar(applyReplacements(convertLatexSubscripts(expandGreekSubscriptBases(rest))));
+    const emit = stripBareDollar(applyReplacements(convertLatexSuperscripts(convertLatexSubscripts(expandGreekSubscriptBases(rest)))));
     return { emit };
   }
 }

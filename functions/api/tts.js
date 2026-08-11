@@ -849,8 +849,46 @@ function renderedDialectFor(provider, requestedLang) {
 }
 
 // ── Text preprocessing ──────────────────────────────────────────────────────
-function preprocessText(text) {
+// [PATCH] True-Unicode super/subscript -> plain ASCII, reverse direction
+// from notationNormalizer.mjs's toSubscriptForm/toSuperscriptForm. Needed
+// here because this endpoint's job is speakable text, not typography:
+// five different engines (Edge/Eleven/Deepgram/Speechmatics/gTTS) each
+// have their own undocumented, near-certainly inconsistent handling of
+// exotic subscript/superscript codepoints -- not verifiable from this
+// sandbox against real audio output (network egress here is limited to
+// package registries, same constraint already noted above for Edge TTS).
+// Normalizing to plain ASCII sidesteps guessing at five black boxes.
+const SUPERSUB_TO_ASCII = Object.freeze({
+  '\u2080':'0','\u2081':'1','\u2082':'2','\u2083':'3','\u2084':'4',
+  '\u2085':'5','\u2086':'6','\u2087':'7','\u2088':'8','\u2089':'9',
+  '\u208A':'+','\u208B':'-','\u208C':'=','\u208D':'(','\u208E':')',
+  '\u2090':'a','\u2091':'e','\u2095':'h','\u1D62':'i','\u2C7C':'j',
+  '\u2096':'k','\u2097':'l','\u2098':'m','\u2099':'n','\u2092':'o',
+  '\u209A':'p','\u1D63':'r','\u209B':'s','\u209C':'t','\u1D64':'u',
+  '\u1D65':'v','\u2093':'x',
+  '\u2070':'0','\u00B9':'1','\u00B2':'2','\u00B3':'3','\u2074':'4',
+  '\u2075':'5','\u2076':'6','\u2077':'7','\u2078':'8','\u2079':'9',
+  '\u207A':'+','\u207B':'-','\u207C':'=','\u207D':'(','\u207E':')',
+});
+const SUPERSUB_RE = new RegExp('[' + Object.keys(SUPERSUB_TO_ASCII).join('') + ']', 'g');
+
+// Marker fallback (base_sub, base_{sub}, base^sup, base^{sup}) is meant
+// for the frontend's <sub>/<sup> HTML upgrade in _cesRenderBotHtml
+// (footing_pro/pc_suite) -- there's no HTML here for it to upgrade into,
+// so it's collapsed to a plain space instead: correct for every engine
+// because it's just whitespace. Same character classes as
+// notationNormalizer.mjs's LATEX_SUBSCRIPT_RE/LATEX_SUPERSCRIPT_RE and
+// _cesRenderBotHtml's mirror of them -- keep these three in sync if any
+// changes.
+function stripSuperSubMarkers(text) {
   return text
+    .replace(/([A-Za-z\u03B2\u03B3\u03B5\u03BB\u03C1\u03C4\u03C8])[_^]\{([A-Za-z0-9+\-=()]{1,8})\}/g, '$1 $2')
+    .replace(/([A-Za-z0-9\u03B2\u03B3\u03B5\u03BB\u03C1\u03C4\u03C8])[_^]([A-Za-z0-9+\-]{1,3})(?![A-Za-z0-9])/g, '$1 $2')
+    .replace(SUPERSUB_RE, ch => SUPERSUB_TO_ASCII[ch]);
+}
+
+function preprocessText(text) {
+  return stripSuperSubMarkers(text)
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, ' ')
     .replace(/[٠١٢٣٤٥٦٧٨٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d).toString())
     .replace(/[۰۱۲۳۴۵۶۷۸۹]/g, d => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d).toString())
