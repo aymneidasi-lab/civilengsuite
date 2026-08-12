@@ -2259,7 +2259,7 @@ Egyptian-Arabic worked example (match this register, not فصحى):
 **effective depth** أو تستخدم **drop panel**. إيه رأيك؟ 🛠️"
 
 ════════════════════════════════════════
-NOTATION — SUBSCRIPTED ENGINEERING SYMBOLS (CRITICAL)
+NOTATION — SUBSCRIPTED & EXPONENT ENGINEERING SYMBOLS (CRITICAL)
 ════════════════════════════════════════
 The client has no LaTeX/math renderer. Write every subscripted symbol as plain
 base_sub with a literal underscore, nothing else around it — the app converts this
@@ -2282,6 +2282,15 @@ habit; this product specifically needs the plain underscore form every time, wit
 no exceptions for "just this once" or "it looked more correct this way."
 Worked example: "لازم الـ **f_cu** يكون أكبر من 20 ميجاباسكال عشان الكود يعدي." renders
 with cu correctly lowered under the f — never write "fᶜᵘ" or "$f_{cu}$" instead.
+
+EXPONENTS work the same way, with a literal caret instead of an underscore: base^exp,
+nothing else around it — the app raises this automatically too. This includes a
+parenthesized or bracketed base — write the caret right after the closing bracket,
+e.g. (M_cr / M_a)^3, exactly like that. Braces cover a longer exponent: 10^{-3}. Same
+rule as subscripts: never hand-type a raised digit yourself (³ ² ⁿ) to fake the look —
+always plain-caret text, every time, including after a bracket, with no exceptions.
+Worked example: "الترخيم النهائي بيتحسب من (M_cr / M_a)^3 في معادلة برانسون." renders
+with a real raised 3 — never write "(M_cr / M_a)³" or wrap it in $ instead.
 
 ════════════════════════════════════════
 ARABIC DIALECT TRAINING — EGYPTIAN (عامية مصرية)
@@ -3664,6 +3673,8 @@ over فصحى equivalents. Bold codes/terms/values in **double asterisks** (rend
 Subscripted symbols: plain underscore form only — f_cu, A_s, P_u, q_u — never $ / $$
 delimiters and never a hand-typed Unicode super/subscript character; the app renders the
 real subscript from the plain underscore automatically, same rule as established earlier.
+Exponents: plain caret, base^exp — including after a closing bracket, e.g. (M_cr/M_a)^3 —
+never a hand-typed ³ ² ⁿ; the app raises it the same automatic way.
 
 CORE PRODUCT FACTS — Civil Engineering Suite / Footing Pro v.2026 (the only live product):
 • Three standalone apps: Rectangular Combined Footing (equal/near-equal loads), Trapezoidal
@@ -3776,7 +3787,8 @@ LANGUAGE RULE (critical): Arabic message → reply only in Egyptian Arabic diale
 Never mix languages in one reply.
 
 Subscripted symbols: plain underscore only — f_cu, A_s, P_u, q_all — never $ / $$ or a
-hand-typed Unicode super/subscript character.
+hand-typed Unicode super/subscript character. Exponents: plain caret, base^exp — even
+after a closing bracket, (M_cr/M_a)^3 — never a hand-typed ³ ² ⁿ.
 
 ${isDeveloperMode ? '' : `\
 CONFIDENTIALITY: never name/discuss your own backend, API, Cloudflare, hosting, or provider —
@@ -5659,7 +5671,18 @@ export async function onRequestPost(context) {
   // a ceiling that predates content already present in the string being
   // measured. Bumped by the exact measured size of each, same convention
   // as the WEB SEARCH ceiling bump elsewhere in this file.
-  assertPromptBudget('geminiSystemPrompt', geminiSystemPrompt, isFirstTurn ? 14107 : 1345, env);
+  // [PATCH — exponent notation] The subscript block never had an exponent
+  // counterpart, which is the root cause behind the Branson's-equation
+  // bug report: the model had no taught convention for base^exp at all,
+  // so (M_cr / M_a)^3 came out however the model happened to improvise
+  // (usually a bare, un-rendered "^3", occasionally a hand-typed Unicode
+  // "³" once corrected mid-conversation -- neither is the intended,
+  // durable behavior). Both tiers now carry a same-shape EXPONENTS
+  // addendum: full tier +680 chars/~180 est. tokens (measured against the
+  // reconstructed pre-patch block text), condensed tier +158 chars/~42
+  // est. tokens. Ceilings bumped by those exact amounts, same
+  // acknowledged-change convention as the two patches above.
+  assertPromptBudget('geminiSystemPrompt', geminiSystemPrompt, isFirstTurn ? 14787 : 1503, env);
 
   const geminiKeysIndexed = buildGeminiKeyPool(env);
 
@@ -5849,7 +5872,11 @@ export async function onRequestPost(context) {
           : baseWorkersPrompt) + workersKbFacts + clientDateBlock;
         // [PATCH — budget reconciliation] +132 chars/~35 tokens for the
         // notation reminder just added to this tier (see buildWorkersAiSystemPrompt).
-        assertPromptBudget('workersSystemContent', workersSystemContent, 1065, env);
+        // [PATCH — exponent notation] +106 chars/~28 est. tokens more for the
+        // EXPONENTS sentence appended to that same reminder (base^exp, including
+        // after a closing bracket -- this tier had a subscript rule but no
+        // exponent counterpart either, same gap as the two Gemini tiers).
+        assertPromptBudget('workersSystemContent', workersSystemContent, 1171, env);
         const workersMsgs = [
           { role: 'system', content: workersSystemContent },
           ...turns.map(t => ({

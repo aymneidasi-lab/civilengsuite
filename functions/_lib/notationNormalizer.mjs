@@ -239,8 +239,37 @@ function convertLatexSubscripts(text) {
 // (nobody writes a bare "x^=2"), so the bare-form charset omits them --
 // mirrors why subscript's own bare form is letters-only with no operators
 // at all.
+//
+// [PATCH — bracketed-base exponent] Base alternation now has a THIRD
+// branch, `[)\]]`, alongside the original digit-run and single-letter
+// branches -- a bare, un-guarded ')' or ']'. This is the actual bug
+// behind the Branson's-equation report: real engineering formulas
+// exponentiate a whole PARENTHESIZED RATIO, not a single variable --
+// (M_cr / M_a)^3 is the exact motivating case, and ECP 203/ACI 318 are
+// full of the same shape ((k*L/r)^2 slenderness, (f'c)^0.5, etc). The
+// char immediately before '^' there is ')', which neither original
+// branch could ever match (')' is not a digit and not in [A-Za-z...]),
+// so the whole exponent silently fell through every pass and reached
+// the client as literal "^3" -- confirmed by direct execution against
+// the captured reply text, not inferred.
+// The bracket branch deliberately has NO `(?<![A-Za-z0-9_])` lookbehind
+// -- unlike the digit/letter branches, which need it to avoid grabbing
+// the trailing letter of a longer identifier as a false single-char
+// base ("logbase^2" should not read as base "e"). A closing bracket
+// carries no such ambiguity: whatever precedes it is INSIDE the group,
+// not the base itself, so the character before ')' is irrelevant to
+// whether ')' is a valid base -- in fact a lookbehind here would
+// actively break the common case, since ')' is virtually always
+// preceded by a letter or digit (the last character of whatever the
+// parens wrapped).
+// Deliberately still bounded, not a LaTeX parser: this does not attempt
+// to locate the matching '(' or validate bracket nesting (see the file
+// header's note on why unbounded lookahead/argument-extraction is out
+// of scope here) -- it only needs the ONE character immediately before
+// '^' to decide whether to emit `base + superscript(exp)`, and a lone
+// ')' or ']' answers that in O(1) with no backward scan required.
 const LATEX_SUPERSCRIPT_RE = new RegExp(
-  `(?<![A-Za-z0-9_])(\\d+|[A-Za-z${GREEK_BASE_GLYPHS}])\\^(?:\\{([A-Za-z0-9+\\-=()]{1,8})\\}|([A-Za-z0-9+\\-]{1,3})(?![A-Za-z0-9]))`,
+  `((?<![A-Za-z0-9_])\\d+|(?<![A-Za-z0-9_])[A-Za-z${GREEK_BASE_GLYPHS}]|[)\\]])\\^(?:\\{([A-Za-z0-9+\\-=()]{1,8})\\}|([A-Za-z0-9+\\-]{1,3})(?![A-Za-z0-9]))`,
   'g',
 );
 
@@ -380,13 +409,44 @@ function adjustCutForAsLookahead(buf, cut) {
 // push. A tail that already closed with '}' is NOT matched here (mirrors
 // why '}' is deliberately left out of NOT_TOKEN_CHAR_RE for subscript:
 // the closing brace fully terminates the construct, so it's already safe).
+// [PATCH — bracketed-base exponent] Base alternation widened to match
+// LATEX_SUPERSCRIPT_RE above (adds ')'/']'): once that regex accepts a
+// bracket as a base, THIS regex has to recognize an in-progress
+// "...)^12" tail too, or the still-forming exponent gets flushed early
+// as if "^12" were already complete -- next push()'s "3" would then
+// arrive as an unrelated bare character with no way to rejoin the
+// exponent it was actually part of. Exactly the "stream tears
+// mid-token" failure this holdback buffer exists to prevent, just for
+// the new base shape instead of the original one.
 const SUPERSCRIPT_TAIL_RE = new RegExp(
-  `(?:\\d+|[A-Za-z${GREEK_BASE_GLYPHS}])\\^\\{?[A-Za-z0-9+\\-=()]*$`,
+  `(?:\\d+|[A-Za-z${GREEK_BASE_GLYPHS}]|[)\\]])\\^\\{?[A-Za-z0-9+\\-=()]*$`,
 );
 function adjustCutForSuperscriptLookahead(buf, cut) {
   const scan = buf.slice(0, cut);
   const m = SUPERSCRIPT_TAIL_RE.exec(scan);
   return m ? m.index : cut;
+}
+
+// [PATCH — bracketed-base exponent] Companion guard for the OTHER half of
+// the same gap: SUPERSCRIPT_TAIL_RE above only fires once '^' has already
+// arrived in the buffer. But a bracket base can just as easily be the
+// LAST character of a push() with '^' not arrived yet at all -- e.g. a
+// chunk boundary landing right after "(M_cr / M_a)". Without this guard,
+// findSafeCutIndex would flush that ')' immediately (it's not in
+// NOT_TOKEN_CHAR_RE's protected set -- deliberately not, see that const's
+// own comment: blanket-protecting every ')' would hold back the huge
+// majority that have nothing to do with an exponent, e.g. "(see ACI
+// 318-19)"). Once flushed, the bracket is gone from `this._buf` by the
+// time '^3' shows up in a later push(), so LATEX_SUPERSCRIPT_RE has
+// nothing adjacent to match against no matter how correct its own
+// pattern is. So: hold back a bare trailing ')'/']' for exactly one more
+// push, same shape as adjustCutForAsLookahead's lookahead above, just a
+// 1-character resolution window instead of 2. `while`, not a single
+// pullback, because a run of several closing brackets can legitimately
+// precede a caret (a bracketed sum of parenthesized terms).
+function adjustCutForSuperscriptBaseLookahead(buf, cut) {
+  while (cut > 0 && (buf[cut - 1] === ')' || buf[cut - 1] === ']')) cut--;
+  return cut;
 }
 
 export class NotationNormalizer {
@@ -403,6 +463,7 @@ export class NotationNormalizer {
     let cut = findSafeCutIndex(this._buf);
     cut = adjustCutForAsLookahead(this._buf, cut);
     cut = adjustCutForSuperscriptLookahead(this._buf, cut);
+    cut = adjustCutForSuperscriptBaseLookahead(this._buf, cut);
     if (cut < 0) cut = 0;
     if (this._buf.length - cut > MAX_HOLDBACK) {
       cut = this._buf.length - MAX_HOLDBACK; // bounded worst case, see above
