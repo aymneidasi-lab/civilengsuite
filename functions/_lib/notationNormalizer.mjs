@@ -4,12 +4,16 @@
 // the confidentiality gate decides what may be sent at all; this only
 // reshapes text that has already been cleared for sending.
 //
-// FOUR correction passes, all pattern-boundary guarded, in this order:
+// SIX correction passes, all pattern-boundary guarded, in this order:
+// -2. \sqrt{...} -> \sqrt(...). Braces swapped for parens (bounded,
+//     ≤32 chars, no nested braces) so a model reaching for real LaTeX's
+//     braced \sqrt{x} out of habit still lands on the same bare-macro
+//     path as Pass 2 below, instead of stranding literal "{"/"}".
 // -1. Bare Greek base macro -> literal glyph, for bases that can carry a
-//     subscript (currently just \gamma -> γ, see GREEK_SUBSCRIPT_BASES).
-//     Runs first so "\gamma_c" and a directly-typed "γ_c" converge onto
-//     the exact same Pass 0 code path instead of needing a second,
-//     macro-aware subscript grammar.
+//     subscript (γ, λ, ψ, ρ, β, τ, ε, α -- see GREEK_SUBSCRIPT_BASES).
+//     Runs before Pass 0 so "\gamma_c" and a directly-typed "γ_c"
+//     converge onto the exact same Pass 0 code path instead of needing a
+//     second, macro-aware subscript grammar.
 //  0. LaTeX subscript SYNTAX -> normalized form. Handles Base_{Sub} and
 //     bare Base_Sub (single trailing char, real LaTeX grammar) BEFORE the
 //     flat-abbreviation pass below, because "fcu" is not a contiguous
@@ -18,7 +22,11 @@
 //     literal underscore/brace splitting the letters apart. This pass
 //     closes that gap directly by parsing the LaTeX construct itself.
 //     Base may be a single ASCII letter or a Greek base glyph already
-//     expanded by Pass -1.
+//     expanded by Pass -1, optionally followed by a prime mark (f'_c).
+//  0.5. LaTeX SUPERSCRIPT syntax -> normalized form. Same shape as Pass 0,
+//     mirrored for base^exp; base may also be a bare closing bracket
+//     (see LATEX_SUPERSCRIPT_RE) so a parenthesized ratio raised to a
+//     power, e.g. (M_cr / M_a)^3, converts as a whole.
 //  1. ASCII engineering shorthand -> Unicode subscript (fcu -> f + true
 //     subscript c+u where available, plain "f_cu" fallback where not --
 //     see SUBSCRIPT_LETTER_MAP: Unicode has NO subscript codepoint for
@@ -31,12 +39,12 @@
 //     bases either (i.e. never emit γᶜ using U+1D9C) -- same bug, same
 //     reason it's wrong, one Unicode block over.
 //  2. Bare LaTeX macros with no braces/arguments -> plain Unicode
-//     (\times -> x, \phi -> \u03c6, etc.)
-// All four are FIXED, FINITE-LENGTH-BOUNDED, so all are safe to
+//     (\times -> x, \phi -> \u03c6, \sqrt -> √, etc.)
+// All six are FIXED, FINITE-LENGTH-BOUNDED, so all are safe to
 // holdback-buffer with a character-class-derived margin. Anything
-// requiring unbounded lookahead (\frac{a}{b} argument extraction,
-// nested braces) is deliberately NOT attempted here -- the prompt-level
-// instruction (NOTATION_FORMATTING_RULE in chat.js) is the primary
+// requiring unbounded lookahead (\frac{a}{b} argument extraction, real
+// nested-brace matching) is deliberately NOT attempted here -- the
+// prompt-level instruction (the NOTATION rule in chat.js) is the primary
 // defense for those; this is a bounded, low-risk safety net, not a
 // LaTeX parser.
 
@@ -148,6 +156,19 @@ const BARE_LATEX_MACROS = {
   '\\phi': '\u03C6', '\\rho': '\u03C1', '\\lambda': '\u03BB', '\\mu': '\u03BC',
   '\\sigma': '\u03C3', '\\tau': '\u03C4', '\\Delta': '\u0394',
   '\\psi': '\u03C8', '\\epsilon': '\u03B5', '\\varepsilon': '\u03B5',
+  // [PATCH — square root] '\sqrt' -> '\u221A' (√). Deliberately a bare,
+  // zero-argument substitution exactly like '\times'/'\phi' above, NOT an
+  // argument-extracting macro -- this table has never done argument
+  // extraction and this entry doesn't start now (see the file header's
+  // note on why that's out of scope). The model supplies its own
+  // parentheses after it (chat.js's prompt now teaches \sqrt(...), not
+  // \sqrt{...}); '\sqrt(f\'_c)' becomes '√(f\'_c)' the same way
+  // '\times' becomes '×' -- one macro token swapped for one glyph,
+  // nothing else in the string touched. A model that reaches for real
+  // LaTeX's braced '\sqrt{...}' out of training habit anyway is still
+  // covered -- see convertSqrtBraces/SQRT_BRACE_RE below, which rewrites
+  // that form down to this same bare form before this table ever runs.
+  '\\sqrt': '\u221A',
 };
 
 // Greek bases that can carry an engineering subscript in this domain (γ_c,
@@ -161,14 +182,55 @@ const BARE_LATEX_MACROS = {
 // either way (c/b/d are uncovered) but now correctly reach the frontend's
 // <sub>-tag upgrade pass instead of stopping here as dead literal text --
 // see the matching change in _cesRenderBotHtml (footing_pro/pc_suite).
+// [PATCH — alpha_s] \alpha added on the SAME evidence basis as the other
+// seven, from a second captured production reply: ACI 318's two-way
+// (punching) shear equation uses alpha_s as the column-location factor
+// (interior/edge/corner), and until this line \alpha was in
+// BARE_LATEX_MACROS (so a bare "\alpha" on its own already rendered as α)
+// but absent from THIS table -- meaning "\alpha_s" fell through Pass -1
+// untouched, then failed Pass 0's base-lookbehind (the trailing "a" of
+// "alpha" is preceded by "h", an alnum, so the lookbehind correctly
+// refuses to treat it as a standalone base), then only got picked up by
+// Pass 2 matching literal "\alpha" and leaving a bare "_s" sitting after
+// it -- same failure shape as every other omitted-base case above, closed
+// the same way: add the key here, nothing else needs to change.
 // Add more keys here if another base shows up in a future reply; nothing
 // else below needs to change to support it, this table is the single
 // source the rest of Pass -1/Pass 0 read from.
 const GREEK_SUBSCRIPT_BASES = {
   '\\gamma': '\u03B3', '\\lambda': '\u03BB', '\\psi': '\u03C8',
   '\\rho': '\u03C1', '\\beta': '\u03B2', '\\tau': '\u03C4', '\\epsilon': '\u03B5',
+  '\\alpha': '\u03B1',
 };
 const GREEK_BASE_GLYPHS = Object.values(GREEK_SUBSCRIPT_BASES).join('');
+
+// ── Pass -2: \sqrt{...} -> \sqrt(...) ───────────────────────────────────
+// [PATCH — square root] Runs before EVERYTHING else, including Pass -1,
+// because it only ever swaps the outer delimiters -- whatever ends up
+// between the new parentheses (very often an apostrophe/subscript
+// construct, e.g. \sqrt{f'_c}) still needs to go through every later pass
+// normally, exactly as if the model had typed the parens itself.
+// Deliberately the ONLY braced-argument macro this file handles, added
+// specifically because \sqrt is the one macro here where a model trained
+// on real LaTeX overwhelmingly reaches for the braced form out of habit
+// -- \phi/\times/etc. never take an argument at all in real LaTeX either,
+// so there's no competing habit to guard against for those. Left
+// unhandled, this would either strand literal "{"/"}" in the reply (bare
+// '\sqrt' -> '√' still fires on '\sqrt{f\'_c}' since '{' satisfies its
+// own (?![a-zA-Z]) guard, but the braces themselves are never consumed by
+// anything) or never convert at all if the model doesn't reliably emit
+// the bare form the prompt asks for.
+// Bounded exactly like every other braced construct in this file: content
+// capped at 32 chars (more headroom than the subscript/exponent 8-char
+// cap since a radicand is often a short arithmetic expression, not a
+// single symbol -- "0.05 * (f'_c - 28)" is 19 chars) with NO nested
+// '{'/'}' permitted, so this is a fixed-max-length match, never
+// unbounded/real brace-balancing (see the file header's note on why
+// that's out of scope generally).
+const SQRT_BRACE_RE = /\\sqrt\{([^{}]{1,32})\}/g;
+function convertSqrtBraces(text) {
+  return text.replace(SQRT_BRACE_RE, (_m, inner) => `\\sqrt(${inner})`);
+}
 
 // ── Pass -1: bare Greek macro -> literal glyph, for bases only ─────────
 // Runs BEFORE Pass 0 so "\gamma_c" and "γ_c" hit the exact same code path
@@ -221,8 +283,26 @@ function expandGreekSubscriptBases(text) {
 // Braced form stays capped separately at 8: '{' immediately after '_' is
 // essentially never a real identifier, so it can safely stay more
 // permissive than the ambiguous bare form.
+//
+// [PATCH — f'_c prime notation] Base group now allows an optional trailing
+// prime mark, ['\u2019]?, between the base letter and the underscore.
+// This is the ACI 318 f'_c convention (concrete compressive strength,
+// f-prime-c) captured directly from a production reply -- the prime sits
+// BETWEEN the base and the subscript marker, and the base group used to
+// require the underscore immediately after the base letter with nothing
+// in between, so "f'_c" (base "f", then "'", then "_c") could never match
+// at all: the character directly before "_" is "'", not a letter, and
+// neither alternative in the old group could ever equal "'". Both
+// straight (U+0027) and typographic (U+2019) primes are accepted since
+// which one a model reaches for isn't predictable and telling them apart
+// isn't the point -- either reads as the same mathematical prime mark.
+// The prime is INSIDE the capture group, not matched separately, so
+// subscriptOrFallback's `base` argument naturally becomes "f'" (or "f")
+// and the prime is preserved exactly where it was typed either way --
+// this pass only ever decides what happens to the underscore-marked
+// subscript AFTER the base, never touches anything before it.
 const LATEX_SUBSCRIPT_RE = new RegExp(
-  `(?<![A-Za-z0-9_])([A-Za-z${GREEK_BASE_GLYPHS}])_(?:\\{([A-Za-z]{1,8})\\}|([A-Za-z]{1,3})(?![A-Za-z]))`,
+  `(?<![A-Za-z0-9_])([A-Za-z${GREEK_BASE_GLYPHS}]['\u2019]?)_(?:\\{([A-Za-z]{1,8})\\}|([A-Za-z]{1,3})(?![A-Za-z]))`,
   'g',
 );
 
@@ -348,11 +428,14 @@ function stripBareDollar(text) {
 // avoids adding latency the construct's own grammar doesn't require.
 const NOT_TOKEN_CHAR_RE = new RegExp(`[^A-Za-z${GREEK_BASE_GLYPHS}\\\\$_{^]`);
 const MAX_HOLDBACK = 64; // safety valve: bound worst-case latency if a
-                         // pathological chunk has no separator at all
-                         // (MAX_TRIGGER_LEN=4, longest LaTeX construct now
-                         // "\gamma_{xxxxxxxx}" = 17 chars including the
-                         // macro form Pass -1 consumes -- 64 is still
-                         // ample headroom, not a tight fit).
+                         // pathological chunk has no separator at all.
+                         // MAX_TRIGGER_LEN is 11 (\varepsilon); the
+                         // largest bounded LaTeX construct is now
+                         // \sqrt{...} at up to 39 chars ("\sqrt{" + 32
+                         // capped content chars + "}") -- see
+                         // SQRT_BRACE_RE below, now the longest one here,
+                         // ahead of "\epsilon_{xxxxxxxx}" at 19. 64 is
+                         // still ample headroom above 39, not a tight fit.
 
 function findSafeCutIndex(buf) {
   for (let i = buf.length - 1; i >= 0; i--) {
@@ -449,6 +532,46 @@ function adjustCutForSuperscriptBaseLookahead(buf, cut) {
   return cut;
 }
 
+// [PATCH — f'_c prime notation] Companion guard for the SAME shape of gap,
+// this time on the subscript side: LATEX_SUBSCRIPT_RE's base group now
+// accepts a trailing prime ("f'"), but the prime character itself is not
+// in NOT_TOKEN_CHAR_RE's protected set (correctly not -- the overwhelming
+// majority of apostrophes in ordinary prose, "it's", "engineer's", have
+// nothing to do with a subscript base, same reasoning as every other
+// targeted-not-blanket guard in this file). Without this, a chunk
+// boundary landing right after "f'" flushes it immediately, and by the
+// time "_c" arrives in a later push() the base is already gone from
+// `this._buf`. Only 2 characters of lookback (base letter + prime), not a
+// `while` loop like the bracket guard above: a base can only ever carry
+// ONE prime mark in this notation, there's no equivalent of "several
+// closing brackets in a row" to account for here.
+function adjustCutForSubscriptBaseLookahead(buf, cut) {
+  if (cut >= 2 && (buf[cut - 1] === '\'' || buf[cut - 1] === '\u2019') && /[A-Za-z]/.test(buf[cut - 2])) {
+    return cut - 2;
+  }
+  return cut;
+}
+
+// [PATCH — square root] A trailing, not-yet-closed "\sqrt{...content so
+// far..." must not be flushed before its closing '}' arrives, for the
+// same reason SUPERSCRIPT_TAIL_RE exists above: '\\' and '{' are
+// themselves protected already (see NOT_TOKEN_CHAR_RE), but the radicand
+// content in between is NOT (it can be digits, spaces, apostrophes,
+// operators -- none of those are in the protected set either, same
+// reasoning as everywhere else in this file). Left unguarded, e.g.
+// "\sqrt{f'" flushes the instant the buffer ends right after that
+// apostrophe (an unprotected character on its own), stranding "\sqrt{f'"
+// as literal emitted text with "_c}" arriving disconnected from it next
+// push() -- the exact "stream tears mid-token" failure this holdback
+// buffer exists to prevent, just for the new construct instead of the
+// original ones.
+const SQRT_BRACE_TAIL_RE = /\\sqrt\{[^{}]*$/;
+function adjustCutForSqrtBraceLookahead(buf, cut) {
+  const scan = buf.slice(0, cut);
+  const m = SQRT_BRACE_TAIL_RE.exec(scan);
+  return m ? m.index : cut;
+}
+
 export class NotationNormalizer {
   constructor() {
     this._buf = '';
@@ -464,6 +587,8 @@ export class NotationNormalizer {
     cut = adjustCutForAsLookahead(this._buf, cut);
     cut = adjustCutForSuperscriptLookahead(this._buf, cut);
     cut = adjustCutForSuperscriptBaseLookahead(this._buf, cut);
+    cut = adjustCutForSubscriptBaseLookahead(this._buf, cut);
+    cut = adjustCutForSqrtBraceLookahead(this._buf, cut);
     if (cut < 0) cut = 0;
     if (this._buf.length - cut > MAX_HOLDBACK) {
       cut = this._buf.length - MAX_HOLDBACK; // bounded worst case, see above
@@ -471,14 +596,14 @@ export class NotationNormalizer {
     if (cut === 0) return { emit: '' };
     const safePart = this._buf.slice(0, cut);
     this._buf = this._buf.slice(cut);
-    const emit = stripBareDollar(applyReplacements(convertLatexSuperscripts(convertLatexSubscripts(expandGreekSubscriptBases(safePart)))));
+    const emit = stripBareDollar(applyReplacements(convertLatexSuperscripts(convertLatexSubscripts(expandGreekSubscriptBases(convertSqrtBraces(safePart))))));
     return { emit };
   }
 
   finish() {
     const rest = this._buf;
     this._buf = '';
-    const emit = stripBareDollar(applyReplacements(convertLatexSuperscripts(convertLatexSubscripts(expandGreekSubscriptBases(rest)))));
+    const emit = stripBareDollar(applyReplacements(convertLatexSuperscripts(convertLatexSubscripts(expandGreekSubscriptBases(convertSqrtBraces(rest))))));
     return { emit };
   }
 }

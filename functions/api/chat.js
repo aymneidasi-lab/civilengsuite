@@ -2259,7 +2259,7 @@ Egyptian-Arabic worked example (match this register, not فصحى):
 **effective depth** أو تستخدم **drop panel**. إيه رأيك؟ 🛠️"
 
 ════════════════════════════════════════
-NOTATION — SUBSCRIPTED & EXPONENT ENGINEERING SYMBOLS (CRITICAL)
+NOTATION — SUBSCRIPT, EXPONENT, GREEK & ROOT SYMBOLS (CRITICAL)
 ════════════════════════════════════════
 The client has no LaTeX/math renderer. Write every subscripted symbol as plain
 base_sub with a literal underscore, nothing else around it — the app converts this
@@ -2267,8 +2267,9 @@ automatically into a real lowered subscript before the person sees it. You never
 to (and must not) do any subscript formatting by hand.
 
 DO: fcu -> write f_cu · fy -> write f_y · Ac -> write A_c · Pu -> write P_u ·
-qu -> write q_u · qall -> write q_all. Braces (f_{cu}) also work if that's what
-comes out naturally — either form is fine, plain f_cu is simplest.
+qu -> write q_u · qall -> write q_all · f'c -> write f'_c, prime mark included exactly
+like that. Braces (f_{cu}) also work if that's what comes out naturally — either form
+is fine, plain f_cu is simplest.
 
 NEVER DO:
 • Wrap any part of a reply in $ or $$ (LaTeX math-mode delimiters) — "$f_cu$",
@@ -2291,6 +2292,19 @@ rule as subscripts: never hand-type a raised digit yourself (³ ² ⁿ) to fake 
 always plain-caret text, every time, including after a bracket, with no exceptions.
 Worked example: "الترخيم النهائي بيتحسب من (M_cr / M_a)^3 في معادلة برانسون." renders
 with a real raised 3 — never write "(M_cr / M_a)³" or wrap it in $ instead.
+
+GREEK LETTERS & SQUARE ROOTS follow the exact same idea, spelled as a plain backslash
+macro name: \alpha, \beta, \phi, \lambda, \mu, \rho, \tau, \gamma, \delta, \sigma, \psi,
+\epsilon, \Delta. Never spell one out in English ("phi", "lambda", "alpha_s") and never
+hand-type it as a Unicode letter (φ λ β) yourself — same rule, same reason as the NEVER
+DOs above. A Greek base can carry a subscript exactly like a Latin one: \alpha_s -> α
+with a lowered s. Square roots the same way: \sqrt(...) with your own parentheses
+around whatever's inside — never the English word "sqrt", never a hand-typed √.
+\sqrt takes no argument the way a real LaTeX \frac would, so put your own ( ) right
+after it, not { } — braces are for the subscript/exponent forms above only.
+Worked example: "قوة القص بتتحسب من \lambda × \sqrt(f'_c)، ومعامل \alpha_s بيعتمد على
+موقع العمود." renders with a real λ, √, and α with a lowered s — never "lambda" or
+"alpha_s" spelled out in English, and never λ or √ hand-typed by you instead.
 
 ════════════════════════════════════════
 ARABIC DIALECT TRAINING — EGYPTIAN (عامية مصرية)
@@ -3674,7 +3688,10 @@ Subscripted symbols: plain underscore form only — f_cu, A_s, P_u, q_u — neve
 delimiters and never a hand-typed Unicode super/subscript character; the app renders the
 real subscript from the plain underscore automatically, same rule as established earlier.
 Exponents: plain caret, base^exp — including after a closing bracket, e.g. (M_cr/M_a)^3 —
-never a hand-typed ³ ² ⁿ; the app raises it the same automatic way.
+never a hand-typed ³ ² ⁿ; the app raises it the same automatic way. Greek letters:
+backslash macro only — \alpha, \beta, \phi, \lambda, \mu — never spelled out in English
+and never hand-typed as φ/λ/β. Square roots: \sqrt(...) with your own parentheses, never
+the word "sqrt" and never \sqrt{...} braces or a hand-typed √.
 
 CORE PRODUCT FACTS — Civil Engineering Suite / Footing Pro v.2026 (the only live product):
 • Three standalone apps: Rectangular Combined Footing (equal/near-equal loads), Trapezoidal
@@ -3788,7 +3805,9 @@ Never mix languages in one reply.
 
 Subscripted symbols: plain underscore only — f_cu, A_s, P_u, q_all — never $ / $$ or a
 hand-typed Unicode super/subscript character. Exponents: plain caret, base^exp — even
-after a closing bracket, (M_cr/M_a)^3 — never a hand-typed ³ ² ⁿ.
+after a closing bracket, (M_cr/M_a)^3 — never a hand-typed ³ ² ⁿ. Greek letters:
+\alpha/\beta/\phi/\lambda/\mu, never spelled out or hand-typed as φ/λ/β. Square roots:
+\sqrt(...) with your own parens, never the word "sqrt" or a hand-typed √.
 
 ${isDeveloperMode ? '' : `\
 CONFIDENTIALITY: never name/discuss your own backend, API, Cloudflare, hosting, or provider —
@@ -5682,7 +5701,23 @@ export async function onRequestPost(context) {
   // reconstructed pre-patch block text), condensed tier +158 chars/~42
   // est. tokens. Ceilings bumped by those exact amounts, same
   // acknowledged-change convention as the two patches above.
-  assertPromptBudget('geminiSystemPrompt', geminiSystemPrompt, isFirstTurn ? 14787 : 1503, env);
+  // [PATCH — Greek/root notation] Same root cause, different symbols:
+  // deployed-and-tested evidence (a production reply captured after the
+  // exponent patch shipped) showed the model spelling Greek letters out
+  // in English ("phi", "lambda", "alpha_s" instead of \phi/\lambda/
+  // \alpha_s) and square roots as the literal word "sqrt(...)" -- neither
+  // was ever taught, even though notationNormalizer.mjs's
+  // BARE_LATEX_MACROS already covered every one of those Greek letters
+  // (the model just never had a reason to reach for the backslash form).
+  // \sqrt specifically needed a normalizer-side addition too (it wasn't
+  // in BARE_LATEX_MACROS at all before this patch) — see that file for
+  // the \sqrt(...) -> √(...) mechanics and the \sqrt{...} braced-form
+  // safety net. Full tier +1065 chars/~282 est. tokens, Gemini
+  // follow-up condensed tier +255 chars/~68 est. tokens, Workers-AI
+  // condensed tier +176 chars/~47 est. tokens (that last one at its own
+  // assertPromptBudget call below, not this one). Same exact-measured-
+  // delta convention as every patch above.
+  assertPromptBudget('geminiSystemPrompt', geminiSystemPrompt, isFirstTurn ? 15852 : 1758, env);
 
   const geminiKeysIndexed = buildGeminiKeyPool(env);
 
@@ -5876,7 +5911,11 @@ export async function onRequestPost(context) {
         // EXPONENTS sentence appended to that same reminder (base^exp, including
         // after a closing bracket -- this tier had a subscript rule but no
         // exponent counterpart either, same gap as the two Gemini tiers).
-        assertPromptBudget('workersSystemContent', workersSystemContent, 1171, env);
+        // [PATCH — Greek/root notation] +176 chars/~47 est. tokens more for
+        // Greek-letter and \sqrt guidance, same gap and same fix shape as the
+        // two Gemini tiers -- see the longer note at the geminiSystemPrompt
+        // assertion above for the evidence this patch is based on.
+        assertPromptBudget('workersSystemContent', workersSystemContent, 1347, env);
         const workersMsgs = [
           { role: 'system', content: workersSystemContent },
           ...turns.map(t => ({
