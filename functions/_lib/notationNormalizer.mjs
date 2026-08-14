@@ -13,7 +13,13 @@
 //     subscript (γ, λ, ψ, ρ, β, τ, ε, α -- see GREEK_SUBSCRIPT_BASES).
 //     Runs before Pass 0 so "\gamma_c" and a directly-typed "γ_c"
 //     converge onto the exact same Pass 0 code path instead of needing a
-//     second, macro-aware subscript grammar.
+//     second, macro-aware subscript grammar. A companion rule in this
+//     same stage, expandBarePsiSubscriptBase(), does the equivalent
+//     expansion for BARE "psi_x" specifically (no backslash) -- psi
+//     can't get blanket bare-word support the way Pass 2's other Greek
+//     letters do (see BARE_GREEK_WORD_MACROS below), so this is scoped
+//     narrowly to only the unambiguous "immediately followed by an
+//     underscore" shape.
 //  0. LaTeX subscript SYNTAX -> normalized form. Handles Base_{Sub} and
 //     bare Base_Sub (single trailing char, real LaTeX grammar) BEFORE the
 //     flat-abbreviation pass below, because "fcu" is not a contiguous
@@ -298,6 +304,37 @@ const GREEK_MACRO_RE = new RegExp(
 );
 function expandGreekSubscriptBases(text) {
   return text.replace(GREEK_MACRO_RE, (m) => GREEK_SUBSCRIPT_BASES[m]);
+}
+
+// [PATCH — psi subscript exception] Live evidence (development-length Ld
+// formula, a fresh-chat reply) confirms the model reaches for bare
+// "psi_t"/"psi_e"/"psi_s" here too, exactly like every other Greek letter
+// in BARE_GREEK_WORD_MACROS below -- except psi can't just join that
+// table (see its own comment: "psi" collides with the pressure unit,
+// pounds per square inch, a routine value in this exact domain). Because
+// "psi" was excluded there entirely, NOTHING in the pipeline ever
+// recognized it as a subscript base -- not just "psi doesn't become ψ"
+// (intended) but "_t doesn't become a subscript either" (not intended,
+// and not even something the pressure-unit case would want protected:
+// nobody writes a bearing value as "2500psi_something", the unit always
+// stands alone right after a number). So: a SEPARATE, narrowly-scoped
+// rule, not a table entry -- expand bare "psi" ONLY when it's
+// immediately followed by "_" and a letter (or brace, for the rarer
+// braced-subscript form). That shape is unambiguous in a way standalone
+// "psi" never is, so this closes the gap without reopening the
+// collision BARE_GREEK_WORD_MACROS's exclusion exists to prevent.
+// Runs in the same stage as Pass -1 above (before Pass 0) so "psi_t"
+// becomes "ψ_t" -- a single-glyph base -- before the subscript pass ever
+// looks at it, same reason Pass -1 itself runs where it does.
+// `(?<!\\)` matters, not just `\b`: `\` is a non-word character, so a
+// bare `\b` alone is satisfied immediately after it too -- without this,
+// "\psi_t" would have its "psi" consumed by THIS rule first (this pass
+// runs before Pass -1), stripping the letters out from under Pass -1's
+// own "\psi" macro match before it ever runs and leaving a stranded,
+// unconverted leading backslash in the output.
+const BARE_PSI_SUBSCRIPT_RE = /(?<!\\)\bpsi(?=_[A-Za-z{])/g;
+function expandBarePsiSubscriptBase(text) {
+  return text.replace(BARE_PSI_SUBSCRIPT_RE, '\u03C8');
 }
 
 // ── Pass 0: LaTeX subscript SYNTAX ──────────────────────────────────────
@@ -685,14 +722,14 @@ export class NotationNormalizer {
     if (cut === 0) return { emit: '' };
     const safePart = this._buf.slice(0, cut);
     this._buf = this._buf.slice(cut);
-    const emit = stripBareDollar(applyReplacements(convertLatexSuperscripts(convertLatexSubscripts(expandGreekSubscriptBases(convertSqrtBraces(safePart))))));
+    const emit = stripBareDollar(applyReplacements(convertLatexSuperscripts(convertLatexSubscripts(expandGreekSubscriptBases(expandBarePsiSubscriptBase(convertSqrtBraces(safePart)))))));
     return { emit };
   }
 
   finish() {
     const rest = this._buf;
     this._buf = '';
-    const emit = stripBareDollar(applyReplacements(convertLatexSuperscripts(convertLatexSubscripts(expandGreekSubscriptBases(convertSqrtBraces(rest))))));
+    const emit = stripBareDollar(applyReplacements(convertLatexSuperscripts(convertLatexSubscripts(expandGreekSubscriptBases(expandBarePsiSubscriptBase(convertSqrtBraces(rest)))))));
     return { emit };
   }
 }
