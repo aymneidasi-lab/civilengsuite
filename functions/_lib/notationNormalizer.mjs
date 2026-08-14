@@ -39,7 +39,13 @@
 //     bases either (i.e. never emit γᶜ using U+1D9C) -- same bug, same
 //     reason it's wrong, one Unicode block over.
 //  2. Bare LaTeX macros with no braces/arguments -> plain Unicode
-//     (\times -> x, \phi -> \u03c6, \sqrt -> √, etc.)
+//     (\times -> x, \phi -> \u03c6, \sqrt -> √, etc.), PLUS the same set
+//     of conversions again without the leading backslash (lambda -> λ,
+//     sqrt -> √) for a model that writes the plain word instead -- see
+//     BARE_GREEK_WORD_MACROS below for why that's now a first-class,
+//     independent path rather than a typo to correct. psi is the one
+//     exception still requiring \psi; it collides with the pressure unit
+//     abbreviation "psi" (pounds per square inch), routine in this domain.
 // All six are FIXED, FINITE-LENGTH-BOUNDED, so all are safe to
 // holdback-buffer with a character-class-derived margin. Anything
 // requiring unbounded lookahead (\frac{a}{b} argument extraction, real
@@ -171,6 +177,41 @@ const BARE_LATEX_MACROS = {
   '\\sqrt': '\u221A',
 };
 
+// [PATCH — bare Greek/root words] Two captured production replies
+// (ces-reply-2026-08-13T23-59-21.txt, ces-reply-2026-08-13T23-59-35.txt,
+// a FRESH chat, no prior-turn history to blame) show the model
+// consistently choosing the bare English word over the backslash form
+// above -- "lambda", "phi", "sqrt(f_cu)" -- and, more tellingly, stating
+// an explicit written rule for itself that gets this exactly backwards:
+// "إياك تستخدم علامة \ ... اكتبه بالاسم بتاعه (lambda, phi)" (never use
+// the backslash mark, write it by its plain name) -- the opposite of
+// what chat.js's prompt actually says. That is not a model skimming a
+// long prompt and missing a line; every other nearby rule in the same
+// reply (subscript underscores, caret exponents) came out right. The
+// specific and consistent thing it gets backwards is exactly the one
+// rule that fights a strong, generic prior every LLM picks up from
+// training: a raw backslash-escape sequence in a plain, non-LaTeX chat
+// surface usually DOES show up as broken literal text, so avoiding it
+// is normally the correct instinct. This prompt's claim that THIS one
+// app is the exception is, evidently, not winning that argument
+// reliably even with direct, explicit, repeated instruction to the
+// contrary across three separate patches now.
+// So: stop arguing it, and make the code correct for what the model
+// already reliably writes instead. Every key here is a BARE word,
+// independent of and in addition to the backslash form above (which
+// keeps working -- some replies do use it, nothing here removes that
+// path, and the two forms can be freely mixed in the same reply).
+// 'psi' is deliberately excluded: unlike every other entry here, "psi"
+// collides with a live, routine, in-domain abbreviation -- pounds per
+// square inch, e.g. "qall = 2500 psi" -- not a hypothetical. \psi
+// (backslash form) remains the only accepted path for that one symbol;
+// see the matching carve-out in chat.js's prompt.
+const BARE_GREEK_WORD_MACROS = {
+  lambda: '\u03BB', phi: '\u03C6', mu: '\u03BC', alpha: '\u03B1', beta: '\u03B2',
+  gamma: '\u03B3', delta: '\u03B4', Delta: '\u0394', sigma: '\u03C3', tau: '\u03C4',
+  epsilon: '\u03B5', rho: '\u03C1', sqrt: '\u221A',
+};
+
 // Greek bases that can carry an engineering subscript in this domain (γ_c,
 // ψ_t -- ECP 203 partial safety factors, ACI 318 development-length
 // modification factors). Was gamma-only, pending evidence another base
@@ -227,7 +268,18 @@ const GREEK_BASE_GLYPHS = Object.values(GREEK_SUBSCRIPT_BASES).join('');
 // '{'/'}' permitted, so this is a fixed-max-length match, never
 // unbounded/real brace-balancing (see the file header's note on why
 // that's out of scope generally).
-const SQRT_BRACE_RE = /\\sqrt\{([^{}]{1,32})\}/g;
+// [PATCH — bare Greek/root words] Leading backslash made OPTIONAL
+// (`\\?`) -- captured evidence (see BARE_GREEK_WORD_MACROS below) shows
+// the model reliably dropping the backslash even when it otherwise
+// reaches for LaTeX-style braces, so "sqrt{f'_c}" (no backslash, still
+// braced) needs the exact same rescue "\sqrt{f'_c}" already got. Left-
+// side lookbehind added for the same reason every bare word in this file
+// gets one: without a backslash to act as an unambiguous left boundary
+// on its own, "sqrt{" needs its own guard against matching mid-word.
+// Output always re-adds the backslash regardless of whether the input
+// had one, so Pass 2's existing '\sqrt' macro branch is the only place
+// that ever decides the final glyph -- one source of truth either way.
+const SQRT_BRACE_RE = /(?<![A-Za-z0-9_])\\?sqrt\{([^{}]{1,32})\}/g;
 function convertSqrtBraces(text) {
   return text.replace(SQRT_BRACE_RE, (_m, inner) => `\\sqrt(${inner})`);
 }
@@ -360,7 +412,7 @@ function convertLatexSuperscripts(text) {
   });
 }
 
-const ALL_TRIGGERS = [...Object.keys(ENGINEERING_NOTATION_MAP), ...Object.keys(BARE_LATEX_MACROS)];
+const ALL_TRIGGERS = [...Object.keys(ENGINEERING_NOTATION_MAP), ...Object.keys(BARE_LATEX_MACROS), ...Object.keys(BARE_GREEK_WORD_MACROS)];
 const MAX_TRIGGER_LEN = Math.max(...ALL_TRIGGERS.map(t => t.length)); // holdback margin (see NOT_TOKEN_CHAR_RE for the real cut logic)
 
 // One combined regex, longest-trigger-first so e.g. 'qall' wins over 'q'-prefix
@@ -379,22 +431,51 @@ const MAX_TRIGGER_LEN = Math.max(...ALL_TRIGGERS.map(t => t.length)); // holdbac
 // followed by another lowercase word, which is the common case in running
 // text. No other trigger in this table is a standalone English word, so no
 // other trigger needs it.
+//
+// [PATCH — bare Greek/root words] BARE_GREEK_WORD_MACROS gets a FOURTH
+// branch, not folded into wordTriggers above, because it needs different
+// boundary rules on the two sides:
+//   - LEFT: same strict "(?<![A-Za-z0-9_])" used by LATEX_SUBSCRIPT_RE's
+//     base group elsewhere in this file -- not preceded by a letter,
+//     digit, or underscore. Stricter than \b needs to be, but there's no
+//     legitimate case (unlike the right side, next point) for one of
+//     these words to immediately follow an underscore.
+//   - RIGHT: "(?![a-zA-Z])" instead of \b, matching how the macroTriggers
+//     branch already treats its own right side just below. This is the
+//     one place \b would be actively wrong for this table: \b treats '_'
+//     as a word character, so a plain \b(?:alpha)\b would silently NEVER
+//     match "alpha_s" (no boundary exists between the "a" and the "_").
+//     Real evidence (ces-reply-2026-08-13T23-59-35.txt) is bare
+//     "alpha_s" written with no backslash at all, so this has to work.
+//     subscript conversion (Pass 0) already ran before this pass and
+//     correctly declined to touch "alpha_s" itself (its own lookbehind
+//     correctly refuses to read the trailing "a" of "alpha" as a
+//     standalone base) -- this pass only ever converts the "alpha" part;
+//     the leftover "_s" reaches the client's own <sub>-upgrade pass the
+//     same way γ_c/β_c's underscore fallback already does (α is in that
+//     pass's base class too, see _cesRenderBotHtml in footing_pro/pc_suite).
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const sortedTriggers = ALL_TRIGGERS.slice().sort((a, b) => b.length - a.length);
-const wordTriggers = sortedTriggers.filter((t) => !t.startsWith('\\') && t !== 'As');
+const wordTriggers = sortedTriggers.filter((t) => !t.startsWith('\\') && t !== 'As' && !(t in BARE_GREEK_WORD_MACROS));
 const macroTriggers = sortedTriggers.filter((t) => t.startsWith('\\'));
+const bareGreekTriggers = sortedTriggers.filter((t) => t in BARE_GREEK_WORD_MACROS);
 
 const wordPattern = wordTriggers.map(escapeRe).join('|');
 const macroPattern = macroTriggers.map(escapeRe).join('|');
+const bareGreekPattern = bareGreekTriggers.map(escapeRe).join('|');
 const COMBINED_RE = new RegExp(
   `\\bAs\\b(?!-)(?!\\s?[a-z])` +
   `|\\b(?:${wordPattern})\\b(?!-)` +
-  (macroPattern ? `|(?:${macroPattern})(?![a-zA-Z])` : ''),
+  (macroPattern ? `|(?:${macroPattern})(?![a-zA-Z])` : '') +
+  (bareGreekPattern ? `|(?<![A-Za-z0-9_])(?:${bareGreekPattern})(?![a-zA-Z])` : ''),
   'g',
 );
 
 function applyReplacements(text) {
-  return text.replace(COMBINED_RE, (m) => ENGINEERING_NOTATION_MAP[m] ?? BARE_LATEX_MACROS[m] ?? m);
+  return text.replace(
+    COMBINED_RE,
+    (m) => ENGINEERING_NOTATION_MAP[m] ?? BARE_LATEX_MACROS[m] ?? BARE_GREEK_WORD_MACROS[m] ?? m,
+  );
 }
 
 // Bare '$' / '$$' LaTeX delimiter stripping. Zero lookahead needed: a lone
@@ -565,7 +646,15 @@ function adjustCutForSubscriptBaseLookahead(buf, cut) {
 // push() -- the exact "stream tears mid-token" failure this holdback
 // buffer exists to prevent, just for the new construct instead of the
 // original ones.
-const SQRT_BRACE_TAIL_RE = /\\sqrt\{[^{}]*$/;
+// [PATCH — bare Greek/root words] Backslash made optional here too,
+// matching the identical change to SQRT_BRACE_RE above -- "sqrt{" (no
+// backslash) is just as capable of being mid-construct at a chunk
+// boundary as "\sqrt{" is; the letters of "sqrt" and the "{" are already
+// individually protected either way, but that alone doesn't protect the
+// CONTENT after "{" (digits/spaces/apostrophes/operators, none of which
+// are in NOT_TOKEN_CHAR_RE's protected set), which is what this guard is
+// actually for.
+const SQRT_BRACE_TAIL_RE = /\\?sqrt\{[^{}]*$/;
 function adjustCutForSqrtBraceLookahead(buf, cut) {
   const scan = buf.slice(0, cut);
   const m = SQRT_BRACE_TAIL_RE.exec(scan);

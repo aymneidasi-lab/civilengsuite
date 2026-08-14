@@ -2293,18 +2293,18 @@ always plain-caret text, every time, including after a bracket, with no exceptio
 Worked example: "الترخيم النهائي بيتحسب من (M_cr / M_a)^3 في معادلة برانسون." renders
 with a real raised 3 — never write "(M_cr / M_a)³" or wrap it in $ instead.
 
-GREEK LETTERS & SQUARE ROOTS follow the exact same idea, spelled as a plain backslash
-macro name: \alpha, \beta, \phi, \lambda, \mu, \rho, \tau, \gamma, \delta, \sigma, \psi,
-\epsilon, \Delta. Never spell one out in English ("phi", "lambda", "alpha_s") and never
-hand-type it as a Unicode letter (φ λ β) yourself — same rule, same reason as the NEVER
-DOs above. A Greek base can carry a subscript exactly like a Latin one: \alpha_s -> α
-with a lowered s. Square roots the same way: \sqrt(...) with your own parentheses
-around whatever's inside — never the English word "sqrt", never a hand-typed √.
-\sqrt takes no argument the way a real LaTeX \frac would, so put your own ( ) right
-after it, not { } — braces are for the subscript/exponent forms above only.
-Worked example: "قوة القص بتتحسب من \lambda × \sqrt(f'_c)، ومعامل \alpha_s بيعتمد على
-موقع العمود." renders with a real λ, √, and α with a lowered s — never "lambda" or
-"alpha_s" spelled out in English, and never λ or √ hand-typed by you instead.
+GREEK LETTERS & SQUARE ROOTS: the app converts these two ways, so use whichever comes
+naturally — the plain word (lambda, phi, alpha_s, sqrt(f'_c)) or the backslash macro
+(\lambda, \phi, \alpha_s, \sqrt(f'_c)); both land on the same real symbol, and the two
+can be mixed freely within one reply. A Greek base can carry a subscript either way:
+alpha_s -> α with a lowered s, same as \alpha_s. One exception: psi needs the
+backslash form, \psi — plain "psi" is left alone on purpose, since it doubles as this
+domain's abbreviation for pounds-per-square-inch ("qall = 2500 psi") and converting
+that would break it. \sqrt(...) or \sqrt{...} both work; parentheses are simplest
+since \sqrt takes no argument the way a real LaTeX \frac would.
+Worked example: "قوة القص بتتحسب من lambda × sqrt(f'_c)، ومعامل alpha_s بيعتمد على
+موقع العمود." renders with a real λ, √, and α with a lowered s automatically — no
+special formatting needed beyond writing it plainly like that.
 
 ════════════════════════════════════════
 ARABIC DIALECT TRAINING — EGYPTIAN (عامية مصرية)
@@ -3688,10 +3688,10 @@ Subscripted symbols: plain underscore form only — f_cu, A_s, P_u, q_u — neve
 delimiters and never a hand-typed Unicode super/subscript character; the app renders the
 real subscript from the plain underscore automatically, same rule as established earlier.
 Exponents: plain caret, base^exp — including after a closing bracket, e.g. (M_cr/M_a)^3 —
-never a hand-typed ³ ² ⁿ; the app raises it the same automatic way. Greek letters:
-backslash macro only — \alpha, \beta, \phi, \lambda, \mu — never spelled out in English
-and never hand-typed as φ/λ/β. Square roots: \sqrt(...) with your own parentheses, never
-the word "sqrt" and never \sqrt{...} braces or a hand-typed √.
+never a hand-typed ³ ² ⁿ; the app raises it the same automatic way. Greek letters &
+square roots: plain word or backslash form both convert — lambda/\lambda, alpha_s/
+\alpha_s, sqrt(...)/\sqrt(...) — use whichever's natural. Exception: psi needs \psi
+(bare "psi" is left alone — it doubles as the pressure unit).
 
 CORE PRODUCT FACTS — Civil Engineering Suite / Footing Pro v.2026 (the only live product):
 • Three standalone apps: Rectangular Combined Footing (equal/near-equal loads), Trapezoidal
@@ -3805,9 +3805,9 @@ Never mix languages in one reply.
 
 Subscripted symbols: plain underscore only — f_cu, A_s, P_u, q_all — never $ / $$ or a
 hand-typed Unicode super/subscript character. Exponents: plain caret, base^exp — even
-after a closing bracket, (M_cr/M_a)^3 — never a hand-typed ³ ² ⁿ. Greek letters:
-\alpha/\beta/\phi/\lambda/\mu, never spelled out or hand-typed as φ/λ/β. Square roots:
-\sqrt(...) with your own parens, never the word "sqrt" or a hand-typed √.
+after a closing bracket, (M_cr/M_a)^3 — never a hand-typed ³ ² ⁿ. Greek letters &
+square roots: plain word (lambda, alpha_s, sqrt(...)) or backslash form both convert,
+use either — except psi, which needs \psi (bare "psi" is the pressure unit).
 
 ${isDeveloperMode ? '' : `\
 CONFIDENTIALITY: never name/discuss your own backend, API, Cloudflare, hosting, or provider —
@@ -5717,7 +5717,29 @@ export async function onRequestPost(context) {
   // condensed tier +176 chars/~47 est. tokens (that last one at its own
   // assertPromptBudget call below, not this one). Same exact-measured-
   // delta convention as every patch above.
-  assertPromptBudget('geminiSystemPrompt', geminiSystemPrompt, isFirstTurn ? 15852 : 1758, env);
+  // [PATCH — bare Greek/root words, code-side fix] The [PATCH — Greek/root
+  // notation] prompt text above did NOT fix the bug it targeted: two
+  // fresh-chat captured replies afterward (ces-reply-2026-08-13T23-59-21,
+  // -23-59-35) show the model still writing bare "lambda"/"phi"/"sqrt",
+  // this time also stating an explicit self-authored rule that inverts
+  // the real one ("never use the backslash, write it by name") -- not
+  // inattention, a competing prior (backslash escapes look broken in a
+  // non-LaTeX chat surface, which is usually correct advice) winning over
+  // specific instruction to the contrary, three patches running. Fix
+  // moved to notationNormalizer.mjs instead: BARE_GREEK_WORD_MACROS now
+  // accepts the bare word as a first-class path, independent of the
+  // backslash form (which still works). This prompt paragraph was
+  // rewritten to match -- present both forms as equally valid instead of
+  // insisting on one the model wasn't reliably choosing anyway, plus the
+  // new psi/pressure-unit carve-out. Net change is a small DECREASE, not
+  // increase (removing several now-inaccurate NEVER-DOs cost more chars
+  // than the psi carve-out added back): full tier −41 chars, Gemini
+  // follow-up condensed tier −10 chars, Workers-AI condensed tier +3
+  // chars (below, own call). Ceilings adjusted down/up by those exact
+  // amounts, same convention as every patch above -- a real, measured
+  // decrease is still an acknowledged change, not something to leave the
+  // ceiling silently over-provisioned for.
+  assertPromptBudget('geminiSystemPrompt', geminiSystemPrompt, isFirstTurn ? 15811 : 1748, env);
 
   const geminiKeysIndexed = buildGeminiKeyPool(env);
 
@@ -5915,7 +5937,11 @@ export async function onRequestPost(context) {
         // Greek-letter and \sqrt guidance, same gap and same fix shape as the
         // two Gemini tiers -- see the longer note at the geminiSystemPrompt
         // assertion above for the evidence this patch is based on.
-        assertPromptBudget('workersSystemContent', workersSystemContent, 1347, env);
+        // [PATCH — bare Greek/root words, code-side fix] +3 chars this time
+        // (net -- this tier's rewrite lost more to trimmed NEVER-DOs than it
+        // gained back from the psi carve-out). See the full explanation at
+        // the geminiSystemPrompt assertion above; same fix, same evidence.
+        assertPromptBudget('workersSystemContent', workersSystemContent, 1350, env);
         const workersMsgs = [
           { role: 'system', content: workersSystemContent },
           ...turns.map(t => ({
