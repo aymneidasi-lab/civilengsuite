@@ -106,6 +106,29 @@ function escapeHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
+/* [FIX-HEADER-INJECTION] name/email/site_label all end up inside
+   single-line, header-adjacent contexts — `subject` directly, and
+   from/to/reply "name" fields via SENDER_PERSON_NAME's sibling values.
+   isValidEmail()'s strict ^...$ anchoring with no \r\n in any of its
+   character classes already makes embedded CRLF impossible in
+   safeEmail (a match can't reach $ past an unconsumed control char),
+   but name/site_label have no equivalent restriction — .trim() only
+   strips leading/trailing whitespace, an embedded "\r\nBcc:
+   attacker@evil.com" in the middle of a name survives it untouched.
+   Whether WorkerMailer's own send() would additionally reject that
+   before writing raw SMTP is unverified here (its source isn't in
+   this review) — stripping at the point untrusted data enters this
+   handler doesn't depend on that answer either way. Strips all C0
+   controls (0x00–0x1F) and DEL (0x7F), not just \r\n: nothing in a
+   name or site label legitimately needs any of them, and a narrower
+   \r\n-only strip leaves other control chars (e.g. \x00) for a
+   downstream parser to potentially special-case. Not applied to
+   `message` — its newlines are legitimate (multi-line messages) and
+   are handled safely in a body context, not a header context. */
+function stripHeaderUnsafe(str) {
+  return String(str).replace(/[\x00-\x1F\x7F]/g, '');
+}
+
 function corsHeaders(origin) {
   return {
     'Access-Control-Allow-Origin' : ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0],
@@ -256,12 +279,12 @@ export async function onRequestPost(context) {
      validate that exact value — validating the raw input and using a
      different (later-trimmed) value to send would let a
      whitespace-only field slip through. */
-  const safeName = String(name || '').trim().slice(0, 100);
+  const safeName = stripHeaderUnsafe(String(name || '')).trim().slice(0, 100);
   if (!safeName) {
     return json({ error: 'Name is required.' }, 400, origin);
   }
 
-  const safeEmail = String(email || '').trim().slice(0, 150);
+  const safeEmail = stripHeaderUnsafe(String(email || '')).trim().slice(0, 150);
   if (!safeEmail || !isValidEmail(safeEmail)) {
     return json({ error: 'Invalid email address.' }, 400, origin);
   }
@@ -271,7 +294,7 @@ export async function onRequestPost(context) {
     return json({ error: 'Message is required.' }, 400, origin);
   }
 
-  const safeSiteLabel = (String(site_label || '').trim().slice(0, 60)) || 'Website';
+  const safeSiteLabel = stripHeaderUnsafe(String(site_label || '')).trim().slice(0, 60) || 'Website';
 
   const { pairs: gmailPairs, incomplete } = buildGmailRing(context.env);
   if (incomplete.length > 0) {
