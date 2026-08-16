@@ -308,6 +308,33 @@ function convertSqrtBraces(text) {
   return text.replace(SQRT_BRACE_RE, (_m, inner) => `\\sqrt(${inner})`);
 }
 
+// [PATCH — bare \frac / \left / \right] Same rescue as SQRT_BRACE_RE above,
+// same evidence class: the model drops the leading backslash on these two
+// STRUCTURAL commands as reliably as it does on \sqrt/\lambda/\phi (see
+// BARE_GREEK_WORD_MACROS's header comment for the captured-reply evidence
+// this is the same behavior, not a new one) -- except \frac and \left/
+// \right have no bare-word rescue available the way "lambda"->λ does,
+// because there is no single glyph a fraction or a scaled delimiter can
+// fall back to. A bare "frac{Mcr}{Ma}" or "left(...right)" therefore
+// didn't degrade to a readable Unicode approximation like a dropped
+// "\lambda" did -- it degraded to literal, broken "frac{Mcr}{Ma}" text,
+// which is what the production screenshot this patch responds to shows.
+// Bounded exactly like SQRT_BRACE_RE: both frac arguments capped at 32
+// chars, no nested braces -- a fixed-max-length match, not real
+// brace-balancing (see file header). left/right require the bracket
+// character immediately adjacent with zero space, which is what makes
+// this safe against ordinary prose ("the left side", "right edge") --
+// nobody writes "left(" or "right)" with no space as plain English.
+const FRAC_RE = /(?<![A-Za-z0-9_])\\?frac\{([^{}]{1,32})\}\{([^{}]{1,32})\}/g;
+function convertBareFrac(text) {
+  return text.replace(FRAC_RE, (_m, num, den) => `\\frac{${num}}{${den}}`);
+}
+const LEFT_RE = /(?<![A-Za-z0-9_])\\?left(?=[([{])/g;
+const RIGHT_RE = /(?<![A-Za-z0-9_])\\?right(?=[)\]}])/g;
+function convertBareLeftRight(text) {
+  return text.replace(LEFT_RE, '\\left').replace(RIGHT_RE, '\\right');
+}
+
 // ── Pass -1: bare Greek macro -> literal glyph, for bases only ─────────
 // Runs BEFORE Pass 0 so "\gamma_c" and "γ_c" hit the exact same code path
 // below instead of needing a second, parallel LaTeX-macro-aware subscript
@@ -901,7 +928,18 @@ export class NotationNormalizer {
         const delim = isDisplay ? '$$' : '$';
         const close = findUnescapedDelim(text, delim, i + delim.length);
         if (close !== -1) {
-          out += text.slice(i, close + delim.length);
+          // [PATCH — bare \frac/\left/\right inside $...$] Everything else
+          // in a resolved math span is still real LaTeX passed through
+          // byte-for-byte -- KaTeX's job, not this file's -- but frac/
+          // left/right get the SAME bare-command rescue as the fallback
+          // path below runs outside $, because the model drops the
+          // backslash on these two just as reliably whether or not it
+          // correctly wrapped the equation in $ first (independent
+          // failures -- fixing $-wrapping doesn't fix this, and vice
+          // versa; both are patched here from the same captured evidence).
+          const inner = text.slice(i + delim.length, close);
+          const fixed = convertBareLeftRight(convertBareFrac(inner));
+          out += delim + fixed + delim;
           i = close + delim.length;
           continue;
         }
@@ -910,7 +948,7 @@ export class NotationNormalizer {
       if (next === -1) next = text.length;
       const segment = text.slice(i, next);
       out += stripBareDollar(applyReplacements(convertLatexSuperscripts(convertLatexSubscripts(
-        expandGreekSubscriptBases(expandBarePsiSubscriptBase(convertSqrtBraces(segment)))))));
+        expandGreekSubscriptBases(expandBarePsiSubscriptBase(convertBareLeftRight(convertBareFrac(convertSqrtBraces(segment)))))))));
       i = next;
     }
     return out;
