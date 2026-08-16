@@ -29,7 +29,23 @@
 #   {segment}/index.html directly at the repo-root location. No redirect
 #   rule is needed because the files are already at the correct serving path.
 
+# FIX K2 — KaTeX vendor assets: /vendor/katex/* → /public/vendor/katex/:splat
+#   Physical location: public/vendor/katex/{katex.min.js,katex.min.css,fonts/*}
+#   Browser requests:  /vendor/katex/katex.min.js etc.
+#   Same class of bug as FIX 3A: _routes.json excludes /vendor/katex/* from
+#   the Function (correct) and _headers sets long-term caching on it
+#   (correct), but without THIS rewrite the request 404s before either of
+#   those ever matters. Symptom looked nothing like a 404 though: the
+#   client's _cesEnsureKatexLoaded() catches the failed <script> load and
+#   silently falls back to showing the raw, unrendered LaTeX source text
+#   ($$...$$, \left, \frac still visible) instead of typeset math — no
+#   console error surfaced to the chat UI, no broken-image icon, nothing
+#   that looks like a missing file. Confirmed via cross-check: /vendor/
+#   katex/* appears in _routes.json's exclude list and gets its own header
+#   block in _headers, but had no entry at all in this file before this fix.
+
 /fonts/*                    /public/fonts/:splat                    200
+/vendor/katex/*             /public/vendor/katex/:splat             200
 /images/*                   /public/images/:splat                   200
 /footing-pro/images/*       /public/footing-pro/images/:splat       200
 /beam-pro/images/*          /public/beam-pro/images/:splat          200
