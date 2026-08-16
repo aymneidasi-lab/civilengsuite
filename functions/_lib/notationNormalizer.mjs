@@ -59,6 +59,24 @@
 // prompt-level instruction (the NOTATION rule in chat.js) is the primary
 // defense for those; this is a bounded, low-risk safety net, not a
 // LaTeX parser.
+//
+// [PATCH — KaTeX rendering] The six passes above now run ONLY on text
+// outside resolved $ / $$ LaTeX spans -- see the math-span-aware layer at
+// the bottom of this file (walkMathSpans / findOpenMathDelimiter /
+// findLastResolvedMathEnd / NotationNormalizer._render) for the mechanics
+// and the full rationale. Short version: the client renders real LaTeX
+// via KaTeX now (see chat.js's NOTATION prompt block), so text the model
+// correctly wrapped in $ is real LaTeX grammar these six passes don't
+// understand and must not touch -- left ungated, Pass 0 alone turns a
+// perfectly correct "$f_{cu}$" into "$f_cu$" (c has no true Unicode
+// subscript codepoint, so it falls back to a literal underscore), then
+// stripBareDollar strips both now-bare '$'s since neither is followed by
+// a digit -- the delimiters vanish and "f_cu" reaches the client as
+// plain text, never as math. Verified by tracing the pipeline, not
+// inferred. The six passes themselves are otherwise UNCHANGED below --
+// they remain exactly what they always were, a bounded safety net for a
+// reply (or portion of one) that reverts to old bare notation with no $
+// at all.
 
 // Unicode "Superscripts and Subscripts" block (U+2080-209C) plus the
 // Phonetic Extensions additions (i/r/u/v) and U+2C7C (j). This is the
@@ -698,38 +716,203 @@ function adjustCutForSqrtBraceLookahead(buf, cut) {
   return m ? m.index : cut;
 }
 
+// ── Math-span-aware layer ───────────────────────────────────────────────
+// Streaming shape mirrors the rest of this file: holdback-margin /
+// detect-and-retract, just with a different notion of "safe cut point".
+// A resolved span (open delimiter with a matching, already-arrived close)
+// is safe to emit in full the moment both ends are in the buffer, same as
+// any other confirmed token. An OPEN span with no close yet is the
+// opposite of safe -- unlike every bounded construct in the six passes
+// above, a LaTeX span has no fixed max length (a $$...$$ block can be an
+// entire multi-\frac equation), so nothing after the '$' that opened it
+// can be classified -- inline vs. display, prose vs. math -- until the
+// close arrives to confirm the span's actual extent.
+
+// Finds the next occurrence of the literal delimiter string `delim`
+// ('$' or '$$') in `buf` at or after `from`, skipping any that are
+// escaped (immediately preceded by '\', e.g. the "\$500" a model writes
+// for a literal dollar sign inside an equation). Same one-character
+// lookback convention as every other escape check in this file (compare
+// GREEK_MACRO_RE's own guard) -- not a general escaped-backslash parser
+// (a literal "\\$" is not specially handled), matching this file's
+// established bounded-not-a-parser scope.
+function findUnescapedDelim(buf, delim, from) {
+  let idx = buf.indexOf(delim, from);
+  while (idx !== -1 && buf[idx - 1] === '\\') {
+    idx = buf.indexOf(delim, idx + 1);
+  }
+  return idx;
+}
+
+// Shared walk over buf's top-level $ / $$ delimiters: jumps from one
+// resolved span to the next, calling onResolvedEnd(i) with the buffer
+// index immediately after each span it closes. Returns the index of the
+// first '$' that OPENS a span with no matching close anywhere later in
+// buf, or -1 if every '$' in buf resolves (including "no '$' at all").
+// findOpenMathDelimiter and findLastResolvedMathEnd are both thin
+// wrappers over this one walk so the two can never independently drift
+// out of agreement -- see findLastResolvedMathEnd's own comment for why
+// that agreement specifically matters here.
+function walkMathSpans(buf, onResolvedEnd) {
+  let i = 0;
+  while (i < buf.length) {
+    if (buf[i] === '$' && buf[i - 1] !== '\\') {
+      const isDisplay = buf[i + 1] === '$';
+      const delim = isDisplay ? '$$' : '$';
+      const close = findUnescapedDelim(buf, delim, i + delim.length);
+      if (close === -1) return i;
+      i = close + delim.length;
+      onResolvedEnd(i);
+      continue;
+    }
+    i++;
+  }
+  return -1;
+}
+
+function findOpenMathDelimiter(buf) {
+  return walkMathSpans(buf, () => {});
+}
+
+// Returns the buffer index immediately after the LAST fully resolved math
+// span in buf, or 0 if none. Only meaningful -- and only ever called --
+// when findOpenMathDelimiter(buf) has already returned -1 (every '$'
+// resolves), so the walk below never actually hits its own `close === -1`
+// branch in practice; it's there so this function still returns a safe,
+// non-advancing boundary instead of a bogus one if that invariant is ever
+// violated by a future caller.
+//
+// This can't be derived from findOpenMathDelimiter's -1 return alone: -1
+// only proves the walk reached buf.length without hitting an unresolved
+// open, it doesn't say WHERE the last resolved span actually ended,
+// because the walk keeps advancing character-by-character (the plain
+// `i++` branch) straight through any trailing $-free prose after that
+// span, all the way to buf.length. Treating "-1 means the whole buffer is
+// safe" as license to hand push()'s tail-cut logic a `tail` starting at 0
+// would re-run the six legacy passes over span content that's already
+// resolved and must stay untouched -- this bookmarks the position at each
+// onResolvedEnd() call, and only that, so the boundary this function
+// returns is always a true post-span boundary, never mid-span.
+function findLastResolvedMathEnd(buf) {
+  let lastEnd = 0;
+  walkMathSpans(buf, (end) => { lastEnd = end; });
+  return lastEnd;
+}
+
+// Bound on how long an OPEN (unclosed-so-far) math span may sit in the
+// holdback buffer before this module gives up waiting for its close and
+// flushes it as plain text instead. Deliberately much larger than
+// MAX_HOLDBACK (64): that constant bounds the six FIXED, FINITE-LENGTH
+// legacy constructs (longest is \sqrt{...} at 39 chars); a $$...$$
+// display block has no such fixed bound -- a real multi-\frac ACI 318 /
+// ECP 203 derivation can legitimately run several hundred characters. 2000
+// is a deliberately generous, still-bounded ceiling, not derived from a
+// hard spec: if a span hasn't closed within 2000 characters, either the
+// model failed to close it at all (a generation-side bug this file can
+// only contain, not fix) or it's producing something long enough that
+// holding the ENTIRE stream hostage to it would be the worse failure
+// mode. Flushing at that point routes the abandoned '$' and everything
+// since through _render's fallback segment, where stripBareDollar strips
+// it like any other stray '$' -- degraded (unrendered math) but bounded
+// and non-blocking, not a frozen stream.
+const MATH_MAX_HOLDBACK = 2000;
+
 export class NotationNormalizer {
   constructor() {
     this._buf = '';
   }
 
-  // Streaming-safe: emits everything up to the last confirmed token
-  // boundary and holds back only a genuinely still-forming tail. Mirrors
-  // StreamingSanitizer's holdback-margin / detect-and-retract shape, but
-  // the cut point is boundary-derived rather than a fixed offset.
+  // Streaming-safe, same holdback-margin / detect-and-retract shape as
+  // every other pass in this file, decided in two tiers:
+  //
+  // 1. If the whole buffer's '$'s all resolve (findOpenMathDelimiter
+  //    returns -1), everything through the end of the LAST resolved span
+  //    is unconditionally safe -- it's a complete, alternating sequence
+  //    of plain text and closed math spans, nothing left ambiguous. The
+  //    trailing plain-text remainder (`tail`, guaranteed $-free -- see
+  //    findLastResolvedMathEnd) still needs the ORIGINAL legacy holdback
+  //    treatment, because IT can still end mid-token for any of the six
+  //    bounded constructs above -- math-span resolution says nothing
+  //    about whether "...the value fc" is done or about to become
+  //    "...fcu" on the next push(). All five lookahead adjusters run
+  //    here, not just the most common ones -- omitting any would reopen
+  //    exactly the "stream tears mid-token" bugs their own comments above
+  //    document fixing, just for the fallback-prose case this tier now
+  //    exclusively handles.
+  //
+  // 2. If there's an unresolved open '$' (findOpenMathDelimiter !== -1),
+  //    everything before it is safe for the same reason as tier 1 (same
+  //    alternating shape, just with no trailing tail -- the cut lands
+  //    precisely on a span/token boundary, never mid-word), and nothing
+  //    from the open '$' onward is safe until its close arrives -- see
+  //    MATH_MAX_HOLDBACK for the bounded exception.
   push(deltaText) {
     this._buf += deltaText;
-    let cut = findSafeCutIndex(this._buf);
-    cut = adjustCutForAsLookahead(this._buf, cut);
-    cut = adjustCutForSuperscriptLookahead(this._buf, cut);
-    cut = adjustCutForSuperscriptBaseLookahead(this._buf, cut);
-    cut = adjustCutForSubscriptBaseLookahead(this._buf, cut);
-    cut = adjustCutForSqrtBraceLookahead(this._buf, cut);
-    if (cut < 0) cut = 0;
-    if (this._buf.length - cut > MAX_HOLDBACK) {
-      cut = this._buf.length - MAX_HOLDBACK; // bounded worst case, see above
+    const openAt = findOpenMathDelimiter(this._buf);
+    let cut;
+    if (openAt === -1) {
+      const spanEnd = findLastResolvedMathEnd(this._buf);
+      const tail = this._buf.slice(spanEnd);
+      let tailCut = findSafeCutIndex(tail);
+      tailCut = adjustCutForAsLookahead(tail, tailCut);
+      tailCut = adjustCutForSuperscriptLookahead(tail, tailCut);
+      tailCut = adjustCutForSuperscriptBaseLookahead(tail, tailCut);
+      tailCut = adjustCutForSubscriptBaseLookahead(tail, tailCut);
+      tailCut = adjustCutForSqrtBraceLookahead(tail, tailCut);
+      if (tail.length - tailCut > MAX_HOLDBACK) tailCut = tail.length - MAX_HOLDBACK;
+      cut = spanEnd + tailCut;
+    } else {
+      cut = openAt;
+      if (this._buf.length - openAt > MATH_MAX_HOLDBACK) cut = this._buf.length; // safety valve, see MATH_MAX_HOLDBACK
     }
-    if (cut === 0) return { emit: '' };
+    if (cut <= 0) return { emit: '' };
     const safePart = this._buf.slice(0, cut);
     this._buf = this._buf.slice(cut);
-    const emit = stripBareDollar(applyReplacements(convertLatexSuperscripts(convertLatexSubscripts(expandGreekSubscriptBases(expandBarePsiSubscriptBase(convertSqrtBraces(safePart)))))));
-    return { emit };
+    return { emit: this._render(safePart) };
   }
 
   finish() {
     const rest = this._buf;
     this._buf = '';
-    const emit = stripBareDollar(applyReplacements(convertLatexSuperscripts(convertLatexSubscripts(expandGreekSubscriptBases(expandBarePsiSubscriptBase(convertSqrtBraces(rest)))))));
-    return { emit };
+    return { emit: this._render(rest) };
+  }
+
+  // Walks `text` left to right. A '$'/'$$' span with its matching close
+  // ALSO inside `text` -- guaranteed for every '$' push() ever hands this
+  // method, by construction of the two cut branches above -- is copied
+  // through byte-for-byte with NONE of the six legacy passes applied:
+  // that text is real LaTeX now, KaTeX's job, not this file's. Everything
+  // else -- plain prose between/around spans, or (only reachable via
+  // finish()'s end-of-stream flush, or push()'s MATH_MAX_HOLDBACK safety
+  // valve) a '$' that never found a close at all -- runs through the full
+  // six-pass pipeline in the same order the old single-pass push()/
+  // finish() always used: Pass -2 (sqrt braces), Pass -1 (bare-psi, then
+  // Greek macros), Pass 0/0.5 (subscript/superscript syntax), Pass 1/2
+  // (applyReplacements' combined table), then stripBareDollar last --
+  // which is exactly what strips an abandoned/never-closed '$' down to
+  // nothing (unless a digit follows it, preserving genuine "$5/mo"-style
+  // currency) instead of leaking a literal '$' into a reply where '$' now
+  // means "LaTeX begins here" to the client.
+  _render(text) {
+    let out = '', i = 0;
+    while (i < text.length) {
+      if (text[i] === '$' && text[i - 1] !== '\\') {
+        const isDisplay = text[i + 1] === '$';
+        const delim = isDisplay ? '$$' : '$';
+        const close = findUnescapedDelim(text, delim, i + delim.length);
+        if (close !== -1) {
+          out += text.slice(i, close + delim.length);
+          i = close + delim.length;
+          continue;
+        }
+      }
+      let next = text.indexOf('$', i + 1);
+      if (next === -1) next = text.length;
+      const segment = text.slice(i, next);
+      out += stripBareDollar(applyReplacements(convertLatexSuperscripts(convertLatexSubscripts(
+        expandGreekSubscriptBases(expandBarePsiSubscriptBase(convertSqrtBraces(segment)))))));
+      i = next;
+    }
+    return out;
   }
 }

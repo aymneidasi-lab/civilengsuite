@@ -4,6 +4,7 @@
   "exclude": [
     "/images/*",
     "/fonts/*",
+    "/vendor/katex/*",
     "/footing-pro/images/*",
     "/footing-pro/engineers/*",
     "/footing-pro/offices/*",

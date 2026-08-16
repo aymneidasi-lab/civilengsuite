@@ -40,6 +40,17 @@
 #      That file ALSO needs microphone=() → microphone=(self) to unblock mic on the
 #      encrypted app pages. See functions/[[path]].js → SHARED_SECURITY_HEADERS.
 
+#
+# FIX LOG (2026-08-16): KATEX VENDOR ASSET CACHING
+# [K1] Added /vendor/katex/* block: immutable long-term caching for the
+#      pinned, content-stable KaTeX assets (fonts/CSS/JS), fetched lazily
+#      on first chat math render. Uses "! Cache-Control" to detach the
+#      /* catch-all's value first — Cloudflare Pages joins duplicate
+#      header names across matching blocks with a comma rather than
+#      overriding them (see Cloudflare Pages docs, Headers > "Detach a
+#      header"), so a plain restate here would have produced a doubled,
+#      malformed Cache-Control instead of the intended long-cache value.
+
 # [F2] Default cache + security for all static HTML pages
 /*
   X-Frame-Options: DENY
@@ -85,6 +96,11 @@
   Cache-Control: public, max-age=31536000, immutable
   Cross-Origin-Resource-Policy: cross-origin
   Access-Control-Allow-Origin: *
+
+# [K1] KaTeX vendor assets — pinned version, content-stable, lazy-fetched
+/vendor/katex/*
+  ! Cache-Control
+  Cache-Control: public, max-age=31536000, immutable
 
 /images/*
   Cache-Control: public, max-age=31536000, immutable
