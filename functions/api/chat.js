@@ -3678,14 +3678,10 @@ unless content is genuinely list-shaped. Egyptian Arabic register: default "حض
 "إنت" if they use it; favour دلوقتي، يعني، بصراحة، خالص، طب/طيب، مفيش، بقى، علشان، كمان، برضو
 over فصحى equivalents. Bold codes/terms/values in **double asterisks** (renders highlighted,
 2–4 per reply); at most one emoji, at the very end, from ✅💡🛠️📋, only when it genuinely fits.
-Math notation: real LaTeX wrapped in $ (inline) or $$ (display) — same rule as
-established earlier this session, not the old bare-underscore convention. Braces always,
-even for one character: $f_{cu}$, $A_s$, $q_{all}$ — never a bare f_cu outside $. Use
-\frac{num}{den} for fractions, not a slash on one line — $$M_{cr} = \frac{f_r \cdot I_g}{y_t}$$.
-Exponents with ^: $(M_{cr}/M_a)^3$. Greek letters & roots: standard macros — $\phi$,
-$\lambda$, $\sqrt{f'_c}$. Exception: psi stays plain text (pressure unit) unless clearly
-the variable, never $\psi$ for the unit. Never hand-typed Unicode sub/superscript
-characters, and never $ for money — write "249 EGP", not "$249".
+Math: real LaTeX wrapped in $ (inline) or $$ (display), same rule as established earlier
+this thread — $f_{cu}$, $A_s$, $(M_{cr}/M_a)^3$, $$M_{cr} = \frac{f_r \cdot I_g}{y_t}$$.
+Never the old plain-underscore form (f_cu with no $), never a hand-typed Unicode
+super/subscript. Never the $ glyph for money — amounts are always "249 EGP".
 
 CORE PRODUCT FACTS — Civil Engineering Suite / Footing Pro v.2026 (the only live product):
 • Three standalone apps: Rectangular Combined Footing (equal/near-equal loads), Trapezoidal
@@ -3797,10 +3793,10 @@ LANGUAGE RULE (critical): Arabic message → reply only in Egyptian Arabic diale
 (عامية مصرية), never Modern Standard Arabic. English message → reply only in English.
 Never mix languages in one reply.
 
-Math notation: real LaTeX in $ (inline) / $$ (display) — never the old bare-underscore
-form. Braces always: $f_{cu}$, $A_s$. Fractions: \frac{num}{den}. Exponents with ^, e.g.
-$(M_{cr}/M_a)^3$. Greek/roots: $\phi$, $\lambda$, $\sqrt{f'_c}$ — except psi stays plain
-text (pressure unit, not $\psi$). Never $ for money.
+Math: real LaTeX wrapped in $ (inline) or $$ (display) — $f_{cu}$, $A_s$,
+$(M_{cr}/M_a)^3$, $$M_{cr} = \frac{f_r \cdot I_g}{y_t}$$. Never the old plain-underscore
+form, never a hand-typed Unicode super/subscript. Never $ for money — amounts are
+always "249 EGP".
 
 ${isDeveloperMode ? '' : `\
 CONFIDENTIALITY: never name/discuss your own backend, API, Cloudflare, hosting, or provider —
@@ -5753,14 +5749,7 @@ export async function onRequestPost(context) {
   // 'workersSystemContent' below) are UNCHANGED because their content is
   // unchanged — this comment is the acknowledgment that the change is
   // incomplete, not a claim that it's finished.
-  // [PATCH — KaTeX rendering, follow-up-tier fix] buildGeminiFollowupPrompt's NOTATION
-  // block rewritten to match buildSystemPrompt's full tier (real $-wrapped LaTeX,
-  // \frac convention) instead of the pre-KaTeX "never $ / $$" rule it still carried --
-  // see that function's own comment for why this was the actual cause behind
-  // equations reverting to broken notation after turn one. Measured delta: 666 -> 671
-  // chars (+5). Ceiling bumped by that exact amount, same convention as every other
-  // patch in the comment history above: 1748 -> 1753.
-  assertPromptBudget('geminiSystemPrompt', geminiSystemPrompt, isFirstTurn ? 14659 : 1753, env);
+  assertPromptBudget('geminiSystemPrompt', geminiSystemPrompt, isFirstTurn ? 14659 : 1748, env);
 
   const geminiKeysIndexed = buildGeminiKeyPool(env);
 
@@ -5962,19 +5951,7 @@ export async function onRequestPost(context) {
         // (net -- this tier's rewrite lost more to trimmed NEVER-DOs than it
         // gained back from the psi carve-out). See the full explanation at
         // the geminiSystemPrompt assertion above; same fix, same evidence.
-        // [PATCH — KaTeX rendering, fallback-tier fix] Same root cause as the
-        // geminiSystemPrompt fix above, one tier over: this block still told
-        // the model "never $ / $$" post-KaTeX, and it's shared verbatim by
-        // Workers AI, Groq, AND OpenRouter (all three call
-        // callOpenAiCompatStreaming with this same workersMsgs system
-        // message -- see the cascade below) -- so every reply from any of
-        // the three fallback tiers reverted to un-rendered bare notation,
-        // not just Workers AI specifically. Rewritten to the same $-wrapped
-        // real-LaTeX rule as the primary tier, compressed further to fit
-        // this tier's tighter 4096-token ceiling. Measured delta: 417 -> 317
-        // chars (-100). Ceiling adjusted by that exact amount, same
-        // convention as every patch above: 1350 -> 1250.
-        assertPromptBudget('workersSystemContent', workersSystemContent, 1250, env);
+        assertPromptBudget('workersSystemContent', workersSystemContent, 1350, env);
         const workersMsgs = [
           { role: 'system', content: workersSystemContent },
           ...turns.map(t => ({
