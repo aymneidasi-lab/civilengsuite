@@ -190,14 +190,23 @@ const BARE_LATEX_MACROS = {
   // zero-argument substitution exactly like '\times'/'\phi' above, NOT an
   // argument-extracting macro -- this table has never done argument
   // extraction and this entry doesn't start now (see the file header's
-  // note on why that's out of scope). The model supplies its own
-  // parentheses after it (chat.js's prompt now teaches \sqrt(...), not
-  // \sqrt{...}); '\sqrt(f\'_c)' becomes '√(f\'_c)' the same way
-  // '\times' becomes '×' -- one macro token swapped for one glyph,
-  // nothing else in the string touched. A model that reaches for real
-  // LaTeX's braced '\sqrt{...}' out of training habit anyway is still
-  // covered -- see convertSqrtBraces/SQRT_BRACE_RE below, which rewrites
-  // that form down to this same bare form before this table ever runs.
+  // note on why that's out of scope). This bare-macro entry now fires
+  // ONLY on the outside-$ fallback path (see [PATCH — KaTeX rendering] at
+  // the file header) -- current chat.js prompts teach \sqrt{f'_c} wrapped
+  // in $ / $$, real braced KaTeX syntax, which _render's math-span branch
+  // passes through untouched. This entry's job is narrower now: a reply
+  // (or a fallback-tier reply still on the pre-KaTeX convention) that
+  // writes bare "\sqrt(f'_c)" with no $ wrapping at all still degrades to
+  // a readable "√(f'_c)" instead of leaking a literal backslash-macro.
+  // '\sqrt(f\'_c)' becomes '√(f\'_c)' the same way '\times' becomes '×'
+  // -- one macro token swapped for one glyph, nothing else in the string
+  // touched. A model that reaches for real LaTeX's braced '\sqrt{...}'
+  // out of training habit anyway, OUTSIDE $, is still covered -- see
+  // convertSqrtBraces/SQRT_BRACE_RE below, which rewrites that form down
+  // to this same bare form before this table ever runs. (Inside a
+  // resolved $ span, convertSqrtBraces never runs at all -- see _render
+  // -- so a correctly-$-wrapped \sqrt{f'_c} reaches KaTeX with its braces
+  // intact, as it must.)
   '\\sqrt': '\u221A',
 };
 

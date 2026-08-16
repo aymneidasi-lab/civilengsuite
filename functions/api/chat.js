@@ -3678,14 +3678,14 @@ unless content is genuinely list-shaped. Egyptian Arabic register: default "حض
 "إنت" if they use it; favour دلوقتي، يعني، بصراحة، خالص، طب/طيب، مفيش، بقى، علشان، كمان، برضو
 over فصحى equivalents. Bold codes/terms/values in **double asterisks** (renders highlighted,
 2–4 per reply); at most one emoji, at the very end, from ✅💡🛠️📋, only when it genuinely fits.
-Subscripted symbols: plain underscore form only — f_cu, A_s, P_u, q_u — never $ / $$
-delimiters and never a hand-typed Unicode super/subscript character; the app renders the
-real subscript from the plain underscore automatically, same rule as established earlier.
-Exponents: plain caret, base^exp — including after a closing bracket, e.g. (M_cr/M_a)^3 —
-never a hand-typed ³ ² ⁿ; the app raises it the same automatic way. Greek letters &
-square roots: plain word or backslash form both convert — lambda/\lambda, alpha_s/
-\alpha_s, sqrt(...)/\sqrt(...) — use whichever's natural. Exception: psi needs \psi
-(bare "psi" is left alone — it doubles as the pressure unit).
+NOTATION — real LaTeX now, not plain underscore (client has a KaTeX renderer): wrap
+every symbol, subscript, superscript, fraction, or full equation in $ (inline) or $$
+(display) — $f_{cu}$, $A_s$, $(M_{cr}/M_a)^3$ — braces always, even for one character;
+never a bare f_cu outside $ and never a hand-typed ³ ² ⁿ Unicode character. Fractions:
+\frac{num}{den} in display form — $$M_{cr} = \frac{f_r \cdot I_g}{y_t}$$. Greek letters
+& roots: standard macros — $\phi$, $\lambda$, $\sqrt{f'_c}$. Exception: psi stays plain
+text ("qall = 2500 psi") when it's the pressure unit, not $\psi$. $ now always means
+"LaTeX begins here" — never money; write prices in words ("249 EGP").
 
 CORE PRODUCT FACTS — Civil Engineering Suite / Footing Pro v.2026 (the only live product):
 • Three standalone apps: Rectangular Combined Footing (equal/near-equal loads), Trapezoidal
@@ -3797,11 +3797,11 @@ LANGUAGE RULE (critical): Arabic message → reply only in Egyptian Arabic diale
 (عامية مصرية), never Modern Standard Arabic. English message → reply only in English.
 Never mix languages in one reply.
 
-Subscripted symbols: plain underscore only — f_cu, A_s, P_u, q_all — never $ / $$ or a
-hand-typed Unicode super/subscript character. Exponents: plain caret, base^exp — even
-after a closing bracket, (M_cr/M_a)^3 — never a hand-typed ³ ² ⁿ. Greek letters &
-square roots: plain word (lambda, alpha_s, sqrt(...)) or backslash form both convert,
-use either — except psi, which needs \psi (bare "psi" is the pressure unit).
+NOTATION: real LaTeX now, not plain underscore — wrap every symbol/subscript/
+superscript/fraction in $ (inline) or $$ (display), braces always: $f_{cu}$, $A_s$,
+$(M_{cr}/M_a)^3$, $$M_{cr}=\frac{f_r \cdot I_g}{y_t}$$. Greek/roots use standard macros
+($\phi$, $\sqrt{f'_c}$); psi stays plain text as the pressure unit, not $\psi$. $ now
+means LaTeX, never money — write prices in words ("249 EGP").
 
 ${isDeveloperMode ? '' : `\
 CONFIDENTIALITY: never name/discuss your own backend, API, Cloudflare, hosting, or provider —
@@ -5744,17 +5744,15 @@ export async function onRequestPost(context) {
   // pre-patch block text (3256 -> 2104 chars). Ceiling lowered by that
   // exact amount, same acknowledged-change convention as every patch
   // above: 15811 -> 14659.
-  // NOT yet applied: buildGeminiFollowupPrompt's condensed tier (~line
-  // 3687) and buildWorkersAiSystemPrompt's condensed tier (~line 3806)
-  // still teach the pre-KaTeX plain-underscore convention and explicitly
-  // tell the model $ delimiters are unsupported — now false. Until those
-  // are patched to match, a conversation gets real LaTeX on turn one and
-  // reverts to broken pseudo-notation (or a fallback provider serving it
-  // from turn one) on every turn after. Their ceilings (1748 here;
-  // 'workersSystemContent' below) are UNCHANGED because their content is
-  // unchanged — this comment is the acknowledgment that the change is
-  // incomplete, not a claim that it's finished.
-  assertPromptBudget('geminiSystemPrompt', geminiSystemPrompt, isFirstTurn ? 14659 : 1748, env);
+  // [PATCH — KaTeX tier sync] buildGeminiFollowupPrompt's condensed NOTATION
+  // block rewritten to match buildSystemPrompt (full tier): real LaTeX in $/$$
+  // instead of the pre-KaTeX plain-underscore convention. Closes the turn-one/
+  // turn-two inconsistency flagged above — was: real LaTeX on turn one,
+  // reverted to broken pseudo-notation on every turn after. Net +7 chars
+  // (measured, 666 -> 673). Ceiling raised by that exact amount: 1748 -> 1755.
+  // buildWorkersAiSystemPrompt's condensed tier patched the same way — see its
+  // own assertPromptBudget call below for that delta.
+  assertPromptBudget('geminiSystemPrompt', geminiSystemPrompt, isFirstTurn ? 14659 : 1755, env);
 
   const geminiKeysIndexed = buildGeminiKeyPool(env);
 
@@ -5956,7 +5954,14 @@ export async function onRequestPost(context) {
         // (net -- this tier's rewrite lost more to trimmed NEVER-DOs than it
         // gained back from the psi carve-out). See the full explanation at
         // the geminiSystemPrompt assertion above; same fix, same evidence.
-        assertPromptBudget('workersSystemContent', workersSystemContent, 1350, env);
+        // [PATCH — KaTeX tier sync] NOTATION block rewritten to the same real-
+        // LaTeX-in-$/$$ convention as buildSystemPrompt/buildGeminiFollowupPrompt
+        // (was still pre-KaTeX plain-underscore, explicitly telling the model $
+        // is unsupported — now false, same gap the geminiSystemPrompt comment
+        // above documents). Net -20 chars (measured, 417 -> 397, this tier's
+        // condensed form trims more than it adds). Ceiling lowered by that
+        // exact amount: 1350 -> 1330.
+        assertPromptBudget('workersSystemContent', workersSystemContent, 1330, env);
         const workersMsgs = [
           { role: 'system', content: workersSystemContent },
           ...turns.map(t => ({
