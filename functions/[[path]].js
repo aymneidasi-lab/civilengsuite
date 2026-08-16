@@ -1266,7 +1266,7 @@ export async function onRequest(context) {
   //      These paths MUST NOT be in ROUTES — they are plain static files with no
   //      .enc decryption required. _headers rules for /footing-pro/engineers/*
   //      apply directly (Cloudflare Pages _headers applies to static responses).
-  const STATIC_PASSTHROUGH = /^\/(?:robots\.txt|manifest\.json|favicon\.ico|og-image\.png|images\/.*|footing-pro\/images\/.*|footing-pro\/engineers\/?.*|footing-pro\/offices\/?.*|footing-pro\/students\/?.*|beam-pro\/images\/.*|column-pro\/images\/.*|deflection-pro\/images\/.*|earthquake-pro\/images\/.*|mur-pro\/images\/.*|add-reft-pro\/images\/.*|section-property-pro\/images\/.*|google[0-9a-f]+\.html|sitemap\.xsl|fonts\/.*|vendor\/katex\/.*|\.well-known\/.*|payment(?:\/.*)?|api\/payment\/.*|api\/track)$/i;
+  const STATIC_PASSTHROUGH = /^\/(?:robots\.txt|manifest\.json|favicon\.ico|og-image\.png|images\/.*|footing-pro\/images\/.*|footing-pro\/engineers\/?.*|footing-pro\/offices\/?.*|footing-pro\/students\/?.*|beam-pro\/images\/.*|column-pro\/images\/.*|deflection-pro\/images\/.*|earthquake-pro\/images\/.*|mur-pro\/images\/.*|add-reft-pro\/images\/.*|section-property-pro\/images\/.*|google[0-9a-f]+\.html|sitemap\.xsl|fonts\/.*|\.well-known\/.*|payment(?:\/.*)?|api\/payment\/.*|api\/track)$/i;
   if (STATIC_PASSTHROUGH.test(path)) return context.next();
 
   // ── [S1] Sitemap — explicit handler with clean minimal headers ───────────

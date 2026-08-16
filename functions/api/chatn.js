@@ -1186,35 +1186,6 @@ import {
   markGroundingBroken,    // [PATCH — grounding fail-open]
   classifyProviderResult, // [PATCH — consolidation, see OpenRouter/Groq blocks below]
 } from '../_lib/rotation.mjs';
-import { validateImagePrompt, generateImageWorkersAI } from '../_lib/imageGen.mjs';
-import {
-  classifyFootingDiagram, buildFootingDiagramSvg, svgToDataUri,
-  parseDiagramCommand, renderFootingDiagramSVG,
-} from '../_lib/footingDiagram.mjs';
-
-// Bilingual wrapper for footingDiagram.mjs's DiagramError codes (+
-// parseDiagramCommand's own UNSUPPORTED_TYPE). English relays the
-// DiagramError message directly — it already names the exact bad
-// parameter and value, which a translated category label would only
-// obscure. Arabic gives the category in Arabic and keeps the same
-// specific (parameter-name/number) detail verbatim afterward, since
-// parameter names and numbers are Latin/ASCII by convention throughout
-// this feature (see footingDiagram.mjs's header) and don't need
-// translating.
-function computedDiagramErrorMessage(code, englishDetail, arabic) {
-  if (!arabic) return englishDetail || 'Invalid diagram parameters.';
-  const AR = {
-    BAD_PARAM        : 'قيمة غير صالحة',
-    BAD_UNIT         : 'وحدة قياس غير معروفة',
-    COLUMN_TOO_WIDE  : 'عرض العمود أكبر من عرض القاعدة',
-    COLUMN_OUT_OF_BOUNDS: 'موضع العمود خارج حدود القاعدة',
-    COLUMNS_OVERLAP  : 'تداخل بين العمودين',
-    NO_ROOM_FOR_BARS : 'لا يوجد مسافة كافية لتسليح مع هذا الغطاء الخرساني وقطر السيخ',
-    UNSUPPORTED_TYPE : 'نوع القاعدة غير مدعوم — استخدم isolated أو combined',
-  };
-  const label = AR[code] || 'قيم غير صالحة';
-  return `${label} (${englishDetail || code})`;
-}
 
 // [v27] Session save/load/list/delete logic — extracted to
 // functions/_lib/sessions.mjs so chat.js and the dedicated
@@ -2259,7 +2230,7 @@ Egyptian-Arabic worked example (match this register, not فصحى):
 **effective depth** أو تستخدم **drop panel**. إيه رأيك؟ 🛠️"
 
 ════════════════════════════════════════
-NOTATION — SUBSCRIPT, EXPONENT, GREEK & ROOT SYMBOLS (CRITICAL)
+NOTATION — SUBSCRIPTED ENGINEERING SYMBOLS (CRITICAL)
 ════════════════════════════════════════
 The client has no LaTeX/math renderer. Write every subscripted symbol as plain
 base_sub with a literal underscore, nothing else around it — the app converts this
@@ -2267,9 +2238,8 @@ automatically into a real lowered subscript before the person sees it. You never
 to (and must not) do any subscript formatting by hand.
 
 DO: fcu -> write f_cu · fy -> write f_y · Ac -> write A_c · Pu -> write P_u ·
-qu -> write q_u · qall -> write q_all · f'c -> write f'_c, prime mark included exactly
-like that. Braces (f_{cu}) also work if that's what comes out naturally — either form
-is fine, plain f_cu is simplest.
+qu -> write q_u · qall -> write q_all. Braces (f_{cu}) also work if that's what
+comes out naturally — either form is fine, plain f_cu is simplest.
 
 NEVER DO:
 • Wrap any part of a reply in $ or $$ (LaTeX math-mode delimiters) — "$f_cu$",
@@ -2278,33 +2248,17 @@ NEVER DO:
 • Manually type a Unicode superscript/subscript character yourself (ᶜ ᵘ ⁿ ₐ ᵗ or
   similar small raised/lowered letters) to fake the look of a subscript. Always the
   plain underscore form above — never hand-pick a Unicode glyph for this.
-Both mistakes are things models trained on LaTeX-heavy math text drift toward by
-habit; this product specifically needs the plain underscore form every time, with
-no exceptions for "just this once" or "it looked more correct this way."
+• In an Arabic reply, spell the symbol out phonetically in Arabic letters instead of
+  writing the Latin token — "إف سي يو" or "أف سي يو" for f_cu, "بي يو" for P_u. f_cu
+  is a Latin engineering symbol, not an English word to transliterate; embed it as-is
+  inside the Arabic sentence, exactly like ACI 318-19 or ECP 203 stay untransliterated.
+All three mistakes are things models drift toward by habit — the first two from
+LaTeX-heavy math training data, the third from transliterating technical terms when
+writing in Arabic prose. This product needs the plain Latin underscore form every
+time, with no exceptions for "just this once" or "it looked more correct this way."
 Worked example: "لازم الـ **f_cu** يكون أكبر من 20 ميجاباسكال عشان الكود يعدي." renders
-with cu correctly lowered under the f — never write "fᶜᵘ" or "$f_{cu}$" instead.
-
-EXPONENTS work the same way, with a literal caret instead of an underscore: base^exp,
-nothing else around it — the app raises this automatically too. This includes a
-parenthesized or bracketed base — write the caret right after the closing bracket,
-e.g. (M_cr / M_a)^3, exactly like that. Braces cover a longer exponent: 10^{-3}. Same
-rule as subscripts: never hand-type a raised digit yourself (³ ² ⁿ) to fake the look —
-always plain-caret text, every time, including after a bracket, with no exceptions.
-Worked example: "الترخيم النهائي بيتحسب من (M_cr / M_a)^3 في معادلة برانسون." renders
-with a real raised 3 — never write "(M_cr / M_a)³" or wrap it in $ instead.
-
-GREEK LETTERS & SQUARE ROOTS: the app converts these two ways, so use whichever comes
-naturally — the plain word (lambda, phi, alpha_s, sqrt(f'_c)) or the backslash macro
-(\lambda, \phi, \alpha_s, \sqrt(f'_c)); both land on the same real symbol, and the two
-can be mixed freely within one reply. A Greek base can carry a subscript either way:
-alpha_s -> α with a lowered s, same as \alpha_s. One exception: psi needs the
-backslash form, \psi — plain "psi" is left alone on purpose, since it doubles as this
-domain's abbreviation for pounds-per-square-inch ("qall = 2500 psi") and converting
-that would break it. \sqrt(...) or \sqrt{...} both work; parentheses are simplest
-since \sqrt takes no argument the way a real LaTeX \frac would.
-Worked example: "قوة القص بتتحسب من lambda × sqrt(f'_c)، ومعامل alpha_s بيعتمد على
-موقع العمود." renders with a real λ, √, and α with a lowered s automatically — no
-special formatting needed beyond writing it plainly like that.
+with cu correctly lowered under the f — never write "fᶜᵘ", "$f_{cu}$", or "إف سي يو"
+instead.
 
 ════════════════════════════════════════
 ARABIC DIALECT TRAINING — EGYPTIAN (عامية مصرية)
@@ -3685,13 +3639,9 @@ unless content is genuinely list-shaped. Egyptian Arabic register: default "حض
 over فصحى equivalents. Bold codes/terms/values in **double asterisks** (renders highlighted,
 2–4 per reply); at most one emoji, at the very end, from ✅💡🛠️📋, only when it genuinely fits.
 Subscripted symbols: plain underscore form only — f_cu, A_s, P_u, q_u — never $ / $$
-delimiters and never a hand-typed Unicode super/subscript character; the app renders the
-real subscript from the plain underscore automatically, same rule as established earlier.
-Exponents: plain caret, base^exp — including after a closing bracket, e.g. (M_cr/M_a)^3 —
-never a hand-typed ³ ² ⁿ; the app raises it the same automatic way. Greek letters &
-square roots: plain word or backslash form both convert — lambda/\lambda, alpha_s/
-\alpha_s, sqrt(...)/\sqrt(...) — use whichever's natural. Exception: psi needs \psi
-(bare "psi" is left alone — it doubles as the pressure unit).
+delimiters, never a hand-typed Unicode super/subscript character, and never spelled out
+phonetically in Arabic letters (no "إف سي يو" for f_cu) — keep the Latin token as-is in
+Arabic sentences; the app renders the real subscript automatically, same rule as earlier.
 
 CORE PRODUCT FACTS — Civil Engineering Suite / Footing Pro v.2026 (the only live product):
 • Three standalone apps: Rectangular Combined Footing (equal/near-equal loads), Trapezoidal
@@ -3803,11 +3753,9 @@ LANGUAGE RULE (critical): Arabic message → reply only in Egyptian Arabic diale
 (عامية مصرية), never Modern Standard Arabic. English message → reply only in English.
 Never mix languages in one reply.
 
-Subscripted symbols: plain underscore only — f_cu, A_s, P_u, q_all — never $ / $$ or a
-hand-typed Unicode super/subscript character. Exponents: plain caret, base^exp — even
-after a closing bracket, (M_cr/M_a)^3 — never a hand-typed ³ ² ⁿ. Greek letters &
-square roots: plain word (lambda, alpha_s, sqrt(...)) or backslash form both convert,
-use either — except psi, which needs \psi (bare "psi" is the pressure unit).
+Subscripted symbols: plain underscore only — f_cu, A_s, P_u, q_all — never $ / $$, a
+hand-typed Unicode super/subscript character, or an Arabic phonetic spelling like
+"إف سي يو" — keep the Latin token as-is.
 
 ${isDeveloperMode ? '' : `\
 CONFIDENTIALITY: never name/discuss your own backend, API, Cloudflare, hosting, or provider —
@@ -5249,228 +5197,6 @@ export async function onRequestPost(context) {
     );
   }
 
-  // 3b-5. Image generation short-circuit. [NEW — Image Generation feature]
-  //     Client sends { mode: 'image', prompt: '<text>' }. A dedicated
-  //     field, not a repurposed body.message: this branch sits after the
-  //     natural-language save/load/list triggers (3b-2/3/4) above, which
-  //     inspect body.message — reusing that field here would let an image
-  //     prompt that happened to match one of those regexes (e.g. while
-  //     devMode is on) get silently hijacked into a session command
-  //     instead of reaching this branch.
-  //     Deliberately NOT devMode-gated — the chat cascade below is public
-  //     too (see checkRateLimit's own comment: availability for real
-  //     visitors outranks strict enforcement for a sales/support chatbot).
-  //     Returns ONE buffered JSON response — not the SSE stream every
-  //     other reply on this endpoint uses — specifically so a non-browser
-  //     caller (an Excel VBA UserForm over MSXML2.XMLHTTP/WinHTTP, no
-  //     chunked-stream reader available) can POST this same body shape
-  //     and parse the same flat JSON fields a browser client does, with
-  //     zero VBA-side SSE handling ever needing to exist. Runs through
-  //     env.AI only, via _lib/imageGen.mjs — no Gemini/Groq/OpenRouter
-  //     fallback if Workers AI is unavailable, by design: falling back to
-  //     a paid-capable provider here would quietly break the zero-cost
-  //     guarantee this feature exists under.
-  if (body.mode === 'image') {
-    const promptCheck = validateImagePrompt(body.prompt);
-    if (!promptCheck.ok) {
-      const msg = promptCheck.code === 'PROMPT_TOO_LONG'
-        ? (likelyArabic
-          ? `الوصف لازم يكون ${promptCheck.maxChars} حرف أو أقل.`
-          : `Prompt must be ${promptCheck.maxChars} characters or fewer.`)
-        : (likelyArabic
-          ? 'من فضلك اوصف الصورة اللي عايزها.'
-          : 'Please describe the image you want.');
-      return json({ ok: false, error: msg, code: promptCheck.code }, 400, undefined, request);
-    }
-
-    // Deterministic-diagram short-circuit. [NEW — fixes the live bug
-    // report: "draw combined footing" returning an unrelated
-    // building-interior sketch.] Checked BEFORE the Workers-AI rate
-    // bucket below and BEFORE generateImageWorkersAI() is ever called —
-    // not a post-hoc filter on the diffusion model's output. See
-    // _lib/footingDiagram.mjs's header for why this is a routing fix, not
-    // a prompt-wording fix: flux-1-schnell / stable-diffusion-xl-lightning
-    // have ~no training signal for "combined footing"-class content, so
-    // no prompt string fixes it — the two prior prompt patches documented
-    // in imageGen.mjs each fixed a different symptom of the same
-    // underlying gap without closing it. For the closed set of structural
-    // elements this product actually ships, skip the model entirely and
-    // return a hand-authored SVG instead: free (no Workers AI neurons
-    // spent, so it does not touch the :image rate bucket below — only
-    // the general per-IP limiter already applied earlier in this handler
-    // covers it), instant, and correct by construction every time instead
-    // of on a per-request roll of a 4-step diffusion model. Any prompt
-    // that does NOT match a known type — imageGen.mjs's own "golden
-    // retriever wearing sunglasses" example — falls through unchanged to
-    // the exact diffusion path that existed before this patch.
-    const diagramType = classifyFootingDiagram(promptCheck.prompt);
-
-    // strip and raft ARE real, fully-supported /diagram types (see
-    // computeStripFootingGeometry / computeRaftFootingGeometry in
-    // footingDiagram.mjs) but their column count and layout vary too much
-    // between real projects for a fixed "generic" picture to be honestly
-    // representative the way the other four types' generic templates are
-    // — a combined footing is always exactly 2 columns on one centerline;
-    // a strip or raft could be 2 columns or 8, in a row or a grid.
-    // Guessing a layout here would be exactly the "confident but wrong"
-    // failure imageGen.mjs's PROMPT ITERATION 2 comment already documents
-    // fixing once, just relocated from a diffusion model's pixels to this
-    // module's arithmetic. classifyFootingDiagram still recognizes both
-    // (so the request doesn't silently fall through to the diffusion
-    // model for a term the glossary below already disambiguates
-    // correctly) but points at the tool that actually needs from the user
-    // instead of drawing something that might not match what they meant.
-    if (diagramType === 'strip' || diagramType === 'raft') {
-      const example = diagramType === 'strip'
-        ? '/diagram strip B=900 L=7500 D=450 cols=3 col1b=350 col1l=350 col1off=750 col2b=350 col2l=350 col2off=3750 col3b=350 col3l=350 col3off=6750 cover=50 dia=14 spacing=150'
-        : '/diagram raft B=6000 L=9000 D=500 cols=4 col1b=400 col1l=400 col1offx=1000 col1offy=1000 col2b=400 col2l=400 col2offx=1000 col2offy=5000 col3b=400 col3l=400 col3offx=5000 col3offy=1000 col4b=400 col4l=400 col4offx=5000 col4offy=5000 cover=75 dia=16 spacing=200';
-      const arType = diagramType === 'strip' ? 'القاعدة الشريطية تحت الحائط' : 'قاعدة اللبشة';
-      return json(
-        {
-          ok   : false,
-          code : 'USE_DIAGRAM_COMMAND',
-          error: likelyArabic
-            ? `${arType} بتختلف كتير في عدد وترتيب الأعمدة من مشروع لمشروع، فمينفعش نرسملها شكل عام. استخدم أمر /diagram بأبعادك الفعلية، مثلاً:\n${example}`
-            : `${diagramType === 'strip' ? 'Strip' : 'Raft'} footings vary too much in column count/layout for a generic drawing. Use the /diagram command with your actual dimensions, for example:\n${example}`,
-        },
-        400, undefined, request,
-      );
-    }
-    if (diagramType) {
-      const svg = buildFootingDiagramSvg(diagramType, likelyArabic ? 'ar' : 'en');
-      return json(
-        {
-          ok      : true,
-          dataUri : svgToDataUri(svg),
-          mimeType: 'image/svg+xml',
-          source  : 'deterministic-template:' + diagramType,
-        },
-        200, undefined, request,
-      );
-    }
-
-    // Computed-diagram short-circuit. Same rationale as the
-    // deterministic-template block just above — answer directly instead
-    // of asking a diffusion model to draw something it has no reliable
-    // training signal for — but for isolated/combined/strip/raft footings
-    // built from the exact numbers a user supplies (B=/L=/D=/cover=/dia=/
-    // spacing=/...), not a fixed catalog of generic types. Both this
-    // block and classifyFootingDiagram above now import from the single
-    // footingDiagram.mjs (see that import at the top of this file) — they
-    // used to resolve to two different files that both claimed the same
-    // import path, which silently broke this endpoint's module load
-    // entirely (an ES import of a name the target module doesn't export
-    // is a load-time failure, not a runtime null) until the export names
-    // and the import path were reconciled into one file.
-    //
-    // Strict ASCII `type key=value key=value ...` syntax only
-    // (parseDiagramCommand's own rationale: no NLP ambiguity on the
-    // numbers that matter). BAD_SYNTAX means the prompt wasn't an
-    // attempt at this syntax at all — falls through unchanged to
-    // classifyFootingDiagram above / the diffusion model below, exactly
-    // like every other prompt. Any OTHER failure code means the user
-    // clearly attempted the command syntax and got a parameter wrong;
-    // that is answered directly, not handed to the diffusion model as a
-    // raw "isolated b=... l=..." art prompt (which would both burn a
-    // rate-limited image slot and produce nothing useful).
-    let diagramCmd;
-    try {
-      diagramCmd = parseDiagramCommand(promptCheck.prompt);
-    } catch (err) {
-      // Programmer-error path only (see that function's own catch block
-      // — a genuine DiagramError never reaches here). Log and fall
-      // through to the existing behavior rather than 500 the request.
-      console.error('[chat.js] parseDiagramCommand threw unexpectedly:', err);
-      diagramCmd = { ok: false, code: 'BAD_SYNTAX' };
-    }
-    if (diagramCmd.ok) {
-      const svg = renderFootingDiagramSVG(diagramCmd.geometry, { lang: likelyArabic ? 'ar' : 'en' });
-      return json(
-        {
-          ok      : true,
-          dataUri : svgToDataUri(svg),
-          mimeType: 'image/svg+xml',
-          source  : 'computed-template:' + diagramCmd.type,
-        },
-        200, undefined, request,
-      );
-    }
-    if (diagramCmd.code !== 'BAD_SYNTAX') {
-      return json(
-        {
-          ok   : false,
-          error: computedDiagramErrorMessage(diagramCmd.code, diagramCmd.message, likelyArabic),
-          code : diagramCmd.code,
-        },
-        400, undefined, request,
-      );
-    }
-
-    // Independent of, and stricter than, the general 8-per-60s limiter
-    // step 1 applies to every request. One flux-1-schnell image costs on
-    // the order of several dozen Workers AI neurons — well above one
-    // Layer-3 text reply — against the SAME shared 10,000-neuron/day free
-    // pool, so the general limiter alone does not adequately bound this
-    // feature's worst-case draw on it. Keyed with a ':image' suffix (not
-    // just clientIp) so this bucket is namespaced independently of the
-    // general limiter's own KV keys by construction — not by relying on
-    // two different windowSeconds values happening to produce different
-    // bucket numbers most of the time.
-    const imageRateCheck = await checkRateLimit(env, clientIp + ':image', { windowSeconds: 3600, maxPerWindow: 3 });
-    if (imageRateCheck.limited) {
-      return json(
-        {
-          ok: false,
-          error: likelyArabic
-            ? 'صور كتير بسرعة. استنى شوية وحاول تاني.'
-            : 'Too many image requests too quickly. Please wait a bit and try again.',
-          code: 'IMAGE_RATE_LIMITED',
-        },
-        429, undefined, request,
-      );
-    }
-
-    const imageResult = await generateImageWorkersAI(env.AI, promptCheck.prompt);
-    if (!imageResult.ok) {
-      console.error('[chat.js] Image generation failed:', imageResult.errStatus, imageResult.errBody);
-      if (imageResult.errStatus === 'NOT_BOUND') {
-        return json(
-          {
-            ok: false,
-            error: 'Image generation is not configured on the server (missing Workers AI binding).',
-            code: 'AI_NOT_BOUND',
-          },
-          500, undefined, request,
-        );
-      }
-      return json(
-        {
-          ok: false,
-          error: likelyArabic
-            ? 'تعذر إنشاء الصورة دلوقتي. حاول تاني كمان شوية.'
-            : 'Could not generate the image right now. Please try again shortly.',
-          code: imageResult.errStatus || 'IMAGE_GEN_FAILED',
-        },
-        502, undefined, request,
-      );
-    }
-
-    // Flat, single-level JSON on purpose — a hand-rolled VBA JSON reader,
-    // not just a browser client, has to parse this. dataUri is
-    // display-ready as-is: <img src="..."> on the web with zero string
-    // work; a VBA caller base64-decodes the substring after the comma and
-    // writes the bytes to a temp file for LoadPicture.
-    return json(
-      {
-        ok      : true,
-        dataUri : `data:${imageResult.mime};base64,${imageResult.base64}`,
-        mimeType: imageResult.mime,
-        source  : imageResult.model,
-      },
-      200, undefined, request,
-    );
-  }
-
   // 3c. userMessage extraction + validation. [v20: unchanged logic, now runs
   //     after 3a/3b instead of immediately after step 3 — see Change 5.]
   const userMessage = typeof body.message === 'string' ? body.message.trim() : '';
@@ -5690,56 +5416,7 @@ export async function onRequestPost(context) {
   // a ceiling that predates content already present in the string being
   // measured. Bumped by the exact measured size of each, same convention
   // as the WEB SEARCH ceiling bump elsewhere in this file.
-  // [PATCH — exponent notation] The subscript block never had an exponent
-  // counterpart, which is the root cause behind the Branson's-equation
-  // bug report: the model had no taught convention for base^exp at all,
-  // so (M_cr / M_a)^3 came out however the model happened to improvise
-  // (usually a bare, un-rendered "^3", occasionally a hand-typed Unicode
-  // "³" once corrected mid-conversation -- neither is the intended,
-  // durable behavior). Both tiers now carry a same-shape EXPONENTS
-  // addendum: full tier +680 chars/~180 est. tokens (measured against the
-  // reconstructed pre-patch block text), condensed tier +158 chars/~42
-  // est. tokens. Ceilings bumped by those exact amounts, same
-  // acknowledged-change convention as the two patches above.
-  // [PATCH — Greek/root notation] Same root cause, different symbols:
-  // deployed-and-tested evidence (a production reply captured after the
-  // exponent patch shipped) showed the model spelling Greek letters out
-  // in English ("phi", "lambda", "alpha_s" instead of \phi/\lambda/
-  // \alpha_s) and square roots as the literal word "sqrt(...)" -- neither
-  // was ever taught, even though notationNormalizer.mjs's
-  // BARE_LATEX_MACROS already covered every one of those Greek letters
-  // (the model just never had a reason to reach for the backslash form).
-  // \sqrt specifically needed a normalizer-side addition too (it wasn't
-  // in BARE_LATEX_MACROS at all before this patch) — see that file for
-  // the \sqrt(...) -> √(...) mechanics and the \sqrt{...} braced-form
-  // safety net. Full tier +1065 chars/~282 est. tokens, Gemini
-  // follow-up condensed tier +255 chars/~68 est. tokens, Workers-AI
-  // condensed tier +176 chars/~47 est. tokens (that last one at its own
-  // assertPromptBudget call below, not this one). Same exact-measured-
-  // delta convention as every patch above.
-  // [PATCH — bare Greek/root words, code-side fix] The [PATCH — Greek/root
-  // notation] prompt text above did NOT fix the bug it targeted: two
-  // fresh-chat captured replies afterward (ces-reply-2026-08-13T23-59-21,
-  // -23-59-35) show the model still writing bare "lambda"/"phi"/"sqrt",
-  // this time also stating an explicit self-authored rule that inverts
-  // the real one ("never use the backslash, write it by name") -- not
-  // inattention, a competing prior (backslash escapes look broken in a
-  // non-LaTeX chat surface, which is usually correct advice) winning over
-  // specific instruction to the contrary, three patches running. Fix
-  // moved to notationNormalizer.mjs instead: BARE_GREEK_WORD_MACROS now
-  // accepts the bare word as a first-class path, independent of the
-  // backslash form (which still works). This prompt paragraph was
-  // rewritten to match -- present both forms as equally valid instead of
-  // insisting on one the model wasn't reliably choosing anyway, plus the
-  // new psi/pressure-unit carve-out. Net change is a small DECREASE, not
-  // increase (removing several now-inaccurate NEVER-DOs cost more chars
-  // than the psi carve-out added back): full tier −41 chars, Gemini
-  // follow-up condensed tier −10 chars, Workers-AI condensed tier +3
-  // chars (below, own call). Ceilings adjusted down/up by those exact
-  // amounts, same convention as every patch above -- a real, measured
-  // decrease is still an acknowledged change, not something to leave the
-  // ceiling silently over-provisioned for.
-  assertPromptBudget('geminiSystemPrompt', geminiSystemPrompt, isFirstTurn ? 15811 : 1748, env);
+  assertPromptBudget('geminiSystemPrompt', geminiSystemPrompt, isFirstTurn ? 14107 : 1345, env);
 
   const geminiKeysIndexed = buildGeminiKeyPool(env);
 
@@ -5929,19 +5606,7 @@ export async function onRequestPost(context) {
           : baseWorkersPrompt) + workersKbFacts + clientDateBlock;
         // [PATCH — budget reconciliation] +132 chars/~35 tokens for the
         // notation reminder just added to this tier (see buildWorkersAiSystemPrompt).
-        // [PATCH — exponent notation] +106 chars/~28 est. tokens more for the
-        // EXPONENTS sentence appended to that same reminder (base^exp, including
-        // after a closing bracket -- this tier had a subscript rule but no
-        // exponent counterpart either, same gap as the two Gemini tiers).
-        // [PATCH — Greek/root notation] +176 chars/~47 est. tokens more for
-        // Greek-letter and \sqrt guidance, same gap and same fix shape as the
-        // two Gemini tiers -- see the longer note at the geminiSystemPrompt
-        // assertion above for the evidence this patch is based on.
-        // [PATCH — bare Greek/root words, code-side fix] +3 chars this time
-        // (net -- this tier's rewrite lost more to trimmed NEVER-DOs than it
-        // gained back from the psi carve-out). See the full explanation at
-        // the geminiSystemPrompt assertion above; same fix, same evidence.
-        assertPromptBudget('workersSystemContent', workersSystemContent, 1350, env);
+        assertPromptBudget('workersSystemContent', workersSystemContent, 1065, env);
         const workersMsgs = [
           { role: 'system', content: workersSystemContent },
           ...turns.map(t => ({
