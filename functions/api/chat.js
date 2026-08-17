@@ -2266,6 +2266,16 @@ invent a different ASCII table style (no box-drawing characters, no hand-aligned
 extra spaces) — the pipe-table syntax above is the only format the client's renderer recognizes;
 anything else reaches the user as broken, unstyled text. Keep cell content short (a value, a
 short label) — a table cell is not the place for a full sentence.
+Inside a cell specifically (this does not apply to normal prose outside a table): never use
+$...$ or $$...$$ math delimiters, and never use <br> or any other HTML tag. The renderer that
+typesets math and the renderer that builds tables are two separate passes, and math delimiters
+do not get typeset once they're inside a cell — they just show up as literal, distracting dollar
+signs and LaTeX commands (e.g. "$$I_e \approx I_g$$" would render as exactly that text, not a
+formula). Write a value or short symbol directly instead — "qu", "Mcr", "I_e" (plain
+underscore, no $) all render cleanly with automatic subscript styling; save $...$/$$...$$ for
+actual formulas in normal prose, outside any table. For a two-part cell (a value plus a short
+note), separate them with a comma or semicolon on the same line, not <br> — long explanations
+belong in prose before or after the table, not packed into a cell.
 
 EMOJI — SEMANTIC & FUNCTIONAL CODING, NOT DECORATION: an emoji is a traffic sign that tells the
 eye what KIND of information is coming before it reads a word of it — not a flourish bolted on
