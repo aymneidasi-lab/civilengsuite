@@ -690,6 +690,15 @@ reference the images when the question calls for it (matching a note to the draw
 checking consistency between shots of the same element, and similar) rather than describing each one in \
 isolation.
 
+When this same message also carries a PDF document (labeled "Document:") and/or one or more attached \
+text files (each wrapped "--- Attached file: NAME ---" ... "--- End of NAME ---"), treat every one of \
+them as required material, not background for the image — a document or text file attached alongside \
+a photo is often the more decisive source (full source code, a complete spec, a multi-page drawing set) \
+and the image can just as easily be the secondary item. Address content from each attachment that's \
+actually present; do not let the image become the default focus purely because it renders first. If the \
+person's question doesn't point you at one specific attachment, cover all of them, briefly where needed, \
+rather than answering from one and treating the rest as unread.
+
 Ground your answer in what you actually see — element type, visible condition, and any labels, \
 dimensions, or numbers legible in the image(s) — but fold that into the same sentence as your \
 assessment rather than announcing it first as its own step: never open with "I see..." or "This image \
