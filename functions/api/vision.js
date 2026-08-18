@@ -347,6 +347,7 @@ import {
 import { raceKeyPool } from '../_lib/raceKeyPool.mjs';
 import { callGeminiStreaming } from '../_lib/streamingProviders.mjs';
 import { SseChunkWriter } from '../_lib/resumableSse.mjs'; // [PATCH] resume-mechanism chunkIndex writer
+import { PDF_MIME_TYPE, validatePdfDocument } from '../_lib/documentGuard.mjs'; // NEW — "Insert Text / PDF"
 
 // ── Models — same pair chat.js uses. gemini-3.5-flash confirmed current
 // GA/multimodal (ai.google.dev, 2026-07). gemini-2.5-flash is NOT used here
@@ -374,7 +375,21 @@ const RACE_CONCURRENCY = 3;
 // ceiling makes that 18-72x over budget (measured 178-720ms for decode+
 // resize of ONE image; N images would only cost more) — resize must
 // happen client-side, before the request is sent.
-const MAX_BODY_BYTES = 1_800_000;
+// Raised from 1,800,000 (NEW — PDF support): the streaming body-cap reader
+// runs BEFORE JSON.parse, so at read time we cannot yet know whether this
+// request carries a PDF (which needs headroom up to documentGuard.mjs's
+// MAX_PDF_BASE64_CHARS = 18,000,000) or is a plain image/text request (which
+// never gets near this ceiling). One shared cap, sized for the PDF case, is
+// simpler and safer than guessing from Content-Length before parsing — the
+// cost is a bigger worst-case bound on how much a spoofed/oversized junk
+// body can make this Worker read before rejecting it. Still fully bounded.
+// NEEDS LOAD-TESTING on the actual Cloudflare account: the Free-plan 10ms
+// CPU/invocation ceiling this file's header already documents was verified
+// against ~1.8MB base64 image payloads, not an ~18MB PDF one — decoding/
+// JSON-parsing a string an order of magnitude larger is synchronous CPU
+// work this repo has not yet measured. If it blows the CPU budget, the fix
+// is a lower MAX_PDF_BASE64_CHARS in documentGuard.mjs, not a change here.
+const MAX_BODY_BYTES = 19_000_000;
 const MIME_ALLOWLIST = new Set([
   'image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif',
 ]);
@@ -687,7 +702,14 @@ instead of guessing a specific number.
 
 Reply in the SAME language as the person's own message (Arabic or English) — never mix both in one \
 reply. Keep the reply focused and practical: this is a working engineer reading a chat reply, not a \
-report.`;
+report.
+
+If you're given internal context about which checks on a currently-open calculator form are passing \
+or failing, use it to explain the ENGINEERING reason a check fails and what to change — never the \
+software mechanism behind it. Never mention a control, label, or note identifier, a worksheet or cell \
+reference, or a form, module, or file name, and never describe the internal update or command protocol \
+these run on. Explain what is wrong and why, in the same engineering vocabulary a structural engineer \
+would use discussing the calculation itself — never how the screen produces that text.`;
 
 // ── Structured extraction (Footing Pro autofill) ─────────────────────────
 // Deliberately a SEPARATE call from VISION_SYSTEM_PROMPT's conversational
@@ -771,6 +793,284 @@ function sanitizeExtractedFooting(parsed) {
   const u = parsed && typeof parsed === 'object' ? parsed.units : undefined;
   out.units = typeof u === 'string' && FOOTING_EXTRACT_UNITS.includes(u) ? u : null;
   return out;
+}
+
+// ── Structured extraction (generic — any form, any host application) ────
+// Replaces an earlier, now-removed version of this block that hard-coded
+// field names (I1, I2, ComboBox1, ComboBox2) for one specific form.
+// Real finding that killed that approach: a SECOND form's own
+// CesChat_GetFieldSchema uses the SAME key names (I1, I2) for completely
+// different quantities ("Top RFT diameter"/"Bottom RFT diameter" there vs.
+// "longitudinal"/"transverse reinforcement diameter" on the first form).
+// Control-name keys are not stable even across two forms of the same host
+// application, let alone across the ~30 separate applications this
+// endpoint serves — no fixed per-field schema can generalize, and hand-
+// maintaining one schema per form does not scale past a handful of forms.
+//
+// This block never encodes a field name. It reads whatever is labeled on
+// screen, and — only when the caller supplies the CURRENTLY-OPEN form's
+// own live CesChat_GetFieldSchema() text as formSchemaText — asks the
+// model to match each reading against that specific form's OWN
+// descriptions by MEANING, not by symbol or spelling. No form or
+// application is named anywhere below; the same code path serves any of
+// them unchanged. Kept as a separate function from Footing Pro's
+// fixed-schema extraction above rather than replacing it: Footing Pro's
+// path is presumed live/working and this file cannot be executed against
+// a real Gemini key from where it was written, so leaving a working path
+// untouched is the safer choice.
+const GENERIC_EXTRACT_TIMEOUT_MS = 8_000;
+const GENERIC_EXTRACT_OVERALL_CAP_MS = 12_000;
+// Defensive cap on the caller-supplied schema text -- a real form schema
+// (even Moment_design's, the largest seen so far at ~14 lines) is nowhere
+// near this; the cap exists so a malformed or hostile request body can't
+// inflate the outbound Gemini payload.
+const GENERIC_EXTRACT_MAX_SCHEMA_CHARS = 4_000;
+
+const GENERIC_EXTRACT_SCHEMA = {
+  type: 'array',
+  items: {
+    type: 'object',
+    properties: {
+      label_on_screen: { type: 'string' },
+      value: { type: 'string' },
+      matched_field_key: { type: 'string', nullable: true },
+      match_confidence: { type: 'string', nullable: true, enum: ['high', 'low'] },
+    },
+    required: ['label_on_screen', 'value', 'matched_field_key', 'match_confidence'],
+  },
+};
+
+function buildGenericExtractSystemPrompt(liveSchemaText) {
+  const colorRule =
+    'These forms draw every live, user-editable input as a text box filled pink/beige (tan) \u2014 ' +
+    'that fill color is the ONLY reliable signal that a value is a real input, not its position, ' +
+    'not its symbol, not how similar it looks to one. A value that is NOT inside a pink/beige box \u2014 ' +
+    'plain text on the diagram background, a value in a white/gray/disabled box, or a colored ' +
+    '(often red) "actual", "computed", or result readout sitting right next to a real input, even ' +
+    'using the exact same symbol \u2014 is a computed or informational value, never an input. Still ' +
+    'report it (label and value), just never as a match (see below). If a box\u2019s fill color is not ' +
+    'clearly visible in the image, treat it as NOT confirmed pink/beige rather than assuming it is. ' +
+    'When a value sits on the same line as inline validation or comparison text (for example ' +
+    '"30 > 20" or a value immediately followed by "Unsafe..."), report only the editable number ' +
+    'itself as value \u2014 never concatenate the comparison/status text into it.';
+
+  const schemaBlock = liveSchemaText
+    ? 'The form currently open has these fields (key: description | current value):\n' +
+      liveSchemaText + '\n' +
+      'For each PINK/BEIGE-BOXED value you read, set matched_field_key to the single closest key ' +
+      'above ONLY if its description clearly refers to the same real-world quantity as the label ' +
+      'you read \u2014 compare meaning, not spelling or symbol (a screen label "\u03a6L actual" and a ' +
+      'schema description "longitudinal reinforcement diameter" can be the same quantity; two ' +
+      'fields both named "I1" on two different forms usually are NOT). A value that is not in a ' +
+      'pink/beige box must always get matched_field_key null, with no exception, even if its label ' +
+      'text closely resembles a key\u2019s description \u2014 color rules this out before meaning is even ' +
+      'considered. Set match_confidence to "high" only when you are genuinely confident, "low" for ' +
+      'a plausible-but-uncertain guess. Leave matched_field_key null whenever nothing above is a ' +
+      'clear match \u2014 null is always the safe default; a wrong guess is worse than no guess.'
+    : 'No form field schema was supplied for this request \u2014 leave matched_field_key and ' +
+      'match_confidence null for every row, just report what is visible.';
+
+  return 'Read every labeled numeric value, dropdown selection, or short text field visible in ' +
+    'the image(s). Report each exactly as shown on screen \u2014 never convert units, never compute ' +
+    'a derived value, never guess an illegible or ambiguous value (omit that row instead of ' +
+    'inventing one).\n\n' + colorRule + '\n\n' + schemaBlock;
+}
+
+
+// Pulls the "- KEY:" token from the start of each schema line (the exact,
+// consistent format CesChat_GetFieldSchema uses on every form seen so
+// far). Generic on purpose: this reads whatever schema text the caller
+// supplied, no form's key list is known in advance or hard-coded here.
+function extractKnownKeysFromSchemaText(schemaText) {
+  if (typeof schemaText !== 'string' || !schemaText) return [];
+  const keys = [];
+  for (const line of schemaText.split('\n')) {
+    const m = /^-\s*([A-Za-z0-9_]+)\s*:/.exec(line);
+    if (m) keys.push(m[1]);
+  }
+  return keys;
+}
+
+function buildGenericExtractPayloadString(imageParts, mediaResolution, liveSchemaText) {
+  return JSON.stringify({
+    system_instruction: { parts: [{ text: buildGenericExtractSystemPrompt(liveSchemaText) }] },
+    contents: [{ role: 'user', parts: imageParts }],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseSchema: GENERIC_EXTRACT_SCHEMA,
+      maxOutputTokens: 1024, // an array, not a fixed handful of fields -- a busy screen can carry 15-20+ labeled values
+      thinkingConfig: { thinkingLevel: 'LOW' },
+      mediaResolution,
+    },
+  });
+}
+
+// Never throws. Drops malformed rows outright rather than passing them
+// through half-populated. matched_field_key sanitizes to null unless it is
+// literally one of the keys THIS caller supplied for THIS request -- never
+// trust the model's own copy of a key back without checking it against the
+// real list -- same "never trust unchecked model output" posture as
+// sanitizeExtractedFooting before it.
+function sanitizeGenericExtraction(parsed, knownKeys) {
+  if (!Array.isArray(parsed)) return [];
+  return parsed
+    .filter((row) => row && typeof row === 'object' && !Array.isArray(row))
+    .map((row) => ({
+      label: typeof row.label_on_screen === 'string' ? row.label_on_screen.trim() : '',
+      value: typeof row.value === 'string' ? row.value.trim() : '',
+      matchedFieldKey: (typeof row.matched_field_key === 'string' && knownKeys.includes(row.matched_field_key))
+        ? row.matched_field_key : null,
+      confidence: row.match_confidence === 'high' ? 'high' : (row.match_confidence === 'low' ? 'low' : null),
+    }))
+    .filter((row) => row.label && row.value);
+}
+
+function parseGenericExtractReply(reply, knownKeys) {
+  if (typeof reply !== 'string' || !reply.trim()) return { ok: false, reason: 'EMPTY' };
+  let text = reply.trim();
+  const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  if (fenced) text = fenced[1].trim();
+  let parsed;
+  try { parsed = JSON.parse(text); }
+  catch { return { ok: false, reason: 'BAD_JSON' }; }
+  if (!Array.isArray(parsed)) return { ok: false, reason: 'NOT_AN_ARRAY' };
+  return { ok: true, extracted: sanitizeGenericExtraction(parsed, knownKeys) };
+}
+
+async function runGenericExtraction(geminiPool, budget, imageParts, mediaResolution, liveSchemaText) {
+  const knownKeys = extractKnownKeysFromSchemaText(liveSchemaText);
+  const payloadString = buildGenericExtractPayloadString(imageParts, mediaResolution, liveSchemaText);
+  async function attempt() {
+    try {
+      for (const { key } of geminiPool.slice(0, 2)) {
+        if (budget.remaining() <= 0) return { status: 'budget_exhausted', extracted: null };
+        const res = await callGeminiVisionOnce(key, GEMINI_MODEL_FALLBACK, payloadString, budget, GENERIC_EXTRACT_TIMEOUT_MS);
+        if (res.ok) {
+          const parsed = parseGenericExtractReply(res.reply, knownKeys);
+          if (parsed.ok) return { status: 'ok', extracted: parsed.extracted };
+          console.warn('[vision.js] generic extraction: schema-mode reply failed to parse:', parsed.reason);
+          return { status: 'parse_failed', extracted: null };
+        }
+        if (res.errStatus === 'SUBREQUEST_BUDGET_EXHAUSTED') return { status: 'budget_exhausted', extracted: null };
+      }
+      return { status: 'all_attempts_failed', extracted: null };
+    } catch (err) {
+      console.warn('[vision.js] generic extraction: attempt() threw:', err?.message);
+      return { status: 'error', extracted: null };
+    }
+  }
+  return new Promise(resolve => {
+    const t = setTimeout(() => resolve({ status: 'overall_cap_exceeded', extracted: null }), GENERIC_EXTRACT_OVERALL_CAP_MS);
+    attempt().then(r => { clearTimeout(t); resolve(r); });
+  });
+}
+// Note: no formatXForConfirmation helper here on purpose -- the previous
+// version's equivalent hard-coded per-field human labels (exactly the
+// pattern this whole rewrite removes). Building "here's what I read, want
+// me to apply it" text from a generic {label, value, matchedFieldKey,
+// confidence}[] array is a straight iteration the caller (VBA side or a
+// follow-up conversational turn) can do directly from the label/value text
+// itself -- nothing form-specific left to hard-code.
+
+// ── Calculator-internals confidentiality (deterministic backstop) ────────
+// VISION_SYSTEM_PROMPT above now carries the prompt-level rule; this is
+// the backstop that runs regardless of whether the model followed it —
+// same posture as chat.js's AI_DISCLOSURE_BLOCKLIST/sanitizeAiReply,
+// scoped to VBA/UserForm-shaped identifiers instead of infra terms. Kept
+// as a local copy rather than imported from chat.js, matching this file's
+// existing policy on ALLOWED_ORIGINS/isArabicText above: an unverifiable
+// cross-file import risks breaking the build outright. Known tradeoff:
+// the two copies (here and in chat.js) can drift if one is updated and
+// not the other -- worth collapsing into one shared module once a safe
+// import path between these two Functions is confirmed in the real
+// deployment; not attempted here for the same reason noted above.
+const CALCULATOR_DISCLOSURE_BLOCKLIST_LITERALS = [
+  // Bridge/infrastructure names: the SAME chatbot codebase (frmCESChat,
+  // modVisionAPI, the CES_SET protocol) is reused across every host
+  // application, so these stay as literals regardless of which app is
+  // involved. Deliberately NOT listing any specific form/app name here
+  // (an earlier version had 'check_depth.frm') -- '.frm'/'.bas'/'userform'
+  // below already catch any form or app's file name generically; hand-
+  // listing one app's form name doesn't scale to the other ~29.
+  'frmceschat', 'modvisionapi', 'modchatapi', 'modvisionextractapply',
+  'userform', '.frm', '.bas', 'ces_set', 'buttonregistry', 'ceschat_',
+];
+const CALCULATOR_DISCLOSURE_BLOCKLIST_PATTERNS = [
+  /\bnote_\d+\b/i,
+  /\blabel\d+\b/i,
+  /\b(txt|cmd|btn|lbl|cmb|fra)[a-zA-Z][a-zA-Z0-9]{0,40}\b/i,
+  /\bsheet\d+\s*\.\s*range\s*\(/i,
+];
+function containsCalculatorDisclosure(text) {
+  const lower = text.toLowerCase();
+  return CALCULATOR_DISCLOSURE_BLOCKLIST_LITERALS.some((t) => lower.includes(t))
+      || CALCULATOR_DISCLOSURE_BLOCKLIST_PATTERNS.some((re) => re.test(text));
+}
+const CALCULATOR_SANITIZER_FALLBACK_AR =
+  '\u0627\u0644\u0634\u0631\u062d \u062f\u0647 \u0628\u064a\u0631\u062c\u0639 \u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u062f\u0627\u062e\u0644\u064a\u0629 \u0641\u064a \u0627\u0644\u0628\u0631\u0646\u0627\u0645\u062c\u060c \u062e\u0644\u064a\u0646\u064a \u0623\u0648\u0636\u062d\u0644\u0643 \u0627\u0644\u0633\u0628\u0628 \u0627\u0644\u0647\u0646\u062f\u0633\u064a \u0628\u062f\u0644 \u0643\u062f\u0647.';
+const CALCULATOR_SANITIZER_FALLBACK_EN =
+  "That explanation touches the program's internal workings \u2014 let me give you the engineering reason instead.";
+
+// Streaming-safe holdback wrapper around vision.js's own relay(text)
+// closure (see the delta-relay loop below) -- a post-hoc full-string check
+// does NOT work here: relay() fires chunk-by-chunk DURING generation, so
+// by the time a complete reply string existed to scan, every chunk would
+// already be on the wire.
+//
+// Correctness argument: every relay() call immediately re-scans the FULL
+// current `held` buffer (carried-over tail + new text) before any release
+// decision, and a release only ever drops characters that leave at least
+// CALC_SANITIZER_HOLDBACK_CHARS still buffered behind them. So any match
+// up to that length is necessarily still fully inside `held` -- and
+// therefore gets scanned -- at the moment its last character arrives,
+// strictly before any of its own characters could have been released in
+// an earlier call. This covers chunk-boundary splits (a match arriving as
+// "no" then "te_7" across two calls) by the same argument: nothing is
+// released until it has survived a full-buffer scan taken after
+// CALC_SANITIZER_HOLDBACK_CHARS more characters arrived behind it.
+// Verified against adversarial char-by-char and random chunking, not just
+// reasoned about -- see test_streaming_sanitizer.js.
+//
+// Known, unavoidable limit of ANY real-time character-streaming filter:
+// text already flushed to the client before a later chunk completes a
+// match cannot be recalled. The holdback window only has to exceed the
+// longest blocklist match (bounded at 44 chars by the capped Hungarian-
+// prefix pattern above); it is not and cannot be a buffer of the whole
+// reply.
+const CALC_SANITIZER_HOLDBACK_CHARS = 64;
+
+// Returns { relay, flush }. flush() MUST be called exactly once, after the
+// last relay() call and before the SSE stream closes: it releases whatever
+// is still sitting in the holdback buffer, after one final full-buffer
+// scan (a match can be completed by a reply's very last characters).
+// Skipping flush() does not create a leak risk, only silently drops up to
+// CALC_SANITIZER_HOLDBACK_CHARS characters of legitimate trailing text.
+function makeCalculatorSafeRelay(innerRelay) {
+  let held = '';
+  let tripped = false;
+  function trip(flaggedText) {
+    tripped = true;
+    held = '';
+    innerRelay(isArabicText(flaggedText) ? CALCULATOR_SANITIZER_FALLBACK_AR : CALCULATOR_SANITIZER_FALLBACK_EN);
+  }
+  return {
+    relay(text) {
+      if (tripped || !text) return;
+      held += text;
+      if (containsCalculatorDisclosure(held)) { trip(held); return; }
+      if (held.length > CALC_SANITIZER_HOLDBACK_CHARS) {
+        const releaseLen = held.length - CALC_SANITIZER_HOLDBACK_CHARS;
+        innerRelay(held.slice(0, releaseLen));
+        held = held.slice(releaseLen);
+      }
+    },
+    flush() {
+      if (tripped || !held) return;
+      if (containsCalculatorDisclosure(held)) { trip(held); return; }
+      innerRelay(held);
+      held = '';
+    },
+  };
 }
 
 // Handles the well-formed case (bare JSON — schema mode should never emit
@@ -1217,9 +1517,6 @@ export async function onRequestPost(context) {
     rawImages = [];
   }
 
-  if (rawImages.length === 0) {
-    return json({ error: buildFriendlyVisionError({ httpStatus: 400, errStatus: '' }, likelyArabic) }, 400, undefined, request);
-  }
   if (rawImages.length > MAX_IMAGES_PER_REQUEST) {
     return json({
       error: likelyArabic
@@ -1237,6 +1534,29 @@ export async function onRequestPost(context) {
       return json({ error: result.error }, 400, undefined, request);
     }
     images.push({ mimeType: result.mimeType, data: result.data });
+  }
+
+  // 5b-ii. Document (PDF) attachment — NEW, "Insert Text / PDF". Singular
+  // (body.document, not an array): one engineering document per message.
+  // Mutually exclusive with nothing — an image AND a document can both be
+  // present in the same request; the parts-array builder below handles
+  // that combination. See documentGuard.mjs for the full validation
+  // (magic-byte sniff, byte-size cap, heuristic page-count soft-cap).
+  let pdfDoc = null;
+  if (body?.document && typeof body.document === 'object') {
+    const docResult = validatePdfDocument(body.document, likelyArabic);
+    if (!docResult.ok) {
+      return json({ error: docResult.error }, 400, undefined, request);
+    }
+    pdfDoc = docResult;
+  }
+
+  // Requires at least one image OR one document — the endpoint's whole
+  // purpose. Checked here, after both extraction blocks, rather than
+  // right after rawImages like the pre-PDF version did, since a
+  // document-only request is now a valid, non-empty request.
+  if (rawImages.length === 0 && !pdfDoc) {
+    return json({ error: buildFriendlyVisionError({ httpStatus: 400, errStatus: '' }, likelyArabic) }, 400, undefined, request);
   }
 
   // 5c. Adaptive detail level. Computed once, from the fully-resolved
@@ -1289,9 +1609,18 @@ export async function onRequestPost(context) {
   //     photo" autofill sends this; the general vision chat (this same
   //     endpoint, called from pc_suite and elsewhere) never sets it, so it
   //     never pays the extra subrequest/latency cost below. Closed allow-
-  //     list of one value on purpose — this is a route selector, not free
-  //     text, so anything else is silently ignored rather than erroring.
-  const extractMode = body?.extract === 'footing' ? 'footing' : null;
+  //     list on purpose — this is a route selector, not free text, so
+  //     anything else is silently ignored rather than erroring.
+  const extractMode = ['footing', 'form'].includes(body?.extract) ? body.extract : null;
+  // Only meaningful when extractMode === 'form': the CURRENTLY-OPEN VBA
+  // form's own live CesChat_GetFieldSchema() text, if the caller has one
+  // to send (frmCESChat already fetches this same text for
+  // BuildAugmentedMessage — this is the same string, not a new call).
+  // Absent or malformed input degrades to '' rather than erroring: a
+  // missing schema just means matched_field_key comes back null for
+  // every row (see buildGenericExtractSystemPrompt), not a failed request.
+  const formSchemaText =
+    typeof body?.formSchema === 'string' ? body.formSchema.slice(0, GENERIC_EXTRACT_MAX_SCHEMA_CHARS) : '';
 
   // 6. Build the outbound Gemini payload ONCE — identical across every
   //    key/model attempt (only the URL varies), see header note on why
@@ -1311,16 +1640,31 @@ export async function onRequestPost(context) {
   //    belongs on, etc.). Part ORDER differs by N — see v2.2 header note:
   //    N=1 is image-then-text, N>1 is text-then-images, each matching a
   //    DIFFERENT documented example on the same ai.google.dev page.
-  const imageParts = images.length === 1
-    ? [{ inline_data: { mime_type: images[0].mimeType, data: images[0].data } }]
-    : images.flatMap((img, i) => [
-        { text: `Image ${i + 1}:` },
-        { inline_data: { mime_type: img.mimeType, data: img.data } },
-      ]);
+  // totalMediaCount includes the optional PDF alongside images — the
+  // documented Gemini ordering rule (media-before-text at N=1, text-before-
+  // media at N>1) is keyed off "how many media parts", not "how many
+  // images", so a single lone PDF (images.length===0, pdfDoc set) must
+  // still take the N=1 branch, and an image+PDF combo must take the N>1
+  // branch exactly like two images would.
+  const totalMediaCount = images.length + (pdfDoc ? 1 : 0);
+  const imageParts = images.length === 0
+    ? []
+    : (totalMediaCount === 1
+        ? [{ inline_data: { mime_type: images[0].mimeType, data: images[0].data } }]
+        : images.flatMap((img, i) => [
+            { text: `Image ${i + 1}:` },
+            { inline_data: { mime_type: img.mimeType, data: img.data } },
+          ]));
+  const documentParts = pdfDoc
+    ? (totalMediaCount === 1
+        ? [{ inline_data: { mime_type: PDF_MIME_TYPE, data: pdfDoc.data } }]
+        : [{ text: 'Document:' }, { inline_data: { mime_type: PDF_MIME_TYPE, data: pdfDoc.data } }])
+    : [];
+  const mediaParts = [...imageParts, ...documentParts];
 
-  const parts = images.length === 1
-    ? [...imageParts, { text: modelMessageText }]   // image before text — single-image best practice
-    : [{ text: modelMessageText }, ...imageParts];  // text before images — multi-image example pattern
+  const parts = totalMediaCount <= 1
+    ? [...mediaParts, { text: modelMessageText }]   // media before text — single-item best practice
+    : [{ text: modelMessageText }, ...mediaParts];  // text before media — multi-item example pattern
 
   // [PATCH] callGeminiStreaming() takes contents/generationConfig as
   // separate parameters (see streamingProviders.mjs) rather than a single
@@ -1374,9 +1718,19 @@ export async function onRequestPost(context) {
   // early-error and normal-completion paths converge there) — never joins
   // the `delta` relay, so it cannot leak into what the user sees mid-
   // stream even in principle.
-  const extractionPromise = extractMode === 'footing'
-    ? runFootingExtraction(geminiPool, budget, imageParts, MEDIA_RESOLUTION)
-    : null;
+  // NOTE (PDF patch, unverified): both runFootingExtraction() and
+  // runGenericExtraction() still read only imageParts. A document-only send
+  // (pdfDoc set, images.length===0) with extract:'footing' OR extract:
+  // 'form' will call whichever one with an EMPTY array — behavior in that
+  // case depends on that function's own internals, not reviewed as part of
+  // this patch. If either extraction feature is expected to also work from
+  // an uploaded PDF (a site plan for 'footing', a scanned form for 'form'),
+  // both functions need extending to accept documentParts too — separate,
+  // scoped change, not made here.
+  const extractionPromise =
+    extractMode === 'footing' ? runFootingExtraction(geminiPool, budget, imageParts, MEDIA_RESOLUTION) :
+    extractMode === 'form' ? runGenericExtraction(geminiPool, budget, imageParts, MEDIA_RESOLUTION, formSchemaText) :
+    null;
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -1401,9 +1755,18 @@ export async function onRequestPost(context) {
         try { controller.enqueue(chunk); }
         catch { streamClosed = true; }
       }, encoder);
-      function relay(text) {
+      // [CHAT-VISION] Every delta this endpoint ever relays now passes
+      // through the streaming-safe holdback wrapper first -- applied
+      // unconditionally rather than only when checkState-flavoured context
+      // is detected, since the added latency is a fixed ~64 characters
+      // (imperceptible) and unconditional is simpler and safer than trying
+      // to infer per-request whether calculator context is present.
+      // relay(text)'s own signature/behaviour is unchanged for every
+      // existing call site below.
+      const calculatorRelay = makeCalculatorSafeRelay((text) => {
         if (text) { sseWriter.writeDelta(text); sentAnything = true; }
-      }
+      });
+      function relay(text) { calculatorRelay.relay(text); }
       function deadlineOrBudgetExceeded() {
         if (budget.remaining() <= 0) return 'SUBREQUEST_BUDGET_EXHAUSTED';
         if (Date.now() - startTime > OVERALL_DEADLINE_MS) return 'OVERALL_DEADLINE_EXCEEDED';
@@ -1462,7 +1825,15 @@ export async function onRequestPost(context) {
       // reply will ever produce has already been relayed (or the winner
       // failed outright), so waiting here adds latency only to the
       // terminal event, never to the visible token stream.
-      const extractionResult = extractMode === 'footing' ? await extractionPromise : null;
+      const extractionResult =
+        (extractMode === 'footing' || extractMode === 'form') ? await extractionPromise : null;
+
+      // [CHAT-VISION] Release whatever's still sitting in the holdback
+      // buffer, exactly once, after the last possible relay() call above
+      // and before either writeDone() path below. Safe to call regardless
+      // of which path follows (including the failure path) -- flush() is a
+      // no-op if nothing was ever relayed.
+      calculatorRelay.flush();
 
       if (!winner || !winner.ok) {
         if (!sentAnything) {
