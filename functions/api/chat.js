@@ -5725,9 +5725,24 @@ export async function onRequestPost(context) {
   // system prompt (recency bias) despite that rule being clearly marked
   // CRITICAL — being far from the point of generation made it lose to
   // whatever text sits immediately before the model starts replying.
+  // [FIX — reminder scoped too narrowly] Real evidence (ces-reply-2026-08-
+  // 17T??-??-??.txt and ces-reply-2026-08-18T01-28-54.txt, both English
+  // replies to plain Arabic messages with NO file attached) showed this
+  // firing on requests that never had an attachment at all. The old wording
+  // ("regardless of the attached file language above") is scoped
+  // specifically to the BUG 2 file-overriding scenario — when nothing
+  // matches that description (no file, no code block), the reminder reads
+  // as irrelevant to the model even though the underlying risk (something
+  // else in a ~13k-token prompt outweighing the language rule via recency
+  // or sheer volume) is the same regardless of which specific thing is
+  // doing the outweighing. Broadened to an unconditional restatement: names
+  // the detected script explicitly (restating the classification, not just
+  // the consequence, gives the model's own reasoning something concrete to
+  // anchor on) and drops the file-specific framing so it applies whether
+  // the competing content is a file, KB facts, or anything else.
   const languageLock = isArabicText(userMessage)
-    ? '\n\n[تذكير صارم: مهما كان محتوى الملف المرفق أعلاه بالإنجليزية، ردّك الكامل يجب أن يكون بالعامية المصرية بالكامل الآن.]'
-    : '\n\n[Reminder: regardless of the attached file language above, your entire reply must be in English now.]';
+    ? '\n\n[تذكير حاسم قبل الرد: لغة رسالة المستخدم الحالية عربي. ردّك بالكامل الآن يجب أن يكون بالعامية المصرية فقط، بغض النظر عن أي محتوى إنجليزي ظهر في هذه المحادثة — ملف مرفق، بيانات مرجعية، أو أي شيء آخر. لا يوجد استثناء.]'
+    : '\n\n[Critical reminder before replying: the current user message\'s language is English. Your entire reply now must be in English only, regardless of any Arabic or other-language content elsewhere in this conversation — an attached file, reference data, or anything else. No exception.]';
   turns.push({ role: 'user', text: userMessage + textFilesBlock + languageLock });
 
   const geminiContents = turns.map(t => ({ role: t.role, parts: [{ text: t.text }] }));
