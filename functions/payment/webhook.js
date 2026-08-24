@@ -6,11 +6,32 @@
  * Uses timing-safe comparison to prevent timing attacks.
  * Idempotent: duplicate webhooks for the same paid order are ignored.
  *
+ * [PATCH, subscriber-tier] On a NEWLY confirmed payment (not a duplicate/
+ * replayed webhook — see the existing idempotency check below, unchanged),
+ * this now also mints a subscriber license via _lib/licenses.mjs and stores
+ * it on the SAME order:{id} KV record, so functions/api/payment/verify.js
+ * can hand it back to the success page without any new lookup. Durably
+ * depends on PAYMENTS_KV being bound (see that var's own "Optional" note
+ * below) — if it isn't, this file already silently skips ALL of its
+ * existing order-tracking, and license issuance inherits that same
+ * limitation rather than introducing a new one. durationDays comes from
+ * the SAME pending order:{id} record this file already fetches for its
+ * idempotency check — see functions/api/payment/create-intention.js's
+ * PRODUCTS catalog for where that number is set per product.
+ *
  * Required Cloudflare Pages env vars:
  *   PAYMOB_HMAC_SECRET  — HMAC secret from Paymob dashboard (Settings → Security)
  *
  * Optional:
  *   PAYMENTS_KV         — KV namespace binding for payment records
+ *   CES_LICENSES        — [PATCH, subscriber-tier] KV namespace binding for
+ *                          licenses (same binding chat.js/dev-upload.js/
+ *                          vision.js use). If unbound, issueLicense()
+ *                          itself fails closed (KV_NOT_BOUND) and this file
+ *                          logs and continues — a license-issuance failure
+ *                          must never turn a confirmed PAID payment into a
+ *                          failed webhook response (Paymob would retry the
+ *                          charge attempt, not just the notification).
  *
  * Paymob sends HMAC as:
  *   - Query parameter: ?hmac=<sha512hex>
@@ -21,6 +42,8 @@
  */
 
 'use strict';
+
+import { issueLicense } from '../../_lib/licenses.mjs';
 
 const MAX_BODY_BYTES = 16_384; // 16 KB hard limit
 
@@ -178,10 +201,18 @@ export async function onRequest(context) {
   }
 
   // ── Idempotency: never overwrite a confirmed payment ─────────────────────
+  // [PATCH, subscriber-tier] Now captures the full existing record, not
+  // just its status — durationDays/product_id/email (written by
+  // create-intention.js at intent-creation time) are what license issuance
+  // below needs, and this is the SAME KV read that idempotency-checking
+  // already required, so this costs nothing extra.
+  let pendingOrder = null;
   if (env.PAYMENTS_KV) {
-    const existing = await env.PAYMENTS_KV.get(`order:${orderId}`, 'json').catch(() => null);
-    if (existing?.status === 'paid') {
-      // Already confirmed — ACK without processing to stop Paymob retries
+    pendingOrder = await env.PAYMENTS_KV.get(`order:${orderId}`, 'json').catch(() => null);
+    if (pendingOrder?.status === 'paid') {
+      // Already confirmed — ACK without processing to stop Paymob retries.
+      // (Also means a license was already issued the first time this order
+      // transitioned to paid — see below — so no risk of double-issuance.)
       return new Response('', { status: 200, headers: { 'Cache-Control': 'no-store' } });
     }
   }
@@ -189,6 +220,52 @@ export async function onRequest(context) {
   // ── Process by outcome ────────────────────────────────────────────────────
   if (success && !pending) {
     // ── CONFIRMED PAYMENT ─────────────────────────────────────────────────
+    // [PATCH, subscriber-tier] Mint a subscriber license for this NEWLY
+    // confirmed payment. Reached at most once per order — guarded by the
+    // idempotency check above (repeat webhooks for an already-'paid' order
+    // return early before this line). issueLicense's own KV write is
+    // separate from PAYMENTS_KV (a different namespace, CES_LICENSES), so
+    // this happens regardless of whether the PAYMENTS_KV block below
+    // succeeds or is even bound — a license should not be held hostage to
+    // this project's own payment-tracking KV being configured.
+    //
+    // durationDays: prefer the pending order's stored value (set by
+    // create-intention.js from PRODUCTS[product_id].durationDays at intent
+    // creation) — falls back to 365 only if the pending record is missing
+    // entirely (its own TTL is 24h; a payment confirmed after that window,
+    // or with PAYMENTS_KV enabled only after intent creation, would hit
+    // this edge case). Logged distinctly so a fallback firing in practice
+    // is visible rather than silently assumed correct.
+    let licenseKey = null;
+    let licenseExpiresAt = null;
+    let durationDays = Number(pendingOrder?.durationDays);
+    if (!Number.isFinite(durationDays) || durationDays <= 0) {
+      durationDays = 365;
+      console.warn(
+        '[payment:webhook] No durationDays on pending order', orderId,
+        pendingOrder ? '(record exists but lacks the field)' : '(no pending record found)',
+        '— falling back to 365 days. Investigate: either PAYMENTS_KV was not bound at intent-creation time, or the 24h pending-order TTL elapsed before payment completed.',
+      );
+    }
+    const licenseNote = email || pendingOrder?.email || '';
+    try {
+      const issueResult = await issueLicense(env, { durationDays, note: licenseNote });
+      if (issueResult.ok) {
+        licenseKey = issueResult.license.licenseKey;
+        licenseExpiresAt = issueResult.license.expiresAt;
+        console.log('[payment:webhook] License issued for order', orderId, ':', licenseKey, 'expires', licenseExpiresAt);
+      } else {
+        console.error('[payment:webhook] issueLicense failed for order', orderId, ':', issueResult.code, issueResult.error);
+      }
+    } catch (err) {
+      // A licensing failure must never turn a CONFIRMED payment into a
+      // non-200 webhook response — Paymob's retry-on-non-2xx behavior is
+      // for notification delivery, not a mechanism to retry OUR license
+      // minting, and treating it as one would risk a duplicate charge
+      // attempt on the customer's card for a purely internal error.
+      console.error('[payment:webhook] issueLicense threw for order', orderId, ':', err.message);
+    }
+
     if (env.PAYMENTS_KV) {
       await env.PAYMENTS_KV.put(
         `order:${orderId}`,
@@ -201,6 +278,8 @@ export async function onRequest(context) {
           pay_type:       payType,
           pay_sub_type:   paySubType,
           paid_at:        new Date().toISOString(),
+          licenseKey,             // [PATCH, subscriber-tier] null if issueLicense failed above — verify.js/support can detect and manually re-issue
+          licenseExpiresAt,
         }),
         { expirationTtl: 60 * 60 * 24 * 730 } // Retain 2 years
       ).catch(err => console.error('[payment:webhook] KV write failed (paid):', err.message));
@@ -214,6 +293,7 @@ export async function onRequest(context) {
       currency,
       pay_type:       payType,
       client_ip:      clientIp,
+      license_key:    licenseKey, // [PATCH, subscriber-tier] null if issueLicense failed — see the error logged above this block
       ts:             new Date().toISOString(),
     }));
 

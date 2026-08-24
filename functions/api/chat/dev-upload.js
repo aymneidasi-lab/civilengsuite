@@ -1,16 +1,33 @@
 // functions/api/chat/dev-upload.js
 // =============================================================================
-// POST /api/chat/dev-upload — developer-only staging endpoint for large file
-// uploads that would otherwise be truncated by chat.js's DEV_MAX_CHARS_PER_
-// TEXT_FILE / DEV_MAX_TOTAL_TEXT_FILE_CHARS caps (20,000 / 40,000 chars —
-// chat.js lines ~1450-1459). Stores raw content in a DEDICATED KV namespace
-// (env.CES_DEV_UPLOADS, NOT env.CES_CHAT_KV — see rationale below) under a
-// random UUID key with a short TTL. functions/api/chat.js later resolves
-// body.kvFileIds against this same namespace (resolveKvFiles(), added next
-// to extractTextFiles()) and merges the content into the prompt under its
-// own separate, larger cap (DEV_KV_MAX_TOTAL_CONTEXT_CHARS), sized to the
-// smallest context window in the active provider fallback chain — see that
-// constant's derivation comment in chat.js for the full reasoning.
+// POST /api/chat/dev-upload — [PATCH, 3-tier] staging endpoint for file
+// uploads, now reachable by all three tiers, not developer-only:
+//   developer  — X-Developer-Token, unchanged, RAW_UPLOAD_MAX_CHARS (2M).
+//   subscriber — X-License-Key + X-Device-Token, validated against
+//                env.CES_LICENSES via _lib/licenses.mjs. Same
+//                RAW_UPLOAD_MAX_CHARS as developer ("same permissions as
+//                developer" — file/quota limits only; subscribers do NOT
+//                get isDeveloperMode, which stays site-owner-only and is
+//                computed independently in chat.js).
+//   regular    — no credential. Gated by checkFreeFileQuota() — [REVISED]
+//                3 files per rolling 24h window, any type, chosen freely
+//                by the user (was a one-time lifetime cap of 1 file) — see
+//                _lib/licenses.mjs — and a much smaller FREE_UPLOAD_MAX_CHARS cap. This is the throttle:
+//                deliberately small enough to be a useful taste, not a
+//                substitute for subscribing.
+// Endpoint path/name kept as-is (not renamed to e.g. "upload.js") to avoid
+// touching the ~6 call sites in footing_pro_*.html that already POST here —
+// see integration notes for the frontend changes this DOES require
+// (X-License-Key/X-Device-Token headers, free-tier UI messaging).
+//
+// Stores raw content in a DEDICATED KV namespace (env.CES_DEV_UPLOADS, NOT
+// env.CES_CHAT_KV — see rationale below) under a random UUID key with a
+// short TTL. functions/api/chat.js later resolves body.kvFileIds against
+// this same namespace (resolveKvFiles()) and merges the content into the
+// prompt under its own separate, larger cap (DEV_KV_MAX_TOTAL_CONTEXT_CHARS
+// for developer/subscriber), sized to the smallest context window in the
+// active provider fallback chain — see that constant's derivation comment
+// in chat.js for the full reasoning.
 //
 // WHY A SEPARATE KV NAMESPACE, NOT env.CES_CHAT_KV:
 // env.CES_CHAT_KV is already documented elsewhere in this codebase as
@@ -55,7 +72,20 @@
 // repo).
 // =============================================================================
 
-const ALLOWED_ORIGINS = new Set(['https://civilengsuite.pages.dev']);
+import { validateLicense, checkFreeFileQuota, consumeFreeFileQuota } from '../../_lib/licenses.mjs';
+
+// [FIX] create-intention.js's SITE_ORIGIN is 'https://civilengsuite.is-a.dev',
+// used consistently across 4 call sites there (CORS, CSRF origin check,
+// Paymob notification_url, Paymob redirection_url) — likely the real
+// canonical custom domain. This file's own allowlist previously had only
+// civilengsuite.pages.dev (the Cloudflare-generated default, which stays
+// live alongside any custom domain and is what the uploaded footing_pro
+// HTML references). Listing both is the safe fix regardless of which one
+// is "primary": Cloudflare Pages serves a project from BOTH its pages.dev
+// subdomain and any attached custom domain simultaneously, so a real
+// browser request could legitimately arrive from either. Confirm which is
+// actually shown to customers and drop the other if only one is ever used.
+const ALLOWED_ORIGINS = new Set(['https://civilengsuite.pages.dev', 'https://civilengsuite.is-a.dev']);
 
 function getCorsHeaders(request) {
   const origin = request?.headers?.get('Origin') || '';
@@ -66,7 +96,13 @@ function getCorsHeaders(request) {
   return {
     'Access-Control-Allow-Origin' : allowed,
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, X-Developer-Token',
+    // [PATCH, 3-tier] X-License-Key / X-Device-Token added alongside the
+    // existing X-Developer-Token — same header-not-body-field reasoning as
+    // that one (see this file's original header comment): the body here is
+    // file content, not a place to mix credentials into. X-Fingerprint-Id
+    // is optional (see validateLicense in _lib/licenses.mjs) and currently
+    // always absent until the frontend sends FingerprintJS's visitorId.
+    'Access-Control-Allow-Headers': 'Content-Type, X-Developer-Token, X-License-Key, X-Device-Token, X-Fingerprint-Id',
     'Vary'                        : 'Origin',
   };
 }
@@ -115,6 +151,15 @@ async function hmacTimingSafeEqual(a, b) {
 // body.files[] path (accept generously here, budget precisely at merge
 // time).
 const RAW_UPLOAD_MAX_CHARS = 2_000_000;
+
+// [PATCH, 3-tier] Regular-tier cap — deliberately much smaller than the
+// developer/subscriber ceiling above. This is the "throttle" the tiering
+// plan calls for: ~50,000 chars is roughly a 10-15 page extracted-text/PDF
+// result — enough to be a genuinely useful one-time trial, not enough to
+// substitute for a subscription on a real job. This number is a product
+// knob, not a technical constraint — tune it directly if the trial should
+// feel more or less generous.
+const FREE_UPLOAD_MAX_CHARS = 50_000;
 
 // KV TTL for staged uploads, in seconds. 300s (5 min) — the short end of
 // the 5-10 minute window requested: long enough to cover "upload, then
@@ -174,27 +219,46 @@ export async function onRequestPost(context) {
     return json({ error: 'Too many uploads too quickly. Wait a moment and try again.', code: 'RATE_LIMITED' }, 429, request);
   }
 
-  // 2. Auth — a structural gate, not a countermanding instruction, matching
-  //    chat.js v35's own most recent design philosophy (exclude, don't
-  //    override; see that file's CHANGELOG v35).
+  // 2. Auth / tier resolution — [PATCH, 3-tier]. Structural gate, not a
+  //    countermanding instruction, matching chat.js v35's own design
+  //    philosophy (exclude, don't override; see that file's CHANGELOG v35).
+  //    Developer check is BYTE-FOR-BYTE the original logic — unchanged,
+  //    unweakened. Subscriber is a new, independent branch. Anyone matching
+  //    neither falls through to 'regular', not rejected outright: that tier
+  //    is intentionally allowed through, just quota- and size-capped below.
   const incomingToken = request.headers.get('X-Developer-Token') || '';
   const configuredPw  = typeof env.DEVELOPER_PASSWORD === 'string' ? env.DEVELOPER_PASSWORD : '';
-  let authed = false;
+  let isDeveloperMode = false;
   if (incomingToken && configuredPw) {
     try {
-      authed = await hmacTimingSafeEqual(incomingToken, configuredPw);
+      isDeveloperMode = await hmacTimingSafeEqual(incomingToken, configuredPw);
     } catch (_) {
       // Same defensive fallback as chat.js's isDeveloperMode computation:
       // crypto.subtle unavailable should never happen on Workers, but if it
       // does, fall back to a direct (non-timing-safe) compare rather than
       // hard-failing the endpoint. The rate limit above still bounds how
       // many attempts this can be tried per minute either way.
-      authed = (incomingToken === configuredPw);
+      isDeveloperMode = (incomingToken === configuredPw);
     }
   }
-  if (!authed) {
-    console.warn('[dev-upload.js] Rejected upload: bad/missing X-Developer-Token from', clientIp);
-    return json({ error: 'Developer authentication required.', code: 'DEV_AUTH_REQUIRED' }, 403, request);
+
+  let tier = 'regular';
+  if (isDeveloperMode) {
+    tier = 'developer';
+    console.info('[dev-upload.js] Developer-tier upload from', clientIp);
+  } else {
+    const licenseKey   = request.headers.get('X-License-Key') || '';
+    const deviceToken  = request.headers.get('X-Device-Token') || '';
+    const fingerprintId = request.headers.get('X-Fingerprint-Id') || '';
+    if (licenseKey && deviceToken) {
+      const licenseResult = await validateLicense(env, licenseKey, deviceToken, fingerprintId);
+      if (licenseResult.ok) {
+        tier = 'subscriber';
+        console.info('[dev-upload.js] Subscriber-tier upload from', clientIp);
+      } else {
+        console.warn('[dev-upload.js] License rejected (' + licenseResult.reason + ') for', clientIp, '— falling back to regular tier.');
+      }
+    }
   }
 
   if (!env.CES_DEV_UPLOADS) {
@@ -206,6 +270,27 @@ export async function onRequestPost(context) {
       500,
       request,
     );
+  }
+
+  // 2b. Regular tier only: enforce the daily quota BEFORE touching the
+  //     body. Read-only check — see _lib/licenses.mjs for why this is safe
+  //     to call on every anonymous request. [REVISED] 3 files per rolling
+  //     24h window, not a one-time lifetime cap — resetsAt is returned so
+  //     the frontend can show a concrete "try again at HH:MM" alongside
+  //     the subscribe CTA, not just a bare rejection.
+  if (tier === 'regular') {
+    const quota = await checkFreeFileQuota(env, clientIp);
+    if (!quota.ok) {
+      return json(
+        {
+          error: "You've used your 3 free files for today. Subscribe for unlimited uploads, or try again after the window below resets.",
+          code: 'FREE_QUOTA_USED',
+          resetsAt: quota.resetsAt,
+        },
+        403,
+        request,
+      );
+    }
   }
 
   // 3. Parse body. { name?: string, content: string }
@@ -224,10 +309,16 @@ export async function onRequestPost(context) {
   if (!content.trim()) {
     return json({ error: 'No content provided.' }, 400, request);
   }
-  if (content.length > RAW_UPLOAD_MAX_CHARS) {
+
+  // [PATCH, 3-tier] Per-tier ceiling — regular gets the small
+  // FREE_UPLOAD_MAX_CHARS trial cap, developer/subscriber share the
+  // original generous ceiling ("same permissions as developer").
+  const maxChars = tier === 'regular' ? FREE_UPLOAD_MAX_CHARS : RAW_UPLOAD_MAX_CHARS;
+  if (content.length > maxChars) {
     return json(
       {
-        error: `File too large (${content.length} chars). Maximum ${RAW_UPLOAD_MAX_CHARS.toLocaleString()} chars per upload.`,
+        error: `File too large (${content.length} chars). Maximum ${maxChars.toLocaleString()} chars per upload` +
+          (tier === 'regular' ? ' on the free tier — subscribe for larger uploads.' : '.'),
         code: 'TOO_LARGE',
       },
       413,
@@ -243,7 +334,7 @@ export async function onRequestPost(context) {
   try {
     await env.CES_DEV_UPLOADS.put(
       kvKey,
-      JSON.stringify({ name, content, uploadedAt: Date.now() }),
+      JSON.stringify({ name, content, uploadedAt: Date.now(), tier }),
       { expirationTtl: UPLOAD_TTL_SECONDS },
     );
   } catch (err) {
@@ -251,15 +342,29 @@ export async function onRequestPost(context) {
     return json({ error: 'Storage error. Please retry.', code: 'KV_WRITE_FAILED' }, 500, request);
   }
 
-  console.info('[dev-upload.js] Staged', content.length, 'chars as', fileId, 'for', clientIp);
+  // [PATCH, 3-tier] Consume the free quota only AFTER the write succeeds —
+  // a KV failure above must not burn a free user's daily allowance on a
+  // file that was never actually staged. [REVISED] re-check afterward
+  // purely to report remaining/resetsAt back to the client — consume
+  // itself doesn't return that, and a second read here is cheap (reads
+  // are the abundant side of the KV budget, 100,000/day vs writes' 1,000).
+  let freeQuotaStatus;
+  if (tier === 'regular') {
+    await consumeFreeFileQuota(env, clientIp);
+    freeQuotaStatus = await checkFreeFileQuota(env, clientIp);
+  }
+
+  console.info('[dev-upload.js] Staged', content.length, 'chars as', fileId, 'for', clientIp, '(' + tier + ')');
   return json(
     {
       ok: true,
       fileId,
       name,
+      tier,
       charCount: content.length,
       expiresIn: UPLOAD_TTL_SECONDS,
       expiresAt: new Date(Date.now() + UPLOAD_TTL_SECONDS * 1000).toISOString(),
+      ...(freeQuotaStatus ? { freeFilesRemainingToday: freeQuotaStatus.remaining, freeQuotaResetsAt: freeQuotaStatus.resetsAt } : {}),
     },
     200,
     request,

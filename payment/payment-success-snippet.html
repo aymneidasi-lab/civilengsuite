@@ -1,0 +1,93 @@
+<!--
+  PAYMENT SUCCESS PAGE — integration snippet
+  ─────────────────────────────────────────────────────────────────────────
+  I don't have your actual /payment/success page's markup (it wasn't part
+  of this session's uploads), so this is a self-contained, paste-in <script>
+  block rather than a patch to a file I can't see. Drop it anywhere in that
+  page's <body> and adjust the two DOM hooks marked below to match your
+  actual page structure.
+
+  What it does:
+    1. Reads order_id from this page's own URL (Paymob appends its own
+       query params when redirecting back — order_id is read from several
+       common param names since Paymob's exact param naming has changed
+       across API versions and isn't something I could verify without
+       your live Paymob dashboard/account).
+    2. Calls GET /api/payment/verify?order_id=... (functions/api/payment/
+       verify.js — already reviewed and tested this session).
+    3. On a paid order WITH a licenseKey: saves it to the SAME localStorage
+       key ('ces_license_key') the chat widget's cesGetLicenseKey() reads
+       — see footing_pro_v71-1-2-3.html / pc_suite_v71-1-2-3.html's
+       "License / subscription" JS block. The moment the customer opens
+       the chat widget after landing here, their license is already
+       recognized — no separate copy-paste step.
+    4. On a paid order WITHOUT a licenseKey (verify.js's own documented
+       "KNOWN GAP" — the Paymob-API-fallback branch can't mint one): shows
+       a message telling them to contact support with their order ID,
+       rather than silently failing.
+    5. On an unpaid/unknown order: shows a neutral "not confirmed yet"
+       message — does NOT claim failure, since Paymob webhooks can arrive
+       slightly after the redirect.
+
+  Adjust the two lines marked "ADJUST THIS" to point at wherever your
+  actual success page wants the message shown (a <div id="...">, a toast,
+  etc.) — I used a fallback alert() only so this works with zero markup
+  changes if you paste it as-is for a first test.
+-->
+<script>
+(function () {
+  'use strict';
+
+  var CES_LICENSE_STORAGE_KEY = 'ces_license_key'; // MUST match the chat widget's own constant exactly
+
+  function getOrderIdFromUrl() {
+    var params = new URLSearchParams(window.location.search);
+    // Paymob's own query param naming for the order id has varied across
+    // API/product versions (order, id, merchant_order_id have all been
+    // seen in different Paymob integrations) — checked in this order,
+    // first non-empty wins. Confirm which one your account's redirect
+    // actually sends (open the Network tab / check the URL after a real
+    // test payment) and reorder/trim this list once confirmed.
+    return params.get('order') || params.get('id') || params.get('merchant_order_id') || params.get('order_id') || '';
+  }
+
+  function showResult(message, isError) {
+    // ADJUST THIS — replace with your actual page's UI (a status <div>,
+    // a redirect to a "your license" section, etc.). Left as alert() so
+    // this snippet is testable with zero other markup changes.
+    var el = document.getElementById('payment-result'); // ADJUST THIS — your real element ID, if you have one
+    if (el) {
+      el.textContent = message;
+      el.className = isError ? 'error' : 'success';
+    } else {
+      alert(message);
+    }
+  }
+
+  var orderId = getOrderIdFromUrl();
+  if (!orderId) {
+    showResult('No order reference found in the URL. If you just completed a payment, contact support with your payment confirmation.', true);
+    return;
+  }
+
+  fetch('/api/payment/verify?order_id=' + encodeURIComponent(orderId))
+    .then(function (res) { return res.json(); })
+    .then(function (data) {
+      if (data.verified && data.licenseKey) {
+        try { localStorage.setItem(CES_LICENSE_STORAGE_KEY, data.licenseKey); } catch (e) { /* private browsing — show the key on-screen below regardless so they can copy it manually */ }
+        showResult('Payment confirmed. Your license key: ' + data.licenseKey +
+          ' — it has been saved to this browser automatically. Open the chat assistant to start using it.', false);
+      } else if (data.verified && !data.licenseKey) {
+        // verify.js's own documented KNOWN GAP — paid, but license
+        // issuance failed or is pending. Give them something actionable.
+        showResult('Payment confirmed (order ' + orderId + '), but your license key could not be issued automatically. ' +
+          'Contact support with this order number and we will issue it manually.', true);
+      } else {
+        showResult('Payment not confirmed yet for order ' + orderId + '. If you just paid, wait a moment and refresh this page.', true);
+      }
+    })
+    .catch(function () {
+      showResult('Could not verify your payment right now. Contact support with order ' + orderId + ' if this persists.', true);
+    });
+})();
+</script>

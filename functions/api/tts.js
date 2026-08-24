@@ -872,6 +872,25 @@ const SUPERSUB_TO_ASCII = Object.freeze({
 });
 const SUPERSUB_RE = new RegExp('[' + Object.keys(SUPERSUB_TO_ASCII).join('') + ']', 'g');
 
+// [ADDED] Fenced ```...``` code blocks and inline `...` spans -- mirrors
+// the client's _cesStripCodeMarkers (see that function's own comment for
+// the empirical case that motivated it: a Dev-mode reply embedding a JS
+// snippet whose string/regex literals used `\frac`, `\left(`, `\\`, and
+// `$`, every one of which survived every other pass in this file and was
+// read verbatim). This endpoint has no 'plain'/download mode to spare, so
+// unlike the client's version this one always applies.
+const CODE_FENCE_RE = /```[A-Za-z0-9_-]*\r?\n?[\s\S]*?```/g;
+const INLINE_CODE_RE = /`([^`\r\n]+)`/g;
+function stripCodeMarkers(text) {
+  const isAr = /[\u0600-\u06FF]/.test(text);
+  return text
+    .replace(CODE_FENCE_RE, isAr ? ' كود برمجي ' : ' code block ')
+    // [ADDED] Routed through the same math resolver a live $...$ span
+    // gets, not a bare unwrap -- mirrors the client's identical change to
+    // _cesStripCodeMarkers; see that function's own comment.
+    .replace(INLINE_CODE_RE, (_m, code) => resolveMathInnerForSpeech(code, isAr));
+}
+
 // Marker fallback (base_sub, base_{sub}, base^sup, base^{sup}) is meant
 // for the frontend's <sub>/<sup> HTML upgrade in _cesRenderBotHtml
 // (footing_pro/pc_suite) -- there's no HTML here for it to upgrade into,
@@ -887,8 +906,238 @@ function stripSuperSubMarkers(text) {
     .replace(SUPERSUB_RE, ch => SUPERSUB_TO_ASCII[ch]);
 }
 
+// [PATCH — LaTeX read-aloud fix, defense-in-depth] chat.js's NOTATION rule
+// now has the model wrap every math symbol in real LaTeX ($...$/$$...$$,
+// \frac{}{}, \left(...\right), \sqrt{}, \cdot, \phi, etc.) for the client's
+// KaTeX renderer. speakText() in pc_suite_v71.html / footing_pro_v71.html
+// (same function names, byte-identical in both — see that pair's own
+// header comment) already flattens this to natural words BEFORE ever
+// calling this endpoint, so in the normal flow the pass below is
+// redundant by design. It exists here purely as defense-in-depth for any
+// caller that reaches onRequestGet/onRequestPost directly with un-flattened
+// LaTeX still in `text` — the GET query-param entry point in particular has
+// no client-side pass in front of it at all, and this endpoint has no way
+// to know whether a given caller ran one. Same bounded, finite-construct-
+// set scope as every other pass in this file and in notationNormalizer.mjs
+// — not a LaTeX parser. Mirrors that client pair's _cesResolveMathInner /
+// _cesFlattenMathSpans (mode:'speech') construct-for-construct; keep the
+// two in sync if either changes.
+const GREEK_MACRO_SPEECH_WORDS = {
+  '\\alpha': { ar: 'ألفا', en: 'alpha' }, '\\beta': { ar: 'بيتا', en: 'beta' },
+  '\\gamma': { ar: 'جاما', en: 'gamma' }, '\\delta': { ar: 'دلتا', en: 'delta' },
+  '\\Delta': { ar: 'دلتا', en: 'delta' }, '\\phi': { ar: 'فاي', en: 'phi' },
+  '\\rho': { ar: 'رو', en: 'rho' }, '\\lambda': { ar: 'لامدا', en: 'lambda' },
+  '\\mu': { ar: 'ميو', en: 'mu' }, '\\sigma': { ar: 'سيجما', en: 'sigma' },
+  '\\tau': { ar: 'تاو', en: 'tau' }, '\\psi': { ar: 'باي', en: 'psi' },
+  '\\epsilon': { ar: 'إبسيلون', en: 'epsilon' }, '\\varepsilon': { ar: 'إبسيلون', en: 'epsilon' },
+  '\\pi': { ar: 'باي', en: 'pi' }, '\\theta': { ar: 'ثيتا', en: 'theta' },
+  '\\omega': { ar: 'أوميجا', en: 'omega' }, '\\Omega': { ar: 'أوميجا', en: 'omega' },
+  // [ADDED] \Phi/\eta -- mirrors the client's identical addition; see that
+  // table's comment for the empirical case (capital-Phi as this domain's
+  // rebar-diameter symbol) and the reasoning for reusing \phi's word.
+  '\\Phi': { ar: 'فاي', en: 'Phi' }, '\\eta': { ar: 'إيتا', en: 'eta' },
+};
+const GREEK_MACRO_SPEECH_RE = /\\(?:alpha|beta|gamma|delta|Delta|phi|rho|lambda|mu|sigma|tau|psi|varepsilon|epsilon|pi|theta|omega|Omega|Phi|eta)(?![A-Za-z])/g;
+// One level of nested braces (see the client's identical comment on its own
+// CES_FRAC_RE/CES_SQRT_RE/CES_SUP_RE) — a subscript inside a frac numerator
+// (\frac{M_{cr}}{M_a}) is routine in real replies; a plain [^{}]* argument
+// class would refuse to match it and leave the whole \frac un-flattened.
+const FRAC_SPEECH_RE = /\\frac\{((?:[^{}]|\{[^{}]*\})*)\}\{((?:[^{}]|\{[^{}]*\})*)\}/g;
+const SQRT_SPEECH_RE = /\\sqrt\{((?:[^{}]|\{[^{}]*\})*)\}/g;
+// [ADDED] \sqrt[n]{...} (nth root) -- SQRT_SPEECH_RE above requires \sqrt{
+// immediately, so \sqrt[3]{8} (bracketed order argument) never matched it
+// and fell through to the generic backslash/brace-strip safety net at the
+// end of flattenLatexForSpeech as the broken, literal "sqrt[3]8" (verified
+// empirically before this fix). Mirrors the client's CES_NTH_ROOT_RE.
+const NTH_ROOT_SPEECH_RE = /\\sqrt\[((?:[^\[\]]|\[[^\[\]]*\])*)\]\{((?:[^{}]|\{[^{}]*\})*)\}/g;
+const SUP_SPEECH_RE = /\^\{((?:[^{}]|\{[^{}]*\})*)\}|\^([+\-0-9A-Za-z])(?![A-Za-z0-9])/g;
+// [ADDED] \text{}/\mathrm{}/\mathbf{}/\mathit{}/\boldsymbol{}/\overline{}/
+// \bar{}/\hat{}/\underline{}/\mathcal{} -- typographic wrappers with no
+// spoken content of their own. Previously unhandled: fell through to the
+// same safety net as \sqrt[n]{} above, producing "textapplied moment"
+// (command name and argument fused with no space -- verified empirically
+// as the actual broken output before this fix). Mirrors the client's
+// CES_TYPEWRAP_RE.
+const TYPEWRAP_SPEECH_RE = /\\(?:text|mathrm|mathbf|mathit|boldsymbol|overline|bar|hat|underline|mathcal)\{((?:[^{}]|\{[^{}]*\})*)\}/g;
+// [ADDED] Matrix/array environment -- mirrors the client's CES_MATRIX_ENV_RE.
+// \1 backreference requires the \end{} to name the same environment the
+// \begin{} opened.
+const MATRIX_SPEECH_RE = /\\begin\{(pmatrix|bmatrix|vmatrix|Vmatrix|matrix|array)\}([\s\S]*?)\\end\{\1\}/g;
+// [ADDED] Braced OR bare subscript -- mirrors the client's CES_SUB_RE;
+// see that regex's own comment for the full reasoning (absorbs subscript
+// resolution into this function so it survives a Greek-letter
+// substitution running later in the same pass).
+const SUB_SPEECH_RE = /_\{((?:[^{}]|\{[^{}]*\})*)\}|_([+\-0-9A-Za-z])(?![A-Za-z0-9])/g;
+
+// Mirrors the client's _cesEndsInMacroName -- see that function's own
+// comment.
+function _endsInMacroName(str, idx) {
+  let j = idx;
+  while (j >= 0 && /[A-Za-z]/.test(str.charAt(j))) j--;
+  return j >= 0 && str.charAt(j) === '\\';
+}
+
+// English ordinal suffix (2nd, 3rd, 4th...) for \sqrt[n]{} when n isn't 2
+// or 3 (those two get "square root"/"cube root" instead, for consistency
+// with the plain \sqrt{} wording above). Mirrors the client's _cesOrdinal.
+function ordinalSpeech(n) {
+  const s = String(n), last2 = Number(s.slice(-2));
+  if (last2 >= 11 && last2 <= 13) return s + 'th';
+  switch (s[s.length - 1]) {
+    case '1': return s + 'st';
+    case '2': return s + 'nd';
+    case '3': return s + 'rd';
+    default: return s + 'th';
+  }
+}
+
+function resolveMathInnerForSpeech(inner, isAr) {
+  // [ADDED] `\_` (LaTeX's escaped-literal-underscore) always means "print
+  // an underscore", never a subscript delimiter -- mirrors the client's
+  // identical normalization. See that function's own comment for the
+  // empirical case ("$q_{allowable\_net}$" -> literally "q_allowable\_net",
+  // a raw backslash reaching the TTS engine, before this fix).
+  let s = inner.replace(/\\_/g, ' ');
+  for (let pass = 0; pass < 4; pass++) {
+    const before = s;
+    // [ADDED] Matrix/array environment -- see MATRIX_SPEECH_RE's own
+    // comment. Runs first so LaTeX surviving inside a cell (a subscript, a
+    // unit) still gets the usual passes below on this same iteration.
+    s = s.replace(MATRIX_SPEECH_RE, (_m, _env, body) => {
+      const sep = isAr ? '، ' : ', ';
+      const rows = body.split('\\\\')
+        .map(r => r.replace(/&/g, isAr ? ' و ' : ' and ').replace(/\s+/g, ' ').trim())
+        .filter(r => r.length > 0);
+      return (isAr ? ' المصفوفة: ' : ' the matrix: ') + rows.join(sep) + ' ';
+    });
+    s = s.replace(TYPEWRAP_SPEECH_RE, (_m, arg) => ' ' + arg + ' ');
+    s = s.replace(NTH_ROOT_SPEECH_RE, (_m, order, x) => {
+      if (order === '2') return isAr ? ` الجذر التربيعي لـ (${x}) ` : ` square root of (${x}) `;
+      if (order === '3') return isAr ? ` الجذر التكعيبي لـ (${x}) ` : ` cube root of (${x}) `;
+      return isAr ? ` الجذر رقم ${order} لـ (${x}) ` : ` the ${ordinalSpeech(order)} root of (${x}) `;
+    });
+    s = s.replace(SQRT_SPEECH_RE, (_m, x) =>
+      isAr ? ` الجذر التربيعي لـ (${x}) ` : ` square root of (${x}) `);
+    s = s.replace(FRAC_SPEECH_RE, (_m, num, den) =>
+      isAr ? ` (${num}) على (${den}) ` : ` (${num}) over (${den}) `);
+    s = s.replace(/\\left(?=[(\[{])/g, '').replace(/\\right(?=[)\]}])/g, '');
+    // [ADDED] Standalone `\\` -- mirrors the client's identical addition;
+    // see that line's own comment.
+    s = s.replace(/\\\\/g, () => (isAr ? ' سطر جديد ' : ' new line '));
+    // [ADDED] Subscript resolution -- mirrors the client's identical
+    // CES_SUB_RE callback; see that callback's own comment for the full
+    // fuse-vs-spaced reasoning and the empirical cases it closes.
+    s = s.replace(SUB_SPEECH_RE, (_m, braced, bare, offset, str) => {
+      const sub = braced !== undefined ? braced : bare;
+      const prevChar = offset > 0 ? str.charAt(offset - 1) : '';
+      const adjacent = /[A-Za-z0-9]/.test(prevChar) && !_endsInMacroName(str, offset - 1);
+      if (adjacent && /^[A-Za-z0-9+\-=()]{1,8}$/.test(sub)) return sub;
+      const spoken = sub.replace(/,\s*/g, isAr ? '، ' : ', ').replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
+      return ' ' + spoken + ' ';
+    });
+    s = s.replace(SUP_SPEECH_RE, (_m, braced, bare) => {
+      const exp = braced !== undefined ? braced : bare;
+      if (exp === '2') return isAr ? ' تربيع ' : ' squared ';
+      if (exp === '3') return isAr ? ' تكعيب ' : ' cubed ';
+      return isAr ? ` أُس ${exp} ` : ` to the power ${exp} `;
+    });
+    // [ADDED] Isolated `^`/`_` -- mirrors the client's identical fallback;
+    // see that pair's own comment.
+    s = s.replace(/\^(?![A-Za-z0-9{])/g, () => (isAr ? ' إشارة الأس ' : ' the caret symbol '));
+    s = s.replace(/_(?![A-Za-z0-9{])/g, () => (isAr ? ' الشرطة السفلية ' : ' the underscore symbol '));
+    s = s.replace(/\\cdot|\\times/g, () => (isAr ? ' في ' : ' times '));
+    s = s.replace(/\\leq/g, () => (isAr ? ' أصغر من أو يساوي ' : ' less than or equal to '));
+    s = s.replace(/\\geq/g, () => (isAr ? ' أكبر من أو يساوي ' : ' greater than or equal to '));
+    // [ADDED] \neq/\approx/\infty/\sum/\int/\prod/\% -- previously absent;
+    // each fell through to the bare-word safety net ("neq", "infty" --
+    // not real words in either language, verified empirically). Mirrors
+    // the client's matching additions.
+    s = s.replace(/\\neq/g, () => (isAr ? ' لا يساوي ' : ' not equal to '));
+    s = s.replace(/\\approx/g, () => (isAr ? ' يساوي تقريبًا ' : ' approximately equal to '));
+    s = s.replace(/\\infty/g, () => (isAr ? ' لانهاية ' : ' infinity '));
+    s = s.replace(/\\sum/g, () => (isAr ? ' مجموع ' : ' sum '));
+    s = s.replace(/\\int/g, () => (isAr ? ' تكامل ' : ' integral '));
+    s = s.replace(/\\prod/g, () => (isAr ? ' حاصل ضرب ' : ' product '));
+    s = s.replace(/\\%/g, () => (isAr ? ' بالمئة ' : ' percent '));
+    s = s.replace(/\\pm/g,  () => (isAr ? ' زائد أو ناقص ' : ' plus or minus '));
+    // [ADDED] \min/\max/\Sigma/\forall/\in -- mirrors the client's
+    // identical additions; see that file's comments for the empirical
+    // cases and the reasoning for \Sigma's dedicated (not Greek-table)
+    // mapping.
+    s = s.replace(/\\max(?![A-Za-z])/g, () => (isAr ? ' القيمة الأكبر من ' : ' the greater of '));
+    s = s.replace(/\\min(?![A-Za-z])/g, () => (isAr ? ' القيمة الأصغر من ' : ' the smaller of '));
+    s = s.replace(/\\Sigma(?![A-Za-z])/g, () => (isAr ? ' مجموع ' : ' sum '));
+    s = s.replace(/\\forall/g, () => (isAr ? ' لكل ' : ' for all '));
+    s = s.replace(/\\in(?![A-Za-z])/g, () => (isAr ? ' تنتمي إلى ' : ' belongs to '));
+    s = s.replace(GREEK_MACRO_SPEECH_RE, (m) => {
+      const w = GREEK_MACRO_SPEECH_WORDS[m];
+      return w ? ` ${isAr ? w.ar : w.en} ` : m;
+    });
+    if (s === before) break;
+  }
+  return s
+    .replace(/'/g, '') // prime marks read as "apostrophe" on every engine -- see stripSuperSubMarkers's own header for the same "don't trust five black boxes" reasoning
+    // Same orphaned-underscore fix as the client's _cesResolveMathInner:
+    // a Greek base subscripted by another Greek letter (lambda_Delta) has
+    // both sides expanded to spoken words above, stranding the underscore
+    // with no adjacent letter for stripSuperSubMarkers's own base-lookbehind
+    // to match — only an underscore with NO letter/digit on either side is
+    // touched here, so an intact "M_cr" (letter immediately adjacent) is
+    // left alone for stripSuperSubMarkers to collapse as it already does.
+    .replace(/(?<![A-Za-z0-9])_(?![A-Za-z0-9])/g, ' ');
+}
+
+// [ADDED] Bare comparison/operator GLYPHS -- what notationNormalizer.mjs's
+// own BARE_LATEX_MACROS table already substitutes for \leq/\geq/\pm/etc.
+// on text OUTSIDE any $...$ span. flattenLatexForSpeech below only ever
+// looks INSIDE $...$, so a glyph like this reached the TTS engine
+// completely untouched -- verified empirically (a bare "≤" outside $
+// survived every pass unchanged before this addition). This endpoint is
+// speech-only (no 'plain'/download mode exists server-side), so unlike
+// the client's identical table this one always applies, unconditionally.
+const BARE_GLYPH_RE = /[\u2264\u2265\u00B1\u2260\u2248\u221E\u00D7\u00F7]/g;
+const BARE_GLYPH_WORDS_AR = { '\u2264':' أصغر من أو يساوي ', '\u2265':' أكبر من أو يساوي ', '\u00B1':' زائد أو ناقص ', '\u2260':' لا يساوي ', '\u2248':' يساوي تقريبًا ', '\u221E':' لانهاية ', '\u00D7':' في ', '\u00F7':' على ' };
+const BARE_GLYPH_WORDS_EN = { '\u2264':' less than or equal to ', '\u2265':' greater than or equal to ', '\u00B1':' plus or minus ', '\u2260':' not equal to ', '\u2248':' approximately equal to ', '\u221E':' infinity ', '\u00D7':' times ', '\u00F7':' divided by ' };
+
+// Same $/$$ walk as notationNormalizer.mjs's walkMathSpans (see that
+// module's own header for the escaping/pairing rules this mirrors exactly),
+// simplified to non-streaming: this runs on the complete text a caller
+// posted in one request, never a partial chunk, so no holdback buffering
+// is needed to decide where a span ends.
+function flattenLatexForSpeech(text) {
+  const isAr = /[\u0600-\u06FF]/.test(text);
+  let out = '', i = 0;
+  while (i < text.length) {
+    if (text[i] === '$' && text[i - 1] !== '\\') {
+      const isDisplay = text[i + 1] === '$';
+      const delim = isDisplay ? '$$' : '$';
+      let close = text.indexOf(delim, i + delim.length);
+      while (close !== -1 && text[close - 1] === '\\') close = text.indexOf(delim, close + 1);
+      if (close !== -1) {
+        let resolved = resolveMathInnerForSpeech(text.slice(i + delim.length, close), isAr);
+        // Same "the equation:" / "المعادلة:" lead-in as the client's
+        // _cesFlattenMathSpans for a DISPLAY ($$...$$) block -- kept in
+        // sync so a reply spoken via this defense-in-depth path sounds
+        // the same as one already flattened client-side before arriving.
+        if (isDisplay) resolved = (isAr ? ' المعادلة: ' : ' the equation: ') + resolved;
+        out += resolved;
+        i = close + delim.length;
+        continue;
+      }
+    }
+    out += text[i];
+    i++;
+  }
+  out = out.replace(BARE_GLYPH_RE, (m) => (isAr ? BARE_GLYPH_WORDS_AR : BARE_GLYPH_WORDS_EN)[m]);
+  return out
+    .replace(/\$(?!\d)/g, '')          // stray delimiter, not currency (same guard as notationNormalizer.mjs's stripBareDollar)
+    .replace(/\\([A-Za-z]+)/g, '$1')   // unmapped macro outside the documented set -> bare word, never a leaked backslash
+    .replace(/[{}]/g, '')              // leftover braces nothing above consumed
+    .replace(/[ \t]{2,}/g, ' ');       // collapse the doubled spacing the word substitutions above introduce
+}
+
 function preprocessText(text) {
-  return stripSuperSubMarkers(text)
+  return stripSuperSubMarkers(flattenLatexForSpeech(stripCodeMarkers(text)))
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, ' ')
     .replace(/[٠١٢٣٤٥٦٧٨٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d).toString())
     .replace(/[۰۱۲۳۴۵۶۷۸۹]/g, d => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d).toString())
@@ -2183,7 +2432,31 @@ async function runTtsCascade({ text, lang, genderKey, speed, emotion, env, conte
   // key-ring rotation) is unchanged from v9.
   const tier2QualifiesForReserve = gttsCircuitOpen || isOutageOrRateLimited(tier2Err);
 
-  if (tier2QualifiesForReserve) {
+  // [MERGE — round 5, entire feature was missing] Global (not per-IP) gate
+  // on the reserve tier itself — see tier3RateLimitOpts's own header for
+  // why per-IP alone doesn't protect a shared, finite resource.
+  // checkRateLimit is imported from rotation.mjs already (see this file's
+  // import block) — reused here with a fixed key instead of clientIp,
+  // everything else about the call is identical to every other
+  // checkRateLimit call site in this codebase. A trip here skips BOTH
+  // Deepgram and Speechmatics for this request (they share the one
+  // resource this protects) and falls through directly to Tier 4,
+  // recording why — same attempts.push() pattern every other skip reason
+  // in this cascade already uses. On a rate-limiter failure itself (KV
+  // unavailable), this fails OPEN (still attempts the reserve tier) —
+  // consistent with this file's OWN existing fail-open pattern on the
+  // blanket per-IP check above, not a new inconsistency introduced here.
+  const tier3GloballyThrottled = tier2QualifiesForReserve
+    ? (await checkRateLimit(env, 'tts:tier3:global', tier3RateLimitOpts(env)))?.limited
+    : false;
+
+  if (tier2QualifiesForReserve && tier3GloballyThrottled) {
+    attempts.push({
+      tier: `${PROVIDER_TIERS.deepgram.label}/${PROVIDER_TIERS.speechmatics.label}`,
+      provider: 'reserve',
+      reason: 'skipped: global tier-3 rate limit reached (protects the shared Deepgram credit / Speechmatics allowance from aggregate drain across all callers, not just one IP)',
+    });
+  } else if (tier2QualifiesForReserve) {
     // TIER 3a — Deepgram Aura-2, ENGLISH ONLY, skipped in dev (finite
     // credit) or once lifetime-expired.
     if (englishOnly && deepgram.keys.length > 0 && !devMode) {
@@ -2315,15 +2588,56 @@ function logTtsEvent(fields) {
   } catch (_e) { /* logging must never break the response */ }
 }
 
+// [MERGE — round 5, regression: entire feature was missing, not just
+// recalibrated] Blanket per-IP gate, checked once before any provider is
+// chosen — protects against one IP hammering /api/tts in general,
+// independent of which tier serves the request. Does NOT by itself
+// protect the Deepgram/Speechmatics credit specifically (see
+// tier3RateLimitOpts below for the mechanism that actually targets that
+// risk). Default tightened 40->12 on its own merits, independent of the
+// tier-3 question.
 function rateLimitOpts(env) {
   return {
     windowSeconds: intFromEnv(env, 'TTS_RATE_LIMIT_WINDOW_SECONDS', 60),
-    maxPerWindow : intFromEnv(env, 'TTS_RATE_LIMIT_MAX_PER_WINDOW', 40),
+    maxPerWindow : intFromEnv(env, 'TTS_RATE_LIMIT_MAX_PER_WINDOW', 12),
   };
 }
 
-// v10 point 9 [BREAKING RENAME]: tier2 now means gTTS (was TTS_GTTS_TIMEOUT_MS,
-// default lowered 10000->7000, see changelog); tier3 now means Deepgram/
+// [MERGE — round 5] Gates Deepgram + Speechmatics TOGETHER, GLOBALLY —
+// not per-IP. This is the actual credit-protection mechanism. Per-IP
+// limiting is the wrong shape for this specific risk: the Deepgram
+// credit and Speechmatics' allowance are each ONE shared resource across
+// every visitor, not a per-user allocation — many different IPs, each
+// individually well under any per-IP cap, can still drain a shared
+// resource in aggregate if Tier 2 becomes unreliable for an extended
+// window (Google Translate TTS is unofficial/undocumented; nothing
+// guarantees it stays reliable). isDeepgramExpired()'s time-based clock
+// caps how LONG Deepgram stays reachable, not how FAST the credit can be
+// spent once reachable — nothing before this gate capped spend rate at
+// all. Reuses the same checkRateLimit(env, key, opts) already used
+// everywhere else in this codebase; the only difference from every other
+// call site is a fixed key instead of a clientIp-derived one, which is
+// what makes the limit global instead of per-visitor.
+//
+// Default calibrated against confirmed real pricing (Deepgram Aura-2:
+// $0.030/1,000 chars; MAX_TEXT_LENGTH below caps one request at 200
+// chars, so worst case is $0.006/request). At 5/min, continuous
+// saturation 24/7 gives a worst-case ceiling of ~$43.20/day — the full
+// $200 one-time credit would take ~4.6 days to drain even under that
+// theoretical continuous-worst-case, comfortably past a week of margin.
+// (An earlier default of 10/min was rejected after this same math showed
+// only a ~2.3-day worst-case ceiling — short of the intended margin.)
+// Both figures describe a worst-case bound (requires Tier 2 unavailable
+// continuously for days, every request hitting the 200-char cap), not an
+// expected cost. Override via TTS_TIER3_RATE_LIMIT_MAX_PER_WINDOW for a
+// tighter/looser ceiling.
+function tier3RateLimitOpts(env) {
+  return {
+    windowSeconds: intFromEnv(env, 'TTS_TIER3_RATE_LIMIT_WINDOW_SECONDS', 60),
+    maxPerWindow : intFromEnv(env, 'TTS_TIER3_RATE_LIMIT_MAX_PER_WINDOW', 5),
+  };
+}
+
 // Speechmatics (was TTS_TIER2_TIMEOUT_MS, default unchanged at 6000). A
 // deployment relying on the old names' non-default values needs those
 // values moved to the new names.

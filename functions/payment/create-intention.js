@@ -24,10 +24,23 @@
 // ── Product catalog ───────────────────────────────────────────────────────────
 // Prices in smallest currency unit (piasters / halalas / fils / baisa / dirhams)
 // KWD, BHD, OMR = 3-decimal currencies → multiply display price by 1000
+//
+// [PATCH, subscriber-tier] durationDays — NEW field, added for the
+// developer/subscriber/regular tiering system (functions/_lib/licenses.mjs).
+// Not a Paymob field; this project's own metadata, carried alongside
+// product_id in the pending-order KV record below so that
+// functions/api/payment/webhook.js can mint a license of the right length
+// WITHOUT needing its own duplicate copy of this catalog or a second
+// lookup — it already fetches this same order:{id} record for its
+// idempotency check, so durationDays is simply along for the ride on data
+// that record already carries. Adding a second plan (e.g. a 6-month or
+// 2-year option) later is just another PRODUCTS entry with its own
+// durationDays; webhook.js needs no changes to support it.
 const PRODUCTS = {
   'footing-pro-personal': {
     name_en: 'Footing Pro v.2026 — Personal License',
     name_ar: 'فوتينج برو v.2026 — ترخيص شخصي',
+    durationDays: 365, // "سنة" per the tiering spec's own example duration
     prices: {
       EGP: 49900,  // 499.00 EGP
       SAR: 4900,   // 49.00  SAR
@@ -43,7 +56,14 @@ const PRODUCTS = {
 const GULF_CURRENCIES  = new Set(['SAR', 'AED', 'KWD', 'BHD', 'OMR', 'QAR']);
 const ALLOWED_CURRENCIES = new Set(['EGP', 'SAR', 'AED', 'KWD', 'BHD', 'OMR', 'QAR']);
 
-const SITE_ORIGIN = 'https://civilengsuite.is-a.dev';
+// [MERGE — round 5, regression found and reapplied] Was
+// 'https://civilengsuite.is-a.dev'. Confirmed canonical domain is
+// civilengsuite.pages.dev — this single constant drives Paymob's
+// notification_url, redirection_url, the CORS response, and the CSRF
+// origin check below. With the old value, every real payment sent
+// Paymob's webhook and customer redirect to is-a.dev regardless of which
+// domain the customer actually browsed the site from.
+const SITE_ORIGIN = 'https://civilengsuite.pages.dev';
 
 // ── Response factories ────────────────────────────────────────────────────────
 const BASE_HEADERS = {
@@ -263,6 +283,7 @@ export async function onRequest(context) {
       JSON.stringify({
         status:     'pending',
         product_id: productId,
+        durationDays: product.durationDays, // [PATCH, subscriber-tier] — see PRODUCTS comment
         currency,
         amount,
         email,

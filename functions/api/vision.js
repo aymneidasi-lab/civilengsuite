@@ -348,6 +348,37 @@ import { raceKeyPool } from '../_lib/raceKeyPool.mjs';
 import { callGeminiStreaming } from '../_lib/streamingProviders.mjs';
 import { SseChunkWriter } from '../_lib/resumableSse.mjs'; // [PATCH] resume-mechanism chunkIndex writer
 import { PDF_MIME_TYPE, validatePdfDocument } from '../_lib/documentGuard.mjs'; // NEW — "Insert Text / PDF"
+// [PATCH, 3-tier] Unlike chat.js's text-file path, THIS file is the direct-
+// submission path for images (body.image/body.images) and inline text/
+// document attachments, which never touch dev-upload.js at all — so unlike
+// chat.js, this file DOES need to check/consume the shared file quota
+// itself. See the tier-resolution block in onRequestPost for the full
+// reasoning.
+import {
+  validateLicense,
+  checkFreeFileQuota,
+  consumeFreeFileQuota,
+  checkAndConsumeFreeMessageQuota,
+} from '../_lib/licenses.mjs';
+
+// [PATCH, 3-tier] Duplicated from chat.js/dev-upload.js — same double-HMAC
+// constant-time comparison, same reason for duplication rather than a
+// shared _lib export (see dev-upload.js's own header comment for the
+// precedent this follows). Needed here because this file, unlike before,
+// now has its own isDeveloperMode concept — see onRequestPost.
+async function hmacTimingSafeEqual(a, b) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.generateKey({ name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const [sigA, sigB] = await Promise.all([
+    crypto.subtle.sign('HMAC', key, enc.encode(a)),
+    crypto.subtle.sign('HMAC', key, enc.encode(b)),
+  ]);
+  const arrA = new Uint8Array(sigA);
+  const arrB = new Uint8Array(sigB);
+  let diff = 0;
+  for (let i = 0; i < arrA.length; i++) diff |= arrA[i] ^ arrB[i];
+  return diff === 0;
+}
 
 // ── Models — same pair chat.js uses. gemini-3.5-flash confirmed current
 // GA/multimodal (ai.google.dev, 2026-07). gemini-2.5-flash is NOT used here
@@ -417,6 +448,19 @@ const MESSAGE_MAX_LEN = 2000;
 // if the two are ever suspected of drifting apart again.
 const MAX_IMAGES_PER_REQUEST = 3;
 
+// [PATCH, 3-tier] Elevated ceiling for developer/subscriber — this file
+// previously had NO tier concept at all (see hasElevatedAccess computation
+// in onRequestPost), so MAX_IMAGES_PER_REQUEST above applied uniformly to
+// every caller. 10, not Infinity: unlike chat.js's DEV_MAX_TEXT_FILES
+// (real ceiling is the separate, much larger DEV_KV_MAX_TOTAL_CONTEXT_CHARS
+// further down), there is no equivalent staging path for images here —
+// MAX_BODY_BYTES (19MB total request) is the only other backstop, and 10
+// full-size images already approaches a meaningful fraction of the Gemini
+// vision-token budget the header comment above describes (~258 tokens per
+// 768x768 tile x 10 images, before any text) — a real, chosen number, not
+// an arbitrary stand-in for "unlimited."
+const DEV_MAX_IMAGES_PER_REQUEST = 10;
+
 // ── Timeouts ─────────────────────────────────────────────────────────────
 // Per-attempt: long enough for one multimodal call under normal conditions,
 // short enough to fail over to another key rather than hang. Overall
@@ -446,6 +490,19 @@ const SUBREQUEST_BUDGET_VISION = 26;
 const MAX_TEXT_FILES            = 3;
 const MAX_CHARS_PER_TEXT_FILE   = 6000;
 const MAX_TOTAL_TEXT_FILE_CHARS = 12000;
+
+// [PATCH, 3-tier] Elevated text-file limits for developer/subscriber —
+// same 20,000/40,000-char values chat.js's DEV_MAX_CHARS_PER_TEXT_FILE/
+// DEV_MAX_TOTAL_TEXT_FILE_CHARS use, kept identical deliberately (one
+// mental model for "what does an elevated-tier text attachment allow"
+// across both files, rather than two similar-but-different numbers). Count
+// stays finite (20, not Infinity) unlike chat.js's DEV_MAX_TEXT_FILES —
+// this file has no kvFileIds-staging equivalent for inline body.files, so
+// MAX_BODY_BYTES is the only other backstop and an explicit finite count
+// is a real chosen ceiling, not a stand-in for "unlimited."
+const DEV_MAX_TEXT_FILES            = 20;
+const DEV_MAX_CHARS_PER_TEXT_FILE   = 20000;
+const DEV_MAX_TOTAL_TEXT_FILE_CHARS = 40000;
 
 // Cheap heuristic, not a MIME sniff — body.files[].content always arrives as
 // an already-decoded JS string (JSON.parse output), never raw bytes, so
@@ -480,19 +537,38 @@ function looksLikeBinaryContent(str) {
 // MESSAGE_MAX_LEN silent-truncate) and are flagged inline by
 // buildTextFilesBlock() below so the model never treats truncated content
 // as complete.
-function extractTextFiles(body, likelyArabicMsg) {
+// [PATCH, 3-tier] hasElevatedAccess (new 3rd param, default false so any
+// caller who forgets to pass it gets the SAFE/regular limits, not the
+// elevated ones) selects between the two constant sets above — same
+// selection pattern as chat.js's extractTextFiles, applied here for the
+// first time since this file never had a tier concept before this patch.
+function extractTextFiles(body, likelyArabicMsg, hasElevatedAccess = false) {
+  const maxFiles      = hasElevatedAccess ? DEV_MAX_TEXT_FILES            : MAX_TEXT_FILES;
+  const maxCharsPer   = hasElevatedAccess ? DEV_MAX_CHARS_PER_TEXT_FILE   : MAX_CHARS_PER_TEXT_FILE;
+  const maxCharsTotal = hasElevatedAccess ? DEV_MAX_TOTAL_TEXT_FILE_CHARS : MAX_TOTAL_TEXT_FILE_CHARS;
   if (!Array.isArray(body?.files) || body.files.length === 0) {
-    return { ok: true, files: [] };
+    return { ok: true, files: [], rejected: [] };
   }
-  if (body.files.length > MAX_TEXT_FILES) {
+  if (body.files.length > maxFiles) {
     return {
       ok: false,
       error: likelyArabicMsg
-        ? `الحد الأقصى ${MAX_TEXT_FILES} ملفات في الرسالة الواحدة.`
-        : `Maximum ${MAX_TEXT_FILES} files per message.`,
+        ? `الحد الأقصى ${maxFiles} ملفات في الرسالة الواحدة.`
+        : `Maximum ${maxFiles} files per message.`,
     };
   }
   const files = [];
+  // NEW — a file that fails the binary-content check no longer aborts the
+  // whole request; it's excluded and tracked here instead, same treatment
+  // the two existing skip cases just below (empty content, budget
+  // exhausted) already got — this just extends the same pattern to a third
+  // failure reason instead of leaving it as the one exception that still
+  // hard-rejects everything else in the same batch over one bad file.
+  // Surfaced to the model via rejectedAttachmentsBlock (built alongside
+  // textFilesBlock at the call site) so it can actually tell the person
+  // which file and why, instead of the request just silently going through
+  // with one file missing and no explanation anywhere.
+  const rejected = [];
   let totalChars = 0;
   for (const raw of body.files) {
     const name = typeof raw?.name === 'string' && raw.name.trim()
@@ -501,11 +577,11 @@ function extractTextFiles(body, likelyArabicMsg) {
     let content = typeof raw?.content === 'string' ? raw.content : '';
     if (!content.trim()) continue; // empty file — skip, not a rejection reason
     let truncated = false;
-    if (content.length > MAX_CHARS_PER_TEXT_FILE) {
-      content = content.slice(0, MAX_CHARS_PER_TEXT_FILE);
+    if (content.length > maxCharsPer) {
+      content = content.slice(0, maxCharsPer);
       truncated = true;
     }
-    const roomLeft = MAX_TOTAL_TEXT_FILE_CHARS - totalChars;
+    const roomLeft = maxCharsTotal - totalChars;
     if (roomLeft <= 0) break; // combined cap already reached — drop remaining files silently
     if (content.length > roomLeft) {
       content = content.slice(0, roomLeft);
@@ -520,17 +596,18 @@ function extractTextFiles(body, likelyArabicMsg) {
     // ordering is still strictly more correct: it checks binary-ness of
     // exactly what will be sent to the model, not a discarded tail.
     if (looksLikeBinaryContent(content)) {
-      return {
-        ok: false,
+      rejected.push({
+        name,
         error: likelyArabicMsg
           ? `الملف "${name}" لا يبدو ملف نصي صالح.`
           : `"${name}" doesn't look like a valid text file.`,
-      };
+      });
+      continue;
     }
     totalChars += content.length;
     files.push({ name, content, truncated });
   }
-  return { ok: true, files };
+  return { ok: true, files, rejected };
 }
 
 // Formats validated files into the block appended ONLY to the model-bound
@@ -696,8 +773,15 @@ them as required material, not background for the image — a document or text f
 a photo is often the more decisive source (full source code, a complete spec, a multi-page drawing set) \
 and the image can just as easily be the secondary item. Address content from each attachment that's \
 actually present; do not let the image become the default focus purely because it renders first. If the \
-person's question doesn't point you at one specific attachment, cover all of them, briefly where needed, \
-rather than answering from one and treating the rest as unread.
+person's question doesn't point you at one specific attachment, cover all of them — structure that \
+coverage so each attachment's contribution is identifiable on its own (by name or "Image N" label), not \
+folded into one blended paragraph where it's unclear which claim came from which source — rather than \
+answering from one and treating the rest as unread. If the person's question DOES point at a specific \
+attachment or a specific comparison between named ones, follow that scope precisely and use only what \
+it actually calls for; don't pad the reply with unrequested coverage of everything else just attached. \
+Either way, if one attachment's content turns out unusable for what's being asked — unreadable, off- \
+topic, contradicts the others in a way that needs the person's input to resolve — say so plainly for \
+that one item rather than silently working around it or guessing past it.
 
 Ground your answer in what you actually see — element type, visible condition, and any labels, \
 dimensions, or numbers legible in the image(s) — but fold that into the same sentence as your \
@@ -1474,6 +1558,97 @@ export async function onRequestPost(context) {
     userMessage += '\n\n[Please reply in English only]';
   }
 
+  // 5a-i. [PATCH, 3-tier] Tier resolution — NEW to this file (see hmac
+  //   TimingSafeEqual's header comment for why: this file had no
+  //   devPassword/isDeveloperMode concept before this patch). Byte-for-
+  //   byte the same computation as chat.js's, same body-field convention
+  //   (devPassword/licenseKey/deviceToken/fingerprintId — this file's body
+  //   is JSON message/image/etc, same shape reasoning as chat.js, not
+  //   dev-upload.js's header-based approach). isDeveloperMode is currently
+  //   only consulted here for hasElevatedAccess — this file has no
+  //   confidential system-prompt content the way chat.js's
+  //   DEVELOPER_SYSTEM_PROMPT does, so there is no second, narrower flag
+  //   to keep separate the way chat.js keeps isDeveloperMode apart from
+  //   hasElevatedAccess. If that ever changes, split them here the same
+  //   way, don't retrofit isDeveloperMode's meaning.
+  const incomingDevPassword = typeof body?.devPassword === 'string' ? body.devPassword : '';
+  const configuredDevPw = typeof env.DEVELOPER_PASSWORD === 'string' ? env.DEVELOPER_PASSWORD : '';
+  let isDeveloperMode = false;
+  if (incomingDevPassword && configuredDevPw) {
+    try {
+      isDeveloperMode = await hmacTimingSafeEqual(incomingDevPassword, configuredDevPw);
+    } catch (_) {
+      isDeveloperMode = (incomingDevPassword === configuredDevPw);
+    }
+  }
+  const incomingLicenseKey  = typeof body?.licenseKey === 'string' ? body.licenseKey : '';
+  const incomingDeviceToken = typeof body?.deviceToken === 'string' ? body.deviceToken : '';
+  const incomingFingerprint = typeof body?.fingerprintId === 'string' ? body.fingerprintId : '';
+  let hasElevatedAccess = isDeveloperMode;
+  // NEW — mirrors chat.js's identical capture, previously absent here
+  // (vision.js only tracked the boolean). Needed so licenseStatusFields
+  // below can tell the frontend the same thing chat.js's identical
+  // request would: not just accepted/rejected, but expiresAt or why.
+  let licenseState = null;
+  let licenseRejectReason = null;
+  if (!isDeveloperMode && incomingLicenseKey && incomingDeviceToken) {
+    const licenseResult = await validateLicense(env, incomingLicenseKey, incomingDeviceToken, incomingFingerprint);
+    if (licenseResult.ok) {
+      hasElevatedAccess = true;
+      licenseState = licenseResult.license;
+      console.info('[vision.js] Subscriber authenticated (' + licenseResult.license.licenseKey + ') for request from', clientIp);
+    } else {
+      licenseRejectReason = licenseResult.reason;
+      console.warn('[vision.js] Subscriber license rejected (' + licenseResult.reason + ') for request from', clientIp);
+    }
+  }
+
+  // NEW — declared here so it's in scope at both writeDone() call sites
+  // below. null until the free-tier quota check just below runs and
+  // succeeds; stays null for a hasElevatedAccess request.
+  let quotaRemaining = null;
+  let quotaResetsAt = null;
+
+  // 5a-ii. [PATCH, 3-tier] Free-tier daily MESSAGE quota — SAME shared
+  //   freemsgs:{ip} counter chat.js's identical check writes to (same
+  //   function, same identity = clientIp), not a separate pool. Without
+  //   this, a regular-tier user could route every message through
+  //   /api/vision instead of /api/chat and never touch the 15/day cap at
+  //   all — this file is a fully independent route, not something chat.js
+  //   proxies through. Placed after tier resolution (so isDeveloperMode/
+  //   subscriber callers skip it) and after userMessage is known-non-
+  //   trivial (the default placeholder text above already guarantees
+  //   that), before any image/text/document validation work.
+  if (!hasElevatedAccess) {
+    const msgQuota = await checkAndConsumeFreeMessageQuota(env, clientIp);
+    if (!msgQuota.ok) {
+      console.warn('[vision.js] Free-tier daily message quota exhausted for', clientIp);
+      return json(
+        {
+          error: likelyArabic
+            ? 'وصلت للحد اليومي المجاني من الرسائل. اشترك للمتابعة، أو حاول تاني بعد انتهاء المدة.'
+            : "You've reached today's free message limit. Subscribe to continue, or try again after the window resets.",
+          code: 'FREE_MESSAGE_QUOTA_USED',
+          resetsAt: msgQuota.resetsAt,
+        },
+        403, undefined, request,
+      );
+    }
+    quotaRemaining = msgQuota.remaining;
+    quotaResetsAt = msgQuota.resetsAt;
+  }
+
+  // NEW — mirrors chat.js's identical construction. Spread into both
+  // writeDone() calls below.
+  const licenseStatusFields = {
+    ...(incomingLicenseKey ? (
+      licenseState
+        ? { licenseValid: true, licenseExpiresAt: licenseState.expiresAt }
+        : { licenseValid: false, licenseRejectReason }
+    ) : {}),
+    ...(quotaRemaining !== null ? { quotaRemaining, quotaResetsAt } : {}),
+  };
+
   // 5b. Extract image(s). Two accepted shapes:
   //     - `images`: [{ data, mime }, ...] — NEW, up to MAX_IMAGES_PER_REQUEST,
   //       sent by the updated web widget (footing_pro_v28.html / pc_suite_v28.html).
@@ -1508,14 +1683,18 @@ export async function onRequestPost(context) {
     return { ok: true, mimeType, data };
   }
 
+  // [PATCH, 3-tier] Selected once, used for both the initial slice and the
+  // count-rejection check below — same hasElevatedAccess computed in 5a-i.
+  const imageLimit = hasElevatedAccess ? DEV_MAX_IMAGES_PER_REQUEST : MAX_IMAGES_PER_REQUEST;
   let rawImages;
   if (Array.isArray(body?.images)) {
-    // Sliced to one past the cap — enough to detect an over-cap request
-    // below without validating/base64-checking an arbitrarily long array
-    // an unthrottled non-browser caller could otherwise pad the request
-    // with (see rotation.mjs's rate-limiter header note on this threat
-    // model — CORS does not stop a direct POST to this endpoint).
-    rawImages = body.images.slice(0, MAX_IMAGES_PER_REQUEST + 1);
+    // Sliced to one past the (tier-appropriate) cap — enough to detect an
+    // over-cap request below without validating/base64-checking an
+    // arbitrarily long array an unthrottled non-browser caller could
+    // otherwise pad the request with (see rotation.mjs's rate-limiter
+    // header note on this threat model — CORS does not stop a direct POST
+    // to this endpoint).
+    rawImages = body.images.slice(0, imageLimit + 1);
   } else if (typeof body?.image === 'string' && body.image.trim()) {
     rawImages = [{
       data: body.image,
@@ -1526,21 +1705,28 @@ export async function onRequestPost(context) {
     rawImages = [];
   }
 
-  if (rawImages.length > MAX_IMAGES_PER_REQUEST) {
+  if (rawImages.length > imageLimit) {
     return json({
       error: likelyArabic
-        ? `الحد الأقصى ${MAX_IMAGES_PER_REQUEST} صور في الرسالة الواحدة.`
-        : `Maximum ${MAX_IMAGES_PER_REQUEST} images per message.`,
+        ? `الحد الأقصى ${imageLimit} صور في الرسالة الواحدة.`
+        : `Maximum ${imageLimit} images per message.`,
     }, 400, undefined, request);
   }
 
   const images = [];
+  // NEW — a failing image no longer 400s the whole request; it's excluded
+  // and tracked here, same treatment extractTextFiles() below now gives a
+  // bad text file. rejectedImages is folded into rejectedAttachmentsBlock
+  // at the call site alongside rejectedDocument/rejected text files, one
+  // place the model reads all three kinds of exclusion from.
+  const rejectedImages = [];
   for (let i = 0; i < rawImages.length; i++) {
     const entry = rawImages[i] || {};
     const label = rawImages.length > 1 ? `Image ${i + 1}` : 'Image';
     const result = validateOneImage(entry?.data, entry?.mime ?? entry?.mimeType, label);
     if (!result.ok) {
-      return json({ error: result.error }, 400, undefined, request);
+      rejectedImages.push({ name: label, error: result.error });
+      continue;
     }
     images.push({ mimeType: result.mimeType, data: result.data });
   }
@@ -1551,21 +1737,22 @@ export async function onRequestPost(context) {
   // present in the same request; the parts-array builder below handles
   // that combination. See documentGuard.mjs for the full validation
   // (magic-byte sniff, byte-size cap, heuristic page-count soft-cap).
+  // NEW — same skip-not-reject treatment as images/text files above: an
+  // invalid PDF no longer 400s a request that also has a valid image or
+  // text file attached. pdfDoc simply stays null and rejectedDocument
+  // carries the reason into rejectedAttachmentsBlock.
   let pdfDoc = null;
+  let rejectedDocument = null;
   if (body?.document && typeof body.document === 'object') {
+    const docName = (typeof body.document.name === 'string' && body.document.name.trim())
+      ? body.document.name.trim().slice(0, 200)
+      : 'document.pdf';
     const docResult = validatePdfDocument(body.document, likelyArabic);
     if (!docResult.ok) {
-      return json({ error: docResult.error }, 400, undefined, request);
+      rejectedDocument = { name: docName, error: docResult.error };
+    } else {
+      pdfDoc = docResult;
     }
-    pdfDoc = docResult;
-  }
-
-  // Requires at least one image OR one document — the endpoint's whole
-  // purpose. Checked here, after both extraction blocks, rather than
-  // right after rawImages like the pre-PDF version did, since a
-  // document-only request is now a valid, non-empty request.
-  if (rawImages.length === 0 && !pdfDoc) {
-    return json({ error: buildFriendlyVisionError({ httpStatus: 400, errStatus: '' }, likelyArabic) }, 400, undefined, request);
   }
 
   // 5c. Adaptive detail level. Computed once, from the fully-resolved
@@ -1599,7 +1786,10 @@ export async function onRequestPost(context) {
   //     modelMessageText variable below, never into userMessage itself —
   //     userMessage is done being consumed after this point in the
   //     function (its last read was wantsHighDetail() above).
-  const textFilesResult = extractTextFiles(body, likelyArabic);
+  // [PATCH, 3-tier] hasElevatedAccess, not a bare call — a subscriber gets
+  // the same DEV_MAX_* text-file limits as a developer. See the
+  // hasElevatedAccess computation above (step 5a-i).
+  const textFilesResult = extractTextFiles(body, likelyArabic, hasElevatedAccess);
   if (!textFilesResult.ok) {
     return json({ error: textFilesResult.error }, 400, undefined, request);
   }
@@ -1612,7 +1802,86 @@ export async function onRequestPost(context) {
     return json({ error: kvFilesResult.error }, 400, undefined, request);
   }
   const textFilesBlock = buildTextFilesBlock(textFilesResult.files.concat(kvFilesResult.files));
-  const modelMessageText = userMessage + textFilesBlock;
+
+  // NEW — everything this request excluded (bad image(s), a bad PDF, bad
+  // text file(s)), folded into ONE block appended to modelMessageText so
+  // the model has an explicit, deterministic list of what's missing and
+  // why — instead of silently answering from whatever's left, or worse,
+  // inventing a plausible-sounding explanation on its own (see chat.js's
+  // CAPABILITY HONESTY note on exactly that failure mode; same fix
+  // applies here: give it the real list instead of leaving a gap for it
+  // to fill in). Never folded into userMessage — same reasoning
+  // textFilesBlock above already documents for keeping it out of that
+  // variable.
+  const rejectedAttachments = [
+    ...rejectedImages.map((r) => ({ kind: 'image', name: r.name, error: r.error })),
+    ...(rejectedDocument ? [{ kind: 'document', name: rejectedDocument.name, error: rejectedDocument.error }] : []),
+    ...textFilesResult.rejected.map((r) => ({ kind: 'file', name: r.name, error: r.error })),
+  ];
+  const rejectedAttachmentsBlock = rejectedAttachments.length === 0 ? '' : '\n\n--- Attachments that could NOT be used (tell the person which, and why, in your reply) ---\n' +
+    rejectedAttachments.map((r) => `- ${r.name}: ${r.error}`).join('\n') +
+    '\n--- End of excluded attachments ---';
+
+  const modelMessageText = userMessage + textFilesBlock + rejectedAttachmentsBlock;
+
+  // Requires at least one USABLE attachment OR actual caption text — the
+  // endpoint's whole purpose, now checked against post-validation counts
+  // (images.length, not rawImages.length) since a request can arrive with
+  // attachments that all failed validation and nothing else — a case the
+  // pre-PDF version's rawImages.length===0 check would have missed
+  // entirely (rawImages.length stays >0 even when every entry in it later
+  // fails validation).
+  if (images.length === 0 && !pdfDoc && textFilesResult.files.length === 0 && kvFilesResult.files.length === 0 && !userMessage.trim()) {
+    const allErrors = rejectedAttachments.map((r) => r.error);
+    return json({
+      error: allErrors.length > 0
+        ? allErrors.join(' — ')
+        : buildFriendlyVisionError({ httpStatus: 400, errStatus: '' }, likelyArabic),
+    }, 400, undefined, request);
+  }
+
+  // 5d-ii. [PATCH, 3-tier] Regular-tier daily FILE quota — the reason this
+  //   file needed a tier concept at all (see 5a-i). Counts every file
+  //   source THIS endpoint can deliver directly: images[], pdfDoc (1 if
+  //   present), and textFilesResult.files — deliberately NOT
+  //   kvFilesResult.files, since those were already quota-gated once, at
+  //   mint time, by dev-upload.js's own checkFreeFileQuota/
+  //   consumeFreeFileQuota call — charging them again here would double-
+  //   count the same file. Counted from POST-VALIDATION arrays, i.e. after
+  //   rejectedAttachments has already been split out above — a file this
+  //   base rejected (bad MIME, corrupt PDF, oversized) never reaches this
+  //   count, matching this patch's standing rule elsewhere: never charge
+  //   an anonymous caller's quota for a request that didn't actually
+  //   deliver usable content. Placed after the usability check above
+  //   rather than before it — equivalent in effect (fileCount > 0 already
+  //   implies that check passes) but reads more naturally as "the request
+  //   is confirmed to proceed; now charge for what it used."
+  //
+  //   Same atomic-relative-to-the-provider-call tradeoff as chat.js's
+  //   message quota and this file's own message-quota check above:
+  //   consumed once validation succeeds, not after Gemini actually replies
+  //   (this file streams — see the ReadableStream below — same complexity
+  //   argument as chat.js's for not hooking post-success).
+  if (!hasElevatedAccess) {
+    const fileCount = images.length + (pdfDoc ? 1 : 0) + textFilesResult.files.length;
+    if (fileCount > 0) {
+      const fileQuota = await checkFreeFileQuota(env, clientIp);
+      if (!fileQuota.ok || fileQuota.remaining < fileCount) {
+        console.warn('[vision.js] Free-tier daily file quota insufficient for', clientIp, '- need', fileCount, 'have', fileQuota.remaining ?? 0);
+        return json(
+          {
+            error: likelyArabic
+              ? `وصلت لحد الملفات المجاني اليومي (متبقي ${fileQuota.remaining ?? 0} من أصل الرسالة تحتاج ${fileCount}). اشترك للمتابعة، أو حاول تاني بعد انتهاء المدة.`
+              : `Not enough of today's free file quota remains (need ${fileCount}, have ${fileQuota.remaining ?? 0} left). Subscribe to continue, or try again after the window resets.`,
+            code: 'FREE_QUOTA_USED',
+            resetsAt: fileQuota.resetsAt,
+          },
+          403, undefined, request,
+        );
+      }
+      await consumeFreeFileQuota(env, clientIp, fileCount);
+    }
+  }
 
   // 5e. Structured-extraction opt-in — NEW. Only footing_pro's "read from
   //     photo" autofill sends this; the general vision chat (this same
@@ -1854,6 +2123,7 @@ export async function onRequestPost(context) {
             : 502;
           sseWriter.writeError(buildFriendlyVisionError(lastResult, likelyArabic), { status });
           sseWriter.writeDone({
+            ...licenseStatusFields,
             extracted: extractionResult?.extracted ?? undefined,
             extractStatus: extractionResult?.status ?? undefined,
           });
@@ -1886,6 +2156,7 @@ export async function onRequestPost(context) {
       const visionFinishReason = winner && winner.finishReason;
       const visionTruncated = visionFinishReason === 'MAX_TOKENS';
       sseWriter.writeDone({
+        ...licenseStatusFields,
         source: winner ? `gemini-${winner.keyTag}${winner.modelTag}` : undefined,
         detail: detailReq,
         finishReason: visionFinishReason,
@@ -1909,6 +2180,23 @@ export async function onRequestPost(context) {
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
       'X-CES-Vision-Detail': detailReq,
+      // NEW — known upfront, same as X-CES-Vision-Detail above (validation
+      // already ran; nothing here depends on the streamed reply). Kept
+      // deliberately terse and English/ASCII-only — HTTP header values
+      // aren't a safe place for arbitrary Unicode/Arabic error prose, so
+      // the FULL per-item reason lives in rejectedAttachmentsBlock inside
+      // the model's own prompt instead (see that block's comment), which
+      // is what actually reaches the person, in their own reply language,
+      // via the model's streamed text. This header is a lightweight,
+      // frontend-optional hook — e.g. to show an immediate inline notice
+      // ("1 attachment couldn't be used") without waiting for or parsing
+      // the streamed reply — not the primary way this information reaches
+      // the user. Omitted entirely when nothing was rejected, matching
+      // X-CES-Vision-Source's existing "absent, not empty-string" pattern
+      // for a normal case with nothing to report.
+      ...(rejectedAttachments.length > 0
+        ? { 'X-CES-Rejected-Attachments': String(rejectedAttachments.length) }
+        : {}),
       ...getCorsHeaders(request),
     },
   });

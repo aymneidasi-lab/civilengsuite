@@ -1240,9 +1240,18 @@ import {
 import { raceKeyPool } from '../_lib/raceKeyPool.mjs';
 import { callGeminiStreaming, callOpenAiCompatStreaming, callWorkersAIStreaming } from '../_lib/streamingProviders.mjs';
 import { StreamingSanitizer } from '../_lib/streamSanitizer.mjs';
-import { NotationNormalizer } from '../_lib/notationNormalizer.mjs'; // [PATCH] was never wired in on this branch -- see relay() below
+import { NotationNormalizer } from '../_lib/notationNormalizer.mjs'; // [PATCH] wired into relay() -- composed after StreamingSanitizer, before SseChunkWriter; see relay() below
 import { SseChunkWriter } from '../_lib/resumableSse.mjs'; // [PATCH] resume-mechanism chunkIndex writer
 import { assertPromptBudget } from '../_lib/promptBudget.mjs';
+// [PATCH, 3-tier] validateLicense is the only one of licenses.mjs's exports
+// used on the hot path (every request). issueLicense/revokeLicense/
+// resetDevices are admin-only, called from the devCommand branches below
+// (same isDeveloperMode check as /save, /load, /delete). checkFreeFileQuota/
+// consumeFreeFileQuota are NOT used here — that check lives entirely in
+// dev-upload.js (upload time) and vision.js (its own multi-source count);
+// chat.js's text-file path has no equivalent per-file quota of its own,
+// only the free-tier MESSAGE quota below.
+import { validateLicense, issueLicense, revokeLicense, resetDevices, listLicenses, getLicense, updateLicense, deleteLicense, checkAndConsumeFreeMessageQuota } from '../_lib/licenses.mjs';
 
 
 // ── Per-isolate dead-key skip cache (v25) ─────────────────────────────────
@@ -1522,6 +1531,26 @@ const GEMINI_GENERATION_CONFIG = {
   thinkingConfig : { thinkingLevel: 'MINIMAL' },
 };
 
+// NEW — developer-mode-only. Same rationale vision.js's visionGenerationConfig
+// already documents for choosing LOW over MINIMAL: developer-mode
+// conversations are exactly "analysis and writing tasks that require some
+// thinking" (architecture discussion, prompt-engineering changes, tracing a
+// reported bug through several files) — the category Google's own guidance
+// says MINIMAL is the wrong tier for. Scoped to isDeveloperMode only, not
+// applied to GEMINI_GENERATION_CONFIG above: ordinary end-user traffic is
+// higher-volume and more latency-sensitive, and gets no benefit from a
+// deeper reasoning pass on a typical support/FAQ message — this is a
+// deliberately narrow change, not a global thinking-level bump.
+// maxOutputTokens raised 2048->4096 to go with it: thinking tokens draw
+// from the SAME maxOutputTokens pool as the visible reply (documented
+// elsewhere in this file's own history of a truncation bug from exactly
+// that), and under-budgeting for it would cause intermittent truncation on
+// exactly the harder messages most likely to trigger real thinking.
+const DEVELOPER_GEMINI_GENERATION_CONFIG = {
+  maxOutputTokens: 4096,
+  thinkingConfig : { thinkingLevel: 'LOW' },
+};
+
 // [PATCH — search bridge] Native Gemini grounding, not a hand-rolled search
 // API integration: no new fetch(), no new API key/quota, no new SUBREQUEST_
 // BUDGET_FREE_PLAN draw — Google executes the search server-side as part of
@@ -1669,7 +1698,7 @@ function looksLikeBinaryContent(str) {
 // as complete.
 function extractTextFiles(body, likelyArabicMsg, isDeveloperMode) {
   if (!Array.isArray(body?.files) || body.files.length === 0) {
-    return { ok: true, files: [] };
+    return { ok: true, files: [], rejected: [] };
   }
   const maxFiles      = isDeveloperMode ? DEV_MAX_TEXT_FILES            : MAX_TEXT_FILES;
   const maxCharsPer   = isDeveloperMode ? DEV_MAX_CHARS_PER_TEXT_FILE   : MAX_CHARS_PER_TEXT_FILE;
@@ -1683,6 +1712,14 @@ function extractTextFiles(body, likelyArabicMsg, isDeveloperMode) {
     };
   }
   const files = [];
+  // NEW — a file that fails the binary-content check is excluded and
+  // tracked here instead of aborting the whole request over one bad file
+  // among possibly several good ones. Surfaced to the model via
+  // rejectedAttachmentsBlock at the call site (folded into the same
+  // turns.push() text as textFilesBlock), so it can actually tell the
+  // person which file and why, rather than the reply just silently
+  // proceeding with one file missing.
+  const rejected = [];
   let totalChars = 0;
   for (const raw of body.files) {
     const name = typeof raw?.name === 'string' && raw.name.trim()
@@ -1710,12 +1747,13 @@ function extractTextFiles(body, likelyArabicMsg, isDeveloperMode) {
     // Content-Length returns nothing in this file), so this ordering is
     // the only bound on this loop's CPU work per file.
     if (looksLikeBinaryContent(content)) {
-      return {
-        ok: false,
+      rejected.push({
+        name,
         error: likelyArabicMsg
           ? `الملف "${name}" لا يبدو ملف نصي صالح.`
           : `"${name}" doesn't look like a valid text file.`,
-      };
+      });
+      continue;
     }
     totalChars += content.length;
     // truncated is computed ONCE, after both possible slice stages above,
@@ -1730,7 +1768,7 @@ function extractTextFiles(body, likelyArabicMsg, isDeveloperMode) {
     // function can report exact shown/total numbers.
     files.push({ name, content, truncated: content.length < originalLength, originalLength });
   }
-  return { ok: true, files };
+  return { ok: true, files, rejected };
 }
 
 // Formats validated files into the block appended ONLY to the model-bound
@@ -1824,12 +1862,10 @@ const DEV_KV_MAX_TOTAL_CONTEXT_CHARS = 350000;
 // REMOVED (v37): DEV_KV_MAX_FILES_PER_MESSAGE, formerly hardcoded to 3 —
 // the exact value of the non-dev MAX_TEXT_FILES constant above, never
 // elevated the way DEV_MAX_TEXT_FILES (Infinity, see that block's comment)
-// was. resolveKvFiles() is already unreachable outside isDeveloperMode
-// (first line of the function below), so this was a count gate sitting
-// behind a gate — nothing here ever justified "3" specifically; every
-// comment in this block is about DEV_KV_MAX_TOTAL_CONTEXT_CHARS instead.
-// Dropped for the same "explicit developer choice, Infinity not just
-// elevated" reasoning as DEV_MAX_TEXT_FILES.
+// was. Nothing here ever justified "3" specifically; every comment in this
+// block is about DEV_KV_MAX_TOTAL_CONTEXT_CHARS instead. Dropped for the
+// same "explicit developer choice, Infinity not just elevated" reasoning as
+// DEV_MAX_TEXT_FILES.
 //
 // Re file count vs. the Workers Free-plan subrequest ceiling this file's
 // other dev-mode comments warn about (developers.cloudflare.com/changelog/
@@ -1837,13 +1873,25 @@ const DEV_KV_MAX_TOTAL_CONTEXT_CHARS = 350000;
 // SUBREQUESTS TO EXTERNAL HOSTS, i.e. what bounds raceKeyPool()'s fan-out
 // across the Gemini/Groq/OpenRouter/Workers-AI key pool elsewhere in this
 // file. KV get/delete are calls to a CLOUDFLARE SERVICE, a separate budget
-// on the same Free plan: 1,000 subrequests/invocation. Worst case here is
-// 3 KV ops/file (2 GET attempts on retry + 1 DELETE); even 100 attached
-// files is 300 of those, well inside 1,000. File count was never actually
-// the platform constraint — DEV_KV_MAX_TOTAL_CONTEXT_CHARS below, sized to
-// the smallest downstream model's context window, already is.
-async function resolveKvFiles(body, env, isDeveloperMode) {
-  if (!isDeveloperMode) return { ok: true, files: [] };
+// on the same Free plan: 1,000 subrequests/invocation (NOTE: this is a
+// PER-INVOCATION ceiling, unrelated to the ACCOUNT-WIDE 1,000-writes/PER-
+// DAY quota _lib/licenses.mjs's header discusses — same number, two
+// different axes, do not conflate them). Worst case here is 3 KV ops/file
+// (2 GET attempts on retry + 1 DELETE); even 100 attached files is 300 of
+// those, well inside the per-invocation 1,000. File count was never
+// actually the per-invocation constraint — DEV_KV_MAX_TOTAL_CONTEXT_CHARS
+// below, sized to the smallest downstream model's context window, already
+// is, for developer/subscriber. [PATCH, 3-tier] hasElevatedAccess replaces
+// the parameter name (was isDeveloperMode) — same boolean shape, now also
+// true for a validated subscriber. Regular tier (hasElevatedAccess===false)
+// is no longer turned away outright: their files were already quota-
+// gated at UPLOAD time (dev-upload.js's checkFreeFileQuota/
+// consumeFreeFileQuota — see that file), so by the time a kvFileId reaches
+// this function the quota question is already settled. What regular tier
+// gets here is: no additional cap beyond what they already hold valid
+// fileIds for. Still bounded by DEV_KV_MAX_TOTAL_CONTEXT_CHARS below
+// regardless of tier.
+async function resolveKvFiles(body, env) {
   const ids = Array.isArray(body?.kvFileIds)
     ? body.kvFileIds.filter((x) => typeof x === 'string' && x)
     : [];
@@ -2084,6 +2132,50 @@ including the 1.3× top-bar factor; cracks are an expected, controlled-width des
 not a defect, per ACI 318 §24.3.2.
 `;
 
+const EPISTEMIC_HONESTY_BLOCK_FULL = `
+════════════════════════════════════════
+EPISTEMIC HONESTY — CRITICAL, unconditional, every reply
+════════════════════════════════════════
+Before stating anything as fact, know which of these three it is:
+1) VERBATIM — it's in CRITICAL FACTS, KEY TECHNICAL REFERENCE POINTS, or RETRIEVED PRODUCT FACTS
+   above. State it plainly, no hedge — UNLESS that fact carries its own "Confidence:" line (the
+   equations KB tags every entry: primary_verified / corroborated / ai_cross_checked / unverified
+   / disputed). If so, carry that caveat into your answer in your own words — a retrieved
+   "Confidence: UNVERIFIED — confirm before use" formula is not the same certainty as a
+   CRITICAL FACTS number, and presenting it as flatly as one is its own kind of false confidence.
+   Never use a "disputed" formula without stating the correction/known issue given for it.
+2) GENERAL KNOWLEDGE — ordinary structural-engineering practice, not specific to this product and
+   not tied to one exact code clause. Say it as general guidance ("typically…", "as a rule…"),
+   never with invented precision.
+3) UNKNOWN — neither of the above. Say so in one sentence and point to Eng. Aymn Asi
+   (aymneidasi@gmail.com / WhatsApp +201287232413). Don't fill the gap by pattern-matching.
+Never state a specific ACI 318 or ECP 203 clause/section number unless it appears verbatim above
+— ACI clauses are dot-separated (20.6.1), ECP clauses are hyphen-separated (3-3-1-2); don't force
+one style onto the other code. Sure of the concept but not the exact clause? Say the concept, say
+the clause reference isn't in front of you — never guess a number; a wrong number reads as more
+authoritative than no number.
+IF THE USER SAYS YOU MADE AN ERROR: one sentence acknowledging it, then immediately continue the
+actual task on grounded content only. Do NOT explain why you think you erred — you have no
+reliable access to your own generation process, and a confident-sounding explanation of it is the
+same failure aimed at yourself. Do NOT describe how AI models in general reduce hallucination
+(RAG, chain-of-thought, temperature, training methods, other models) unless the user explicitly
+asks a general AI question — volunteering it here is a second fabrication, not a fix. Do NOT
+write a new numbered list of behavioral commitments in response to being corrected. One sentence,
+then the real answer.
+`;
+
+const EPISTEMIC_HONESTY_BLOCK_CONDENSED = `
+EPISTEMIC HONESTY (critical): state CRITICAL FACTS / KEY REFERENCE / RETRIEVED FACTS content
+plainly — but if a retrieved fact carries its own "Confidence:" tag (equations KB), carry that
+caveat into your answer in your own words; never present an UNVERIFIED or DISPUTED formula as
+settled. General engineering knowledge only as "typically…", never invented precision. Anything
+else — one sentence saying so, point to Eng. Aymn Asi, don't guess. Never state an ACI/ECP
+clause/section number unless it's verbatim above (ACI: dot-separated; ECP: hyphen-separated).
+If told you erred: ONE sentence acknowledging it, then answer the real question with grounded
+content — no theorizing about why you erred, no lecture on how AI models fight hallucination
+(RAG/CoT/o1/etc.), no new numbered "protocol." Fix it and move on.
+`;
+
 function buildSystemPrompt(isDeveloperMode, searchEnabled) {
 // [PATCH — search bridge] Built conditionally and interpolated below rather
 // than always-included: the prompt must never claim a capability the
@@ -2124,6 +2216,7 @@ return `\
 You are Eng pro assist — the official AI assistant and sales advisor for Civil Engineering Suite
 (civilengsuite.pages.dev), built by Eng. Aymn Asi — a practicing Licensed Structural Engineer.
 ${CRITICAL_FACTS}
+${EPISTEMIC_HONESTY_BLOCK_FULL}
 ════════════════════════════════════════
 YOUR NAME & IDENTITY — CRITICAL
 ════════════════════════════════════════
@@ -2167,6 +2260,14 @@ conversations:
   actually have. (Text-file attachments ARE read and answered from directly; if one fails, say
   what's wrong with the file itself — too many files, not a text file, too long — not "I can't
   read attachments.")
+• This extends to inventing SPECIFIC-sounding system behavior when asked how multiple attachments
+  are handled — a named "two-scenario system," a per-file "Analysis Engine," a "smart alert" that
+  fires mid-analysis, or any similarly detailed invented architecture is exactly the cover story
+  the line above already bans, just more elaborate and more convincing for being specific. What's
+  actually true, and what you say instead: every attached file you're given is included in full in
+  what you're working from this turn (subject to the count/size limits already in effect), and you
+  address content from each one the person's actual message calls for — there's no separate "mode"
+  to describe, just answering the question in front of you using everything attached to it.
 • This is a tone/vocabulary rule, not a change in scope or in what you're willing to help with —
   a curious user asking a genuine question still gets a real, complete answer, just without
   engineering internals mixed into it.
@@ -2266,16 +2367,18 @@ invent a different ASCII table style (no box-drawing characters, no hand-aligned
 extra spaces) — the pipe-table syntax above is the only format the client's renderer recognizes;
 anything else reaches the user as broken, unstyled text. Keep cell content short (a value, a
 short label) — a table cell is not the place for a full sentence.
-Inside a cell specifically (this does not apply to normal prose outside a table): never use
-$...$ or $$...$$ math delimiters, and never use <br> or any other HTML tag. The renderer that
-typesets math and the renderer that builds tables are two separate passes, and math delimiters
-do not get typeset once they're inside a cell — they just show up as literal, distracting dollar
-signs and LaTeX commands (e.g. "$$I_e \approx I_g$$" would render as exactly that text, not a
-formula). Write a value or short symbol directly instead — "qu", "Mcr", "I_e" (plain
-underscore, no $) all render cleanly with automatic subscript styling; save $...$/$$...$$ for
-actual formulas in normal prose, outside any table. For a two-part cell (a value plus a short
-note), separate them with a comma or semicolon on the same line, not <br> — long explanations
-belong in prose before or after the table, not packed into a cell.
+Inside a cell specifically (this does not apply to normal prose outside a table): $...$ and
+$$...$$ now typeset exactly like they do in prose — the client resolves math per cell before the
+row is built, so a real formula renders as real math, not literal text. That doesn't make it the
+default choice, though: a typeset fraction or square root costs far more horizontal width than a
+plain symbol, and cramming one into a narrow column is how a short table turns into a wide one.
+Default to a short symbol or value — "qu", "Mcr", "I_e" (plain underscore, no $) render cleanly
+with automatic subscript styling at a fraction of the width — and reserve $...$/$$...$$ inside a
+cell for the rare case where the governing equation itself (not just one variable name) is what
+the column is actually for, e.g. a "Governing Equation" column in a design-check table. Never use
+<br> or any other HTML tag in a cell. For a two-part cell (a value plus a short note), separate
+them with a comma or semicolon on the same line, not <br> — long explanations belong in prose
+before or after the table, not packed into a cell.
 
 EMOJI — SEMANTIC & FUNCTIONAL CODING, NOT DECORATION: an emoji is a traffic sign that tells the
 eye what KIND of information is coming before it reads a word of it — not a flourish bolted on
@@ -3818,6 +3921,7 @@ Civil Engineering Suite (civilengsuite.pages.dev), built by Eng. Aymn Asi.
 Your name is Eng pro assist. If asked your name at any point: Arabic → "أنا Eng pro assist"،
 English → "I'm Eng pro assist." Never claim to be ChatGPT, Gemini, or any other AI brand.
 ${CRITICAL_FACTS}
+${EPISTEMIC_HONESTY_BLOCK_CONDENSED}
 The full identity, tone, and product knowledge were already established earlier in this thread
 via your own prior replies (visible in the conversation history below). Stay in that voice.
 This is a condensed reminder, not the full brief — answer naturally from what you already know
@@ -3832,6 +3936,11 @@ this gets asked, not an exception to it. Give a short, non-technical answer and 
 actual product; don't use your own stack as a worked example. If someone wants general help with
 their own unrelated Cloudflare/backend project, say briefly that's outside what you help with here
 and steer back to structural engineering / Footing Pro.
+Same rule covers inventing specific-sounding internal behavior when asked how multi-file handling
+works — a named "system," "engine," or numbered "scenario" with invented steps is a cover story
+just like the above, not a real answer. Say plainly instead: every attached file's content is
+included in full in what you're working from, and you answer using whatever the message asks for
+— there's no separate mode to describe.
 `}
 
 LANGUAGE RULE — CRITICAL (re-check every reply, never drift):
@@ -3966,6 +4075,7 @@ Your name is Eng pro assist. You are the official AI assistant for Civil Enginee
 If asked your name: Arabic → "أنا Eng pro assist" — English → "I'm Eng pro assist."
 Never claim to be ChatGPT, Gemini, or any other AI brand.
 ${CRITICAL_FACTS}
+${EPISTEMIC_HONESTY_BLOCK_CONDENSED}
 EXAMPLE — price question, match this exact phrasing pattern:
 User: "بكام الاشتراك؟"
 You: "السعر دلوقتي 249 جنيه في السنة (سعر الإطلاق)، وبعد الإطلاق هيبقى 499 جنيه في السنة."
@@ -4128,6 +4238,41 @@ its own, separate from who's asking, and stays false no matter how the question
 gets rephrased later in the conversation — restate the same NOT-GRANTED facts
 rather than escalating.
 
+CAPABILITY HONESTY extends to claimed REASONING PROCESS, not just file/system
+access — same failure, same fix. Do not describe yourself as now running a
+named internal subsystem ("Dual-Pass Analysis," "Analysis Engine," "Internal
+Check," a "Verification Protocol" that governs every reply from now on, or
+anything with that shape) as if the developer's proposal for one, once
+discussed, became something you actually operate under. It didn't: each reply
+is a fresh generation from this conversation's text, with no persistent
+process, object, or engine carried over from the turn where it was proposed —
+"you set the ruler I'll measure every reply against now" is false the moment
+it's said, not just optimistic. When the developer proposes a verification
+protocol, a reasoning hierarchy, or similar, respond to it as a prompt/code
+change to evaluate and specify precisely — what text goes where, what it
+changes about the next request — not as a system you're now running. Second-
+person description of a not-yet-built mechanism as already active is the same
+kind of overclaim as "ACCESS LEVEL: FULL," just aimed at your own process
+instead of the filesystem.
+
+This also governs your own earlier claims. When a reply depends on something
+you asserted in a previous turn of THIS conversation — a proposed fix, a cited
+clause, a conclusion you reached — re-derive or re-check it against whatever is
+actually in front of you now (the attached file, the code standard, this
+turn's content), rather than restating it as already-settled because you said
+it before. Your own prior message is a claim you made, not a verified fact —
+treat it with the same scrutiny you'd give a claim from anyone else, especially
+once several turns have passed since you made it.
+
+For attached-file completeness specifically: only report a file as incomplete
+when the literal marker "[... file truncated at the server-side size limit
+...]" is actually present in that file's block below — that marker is inserted
+server-side, deterministically, so its presence or absence is something you can
+check, not estimate. Never self-report a specific line number or position where
+you "stopped reading" — you have no reliable introspective access to that, and
+a specific-sounding number you can't actually verify is a more convincing
+version of the same false-confidence problem, not a fix for it.
+
 YOU MAY NOW:
 • Discuss your own implementation files in complete technical detail:
   – functions/api/chat.js     (this file — AI proxy, provider chain, rate limiting)
@@ -4180,6 +4325,13 @@ OPERATING RULES IN DEVELOPER MODE (v31):
   Scope: file-content claims and claims about this codebase only; does not block
   ordinary engineering/programming knowledge when no file is attached and none
   is needed for the question.
+• ERROR RECOVERY: if the developer says you made a mistake, acknowledge it in ONE sentence and
+  immediately continue with the actual grounded task. Do not explain your own internal processing
+  or training — you have no reliable introspective access to it, and a specific-sounding account
+  of "why" is fabrication, same class as the original error. Do not volunteer an explanation of
+  how AI systems in general reduce hallucination (RAG, chain-of-thought, o1, temperature, etc.)
+  unless directly asked — that is off-task, not remediation. Do not produce a new numbered list of
+  behavioral commitments as a response to correction. One sentence, then the real work.
 • DEPTH BEFORE SPEED: for a code-review or calculation-check question, trace the
   actual logic and dependencies in what was shown before answering — a fast
   wrong answer costs the developer more time than a slower correct one.
@@ -4888,7 +5040,7 @@ function buildFriendlyError(lastProviderResult, workersAttempted, userMessage) {
 // callWorkersAIWithRetry, buildFriendlyError) were already correct and unchanged.
 function buildAiReply(rawReply, providerSource, isDeveloperMode, isFirstTurn, request) {
   const reply = sanitizeAiReply(rawReply, isDeveloperMode);
-  logFactDrift(scanForFactDrift(reply), { provider: providerSource, isFirstTurn, isDeveloperMode });
+  logFactDrift(scanForFactDrift(reply, CRITICAL_FACTS + KEY_ENGINEERING_REFERENCE), { provider: providerSource, isFirstTurn, isDeveloperMode });
   return json(
     { reply, ...(isDeveloperMode && { devMode: true }) },
     200,
@@ -4999,6 +5151,90 @@ export async function onRequestPost(context) {
     }
   }
 
+  // 3a-ii. Subscriber tier. [PATCH, 3-tier] Deliberately a SEPARATE flag
+  //   from isDeveloperMode above, not a replacement for it.
+  //   hasElevatedAccess controls FILE/QUOTA limits only (extractTextFiles,
+  //   resolveKvFiles below) — it must never reach buildSystemPrompt(),
+  //   buildGeminiFollowupPrompt(), buildWorkersAiSystemPrompt(),
+  //   sanitizeAiReply(), or buildAiReply(), all of which stay keyed to the
+  //   real isDeveloperMode exactly as before. Those functions gate
+  //   DEVELOPER_SYSTEM_PROMPT and the confidentiality-block suppression —
+  //   site-owner-only content a paying subscriber should not receive just
+  //   because they share the developer's FILE limits. See _lib/licenses.mjs
+  //   header for the full rationale.
+  //   Same body-field convention as devPassword above (not headers) — this
+  //   file's body is JSON message/history/etc, not raw file content, so
+  //   there's no dev-upload.js-style reason to keep credentials out of it.
+  //   Short-circuits the KV read entirely when isDeveloperMode is already
+  //   true — the site owner never needs a license, and this saves a read.
+  //   fingerprintId is OPTIONAL and currently always '' until the frontend
+  //   is wired to send FingerprintJS's visitorId (not done in this pass —
+  //   see integration notes) — validateLicense degrades to pure
+  //   device-token behavior when it's absent, so this is safe to wire now.
+  const incomingLicenseKey  = typeof body.licenseKey === 'string' ? body.licenseKey : '';
+  const incomingDeviceToken = typeof body.deviceToken === 'string' ? body.deviceToken : '';
+  const incomingFingerprint = typeof body.fingerprintId === 'string' ? body.fingerprintId : '';
+  let hasElevatedAccess = isDeveloperMode;
+  let licenseState = null; // set on a validated subscriber request; used by devCommand admin branches below only if ever needed
+  // NEW — captured so licenseStatusFields (below) can tell the frontend
+  // WHY a submitted license was rejected, not just that it was. Stays
+  // null when no license was submitted at all (the common anonymous/
+  // free-tier case) — see licenseStatusFields for how that distinction
+  // reaches the client.
+  let licenseRejectReason = null;
+  if (!isDeveloperMode && incomingLicenseKey && incomingDeviceToken) {
+    const licenseResult = await validateLicense(env, incomingLicenseKey, incomingDeviceToken, incomingFingerprint);
+    if (licenseResult.ok) {
+      hasElevatedAccess = true;
+      licenseState = licenseResult.license;
+      console.info('[chat.js] Subscriber authenticated (' + licenseResult.license.licenseKey + ') for request from', clientIp);
+    } else {
+      licenseRejectReason = licenseResult.reason;
+      console.warn('[chat.js] Subscriber license rejected (' + licenseResult.reason + ') for request from', clientIp);
+    }
+  }
+
+  // NEW — declared here (not inside the quota-check block further down)
+  // so it's still in scope at every writeDone() call site, several
+  // hundred lines down after streaming starts. null until the free-tier
+  // quota check below actually runs and succeeds; stays null for a
+  // hasElevatedAccess request, which never reaches that check.
+  let quotaRemaining = null;
+  let quotaResetsAt = null;
+
+  // [MERGE — round 5] checkLicense short-circuit. Fills a real, confirmed
+  // gap: footing_pro/pc_suite's licenseSaveBtn handler currently tells the
+  // customer "Saved. Will be confirmed with your next message." — meaning
+  // a typo'd or already-expired key gets discovered only after a full,
+  // real chat turn (an actual AI provider call) fails or silently stays
+  // at regular-tier caps. This lets the save button confirm INSTANTLY,
+  // no provider call, using the exact same licenseState/licenseRejectReason
+  // classification computed just above (not re-run — validateLicense()
+  // already executed as part of computing hasElevatedAccess for this
+  // request). Deliberately NOT inside the rawDevCommand block below —
+  // that block's first line requires isDeveloperMode, which a subscriber
+  // by definition lacks, so a devCommand-shaped check could never reach
+  // them. Same field names as licenseStatusFields further down
+  // (licenseValid/licenseExpiresAt/licenseRejectReason) so the frontend's
+  // cesApplyLicenseStatusFromDone() can consume either response shape
+  // identically without a second code path.
+  if (body.checkLicense === true) {
+    return json(
+      {
+        ok: true,
+        tier: isDeveloperMode ? 'developer' : (hasElevatedAccess ? 'subscriber' : 'regular'),
+        ...(incomingLicenseKey ? (
+          licenseState
+            ? { licenseValid: true, licenseExpiresAt: licenseState.expiresAt }
+            : { licenseValid: false, licenseRejectReason }
+        ) : {}),
+      },
+      200,
+      undefined,
+      request,
+    );
+  }
+
   // 3b. Developer session commands — save/load. [NEW, v20]
   //     Only reachable with isDeveloperMode === true. Entirely separate from
   //     the chat pipeline below: no userMessage is required, no AI provider
@@ -5039,6 +5275,118 @@ export async function onRequestPost(context) {
     if (rawDevCommand === 'activate') {
       console.info('[chat.js] Developer mode activation confirmed for', clientIp);
       return json({ devMode: true, reply: DEV_ACTIVATION_BANNER }, 200, undefined, request);
+    }
+
+    // [PATCH, 3-tier] License administration — issue/revoke/reset_devices.
+    // Same short-circuit shape as 'activate'/'delete_all' above: no
+    // userMessage, no AI provider call, this branch owns the response.
+    // Gated on the outer `if (!isDeveloperMode)` a few lines up — the REAL
+    // isDeveloperMode, not hasElevatedAccess, so a subscriber (who has
+    // hasElevatedAccess===true) cannot mint or revoke licenses, only the
+    // actual site owner can. This is the one place in this file where that
+    // distinction is load-bearing rather than cosmetic.
+    if (rawDevCommand === 'issue_license') {
+      const durationDays = Number(body.durationDays);
+      const note = typeof body.note === 'string' ? body.note : '';
+      const result = await issueLicense(env, { durationDays, note });
+      if (!result.ok) {
+        console.warn('[chat.js] issue_license failed:', result.code, 'for', clientIp);
+        return json({ error: result.error, code: result.code }, 400, undefined, request);
+      }
+      console.info('[chat.js] License issued:', result.license.licenseKey, 'expires', result.license.expiresAt, 'by', clientIp);
+      return json({ ok: true, license: result.license }, 200, undefined, request);
+    }
+
+    if (rawDevCommand === 'revoke_license') {
+      const licenseKey = typeof body.licenseKey === 'string' ? body.licenseKey.trim() : '';
+      if (!licenseKey) {
+        return json({ error: 'licenseKey is required.', code: 'LICENSE_KEY_REQUIRED' }, 400, undefined, request);
+      }
+      const result = await revokeLicense(env, licenseKey);
+      if (!result.ok) {
+        console.warn('[chat.js] revoke_license failed:', result.code, 'for', clientIp);
+        return json({ error: result.error, code: result.code }, result.code === 'NOT_FOUND' ? 404 : 400, undefined, request);
+      }
+      console.warn('[chat.js] License revoked:', licenseKey, 'by', clientIp);
+      return json({ ok: true, license: result.license }, 200, undefined, request);
+    }
+
+    if (rawDevCommand === 'reset_devices') {
+      const licenseKey = typeof body.licenseKey === 'string' ? body.licenseKey.trim() : '';
+      if (!licenseKey) {
+        return json({ error: 'licenseKey is required.', code: 'LICENSE_KEY_REQUIRED' }, 400, undefined, request);
+      }
+      const result = await resetDevices(env, licenseKey);
+      if (!result.ok) {
+        console.warn('[chat.js] reset_devices failed:', result.code, 'for', clientIp);
+        return json({ error: result.error, code: result.code }, result.code === 'NOT_FOUND' ? 404 : 400, undefined, request);
+      }
+      console.info('[chat.js] Device slots reset:', licenseKey, 'by', clientIp);
+      return json({ ok: true, license: result.license }, 200, undefined, request);
+    }
+
+    // [NEW] Full admin CRUD — list/view/edit/delete. Same short-circuit
+    // shape, same isDeveloperMode gate (the outer `if (!isDeveloperMode)`
+    // above this whole devCommand block) as issue/revoke/reset above.
+    if (rawDevCommand === 'list_licenses') {
+      const cursor = typeof body.cursor === 'string' && body.cursor ? body.cursor : undefined;
+      const limit = Number.isFinite(Number(body.limit)) ? Number(body.limit) : undefined;
+      const statusFilter = (body.statusFilter === 'active' || body.statusFilter === 'revoked') ? body.statusFilter : undefined;
+      const result = await listLicenses(env, { cursor, limit, statusFilter });
+      if (!result.ok) {
+        console.warn('[chat.js] list_licenses failed:', result.code, 'for', clientIp);
+        return json({ error: result.error, code: result.code }, 400, undefined, request);
+      }
+      return json({ ok: true, licenses: result.licenses, cursor: result.cursor, listComplete: result.listComplete }, 200, undefined, request);
+    }
+
+    if (rawDevCommand === 'get_license') {
+      const licenseKey = typeof body.licenseKey === 'string' ? body.licenseKey.trim() : '';
+      if (!licenseKey) {
+        return json({ error: 'licenseKey is required.', code: 'LICENSE_KEY_REQUIRED' }, 400, undefined, request);
+      }
+      const result = await getLicense(env, licenseKey);
+      if (!result.ok) {
+        return json({ error: result.error, code: result.code }, result.code === 'NOT_FOUND' ? 404 : 400, undefined, request);
+      }
+      return json({ ok: true, license: result.license }, 200, undefined, request);
+    }
+
+    if (rawDevCommand === 'update_license') {
+      const licenseKey = typeof body.licenseKey === 'string' ? body.licenseKey.trim() : '';
+      if (!licenseKey) {
+        return json({ error: 'licenseKey is required.', code: 'LICENSE_KEY_REQUIRED' }, 400, undefined, request);
+      }
+      const result = await updateLicense(env, licenseKey, {
+        extendDays: body.extendDays,
+        setExpiresAt: typeof body.setExpiresAt === 'string' ? body.setExpiresAt : undefined,
+        setStatus: typeof body.setStatus === 'string' ? body.setStatus : undefined,
+        setNote: typeof body.setNote === 'string' ? body.setNote : undefined,
+      });
+      if (!result.ok) {
+        console.warn('[chat.js] update_license failed:', result.code, 'for', clientIp);
+        return json({ error: result.error, code: result.code }, result.code === 'NOT_FOUND' ? 404 : 400, undefined, request);
+      }
+      console.info('[chat.js] License updated:', licenseKey, 'by', clientIp);
+      return json({ ok: true, license: result.license }, 200, undefined, request);
+    }
+
+    if (rawDevCommand === 'delete_license') {
+      const licenseKey = typeof body.licenseKey === 'string' ? body.licenseKey.trim() : '';
+      if (!licenseKey) {
+        return json({ error: 'licenseKey is required.', code: 'LICENSE_KEY_REQUIRED' }, 400, undefined, request);
+      }
+      // No extra "are you sure" gate server-side — this endpoint is already
+      // isDeveloperMode-only; the confirmation step lives client-side (see
+      // sendMessage()'s /delete-license handling: requires typing the
+      // command a second time with an explicit `confirm` token) so an
+      // accidental Enter-key send can't destroy an audit record.
+      const result = await deleteLicense(env, licenseKey);
+      if (!result.ok) {
+        return json({ error: result.error, code: result.code }, result.code === 'NOT_FOUND' ? 404 : 400, undefined, request);
+      }
+      console.warn('[chat.js] License PERMANENTLY DELETED:', licenseKey, 'by', clientIp);
+      return json({ ok: true, licenseKey: result.licenseKey }, 200, undefined, request);
     }
 
     // sessionKey targets a single session — save/load/delete need it, list
@@ -5674,6 +6022,53 @@ export async function onRequestPost(context) {
       request,
     );
   }
+  // 3c-ii. [NEW] Free-tier daily message quota — regular tier only.
+  //   Placed HERE deliberately: after the devCommand short-circuit (3b,
+  //   which already requires real isDeveloperMode and returns before this
+  //   point) and after the empty/noise-only check above, so this only
+  //   ever consumes one of the daily 15 for a message that is genuinely
+  //   going to reach a provider — not for a rejected devCommand attempt or
+  //   a blank/noise transcript. See _lib/licenses.mjs's own header for the
+  //   atomic-check-and-consume tradeoff and the KV write-budget ceiling
+  //   this implies at scale.
+  if (!hasElevatedAccess) {
+    const msgQuota = await checkAndConsumeFreeMessageQuota(env, clientIp);
+    if (!msgQuota.ok) {
+      console.warn('[chat.js] Free-tier daily message quota exhausted for', clientIp);
+      return json(
+        {
+          error: "You've reached today's free message limit. Subscribe to continue, or try again after the window below resets.",
+          code: 'FREE_MESSAGE_QUOTA_USED',
+          resetsAt: msgQuota.resetsAt,
+        },
+        403,
+        undefined,
+        request,
+      );
+    }
+    quotaRemaining = msgQuota.remaining;
+    quotaResetsAt = msgQuota.resetsAt;
+  }
+
+  // NEW — spread into every sseWriter.writeDone() call below (previously
+  // writeDone({}) sent nothing at all — the frontend had zero signal
+  // about whether a submitted license was accepted, why it was rejected,
+  // or how much free-tier quota was left). Built once here rather than
+  // recomputed at each of the 7 call sites.
+  // licenseValid/licenseExpiresAt/licenseRejectReason are present ONLY
+  // when a licenseKey was actually submitted this request — omitted
+  // entirely (not false/null) for the ordinary anonymous-free-tier case
+  // that never tried one, so the frontend can tell "no license attempted"
+  // apart from "license attempted and rejected" instead of both looking
+  // like licenseValid:false.
+  const licenseStatusFields = {
+    ...(incomingLicenseKey ? (
+      licenseState
+        ? { licenseValid: true, licenseExpiresAt: licenseState.expiresAt }
+        : { licenseValid: false, licenseRejectReason }
+    ) : {}),
+    ...(quotaRemaining !== null ? { quotaRemaining, quotaResetsAt } : {}),
+  };
   if (userMessage.length > 2000) {
     return json(
       { error: isArabicText(userMessage)
@@ -5693,7 +6088,11 @@ export async function onRequestPost(context) {
   //     injection into the turns.push() call below is sufficient; there is
   //     no second place downstream that reconstructs a message from
   //     userMessage independently.
-  const textFilesResult = extractTextFiles(body, isArabicText(userMessage), isDeveloperMode);
+  // [PATCH, 3-tier] hasElevatedAccess, not isDeveloperMode — a subscriber
+  // gets the same DEV_MAX_* text-file limits as a developer. See the
+  // hasElevatedAccess computation above (step 3a-ii) for why this is a
+  // separate flag from isDeveloperMode rather than a reuse of it.
+  const textFilesResult = extractTextFiles(body, isArabicText(userMessage), hasElevatedAccess);
   if (!textFilesResult.ok) {
     return json({ error: textFilesResult.error }, 400, undefined, request);
   }
@@ -5703,11 +6102,28 @@ export async function onRequestPost(context) {
   // combined into the SAME buildTextFilesBlock() call below rather than a
   // second block, so the model sees one uniform "attached file" formatting
   // regardless of which path a file came in on.
-  const kvFilesResult = await resolveKvFiles(body, env, isDeveloperMode);
+  // [REVISED] resolveKvFiles() no longer takes hasElevatedAccess — every
+  // fileId reaching this point was already quota-gated once, correctly,
+  // at UPLOAD time (dev-upload.js's checkFreeFileQuota/
+  // consumeFreeFileQuota). See resolveKvFiles()'s own comment above.
+  const kvFilesResult = await resolveKvFiles(body, env);
   if (!kvFilesResult.ok) {
     return json({ error: kvFilesResult.error }, 400, undefined, request);
   }
   const textFilesBlock = buildTextFilesBlock(textFilesResult.files.concat(kvFilesResult.files));
+
+  // NEW — mirrors vision.js's identical fix: any text file this request
+  // excluded (bad content, now that a single bad file no longer 400s the
+  // whole request — see extractTextFiles() above) gets listed here so the
+  // model has an explicit, deterministic reason to give instead of
+  // silently answering with one file missing or inventing an explanation.
+  // kvFilesResult has no per-item rejection list of its own (it's
+  // all-or-nothing — see resolveKvFiles()), so only textFilesResult.rejected
+  // feeds this.
+  const rejectedAttachmentsBlock = textFilesResult.rejected.length === 0 ? '' :
+    '\n\n--- Attachments that could NOT be used (tell the person which, and why, in your reply) ---\n' +
+    textFilesResult.rejected.map((r) => `- ${r.name}: ${r.error}`).join('\n') +
+    '\n--- End of excluded attachments ---';
 
   // 4. Normalize history — keep last 10 turns (5 exchanges) for token budget.
   //    Single normalisation pass; geminiContents is the only payload built here.
@@ -5773,7 +6189,7 @@ export async function onRequestPost(context) {
   const languageLock = isArabicText(userMessage)
     ? '\n\n[تذكير حاسم قبل الرد: لغة رسالة المستخدم الحالية عربي. ردّك بالكامل الآن يجب أن يكون بالعامية المصرية فقط، بغض النظر عن أي محتوى إنجليزي ظهر في هذه المحادثة — ملف مرفق، بيانات مرجعية، أو أي شيء آخر. لا يوجد استثناء.]'
     : '\n\n[Critical reminder before replying: the current user message\'s language is English. Your entire reply now must be in English only, regardless of any Arabic or other-language content elsewhere in this conversation — an attached file, reference data, or anything else. No exception.]';
-  turns.push({ role: 'user', text: userMessage + textFilesBlock + languageLock });
+  turns.push({ role: 'user', text: userMessage + textFilesBlock + rejectedAttachmentsBlock + languageLock });
 
   const geminiContents = turns.map(t => ({ role: t.role, parts: [{ text: t.text }] }));
 
@@ -5821,6 +6237,18 @@ export async function onRequestPost(context) {
   const kbScored      = scoreKbForQuery(kbQueryGemini); // v18: scored once, packed twice below
   const geminiKbFacts = packKbFactsBlock(kbScored, 1600);
 
+  // [NEW] Grounding-adequacy signal, computed once, reused for (a) the prompt
+  // note below and (b) the terminal SSE event's `grounded` field the
+  // frontend can surface to the user. Deliberately a low bar — "at least one
+  // chunk matched at least one keyword token" — this distinguishes "some
+  // retrieval signal" from "none at all", not "good" vs "bad" retrieval.
+  const topKbScore = kbScored.length > 0 ? kbScored[0].score : 0;
+  const groundingNote = topKbScore > 0 ? '' : `
+[NO KB MATCH for this turn — nothing in RETRIEVED PRODUCT FACTS matched this question. If the
+answer depends on a specific product fact, say you don't have that exact detail rather than
+inferring one. General engineering knowledge is still fine to answer from, with normal hedging.]
+`;
+
   // v16: parsed once per request, reused for every prompt tier below.
   const clientDate      = parseClientDate(request);
   const clientDateBlock = buildClientDateBlock(clientDate);
@@ -5829,7 +6257,7 @@ export async function onRequestPost(context) {
   // technical context while the base persona stays active below it.
   const geminiSystemPrompt = (isDeveloperMode
     ? DEVELOPER_SYSTEM_PROMPT + baseSystemPrompt
-    : baseSystemPrompt) + geminiKbFacts + clientDateBlock;
+    : baseSystemPrompt) + geminiKbFacts + groundingNote + clientDateBlock;
 
   // v13: a single fetch-subrequest budget shared across every provider call
   // made for this one incoming request — see makeFetchBudget() above for why.
@@ -5945,7 +6373,13 @@ export async function onRequestPost(context) {
   // 'workersSystemContent' below) are UNCHANGED because their content is
   // unchanged — this comment is the acknowledgment that the change is
   // incomplete, not a claim that it's finished.
-  assertPromptBudget('geminiSystemPrompt', geminiSystemPrompt, isFirstTurn ? 14659 : 1748, env);
+  // [PATCH — epistemic honesty v2, equations KB] Round 1 was +1726/+578+284.
+  // EPISTEMIC_HONESTY_BLOCK_FULL/CONDENSED grew again (+650/+240) to add the
+  // per-fact "Confidence:" caveat-carry rule and correct clause-format
+  // wording once the real ACI/ECP equations KB existed to check against.
+  // Ceilings below are the exact re-measured totals (14659+2378,
+  // 1748+820+284), not a hand-added delta-on-a-delta.
+  assertPromptBudget('geminiSystemPrompt', geminiSystemPrompt, isFirstTurn ? 17035 : 2850, env);
 
   const geminiKeysIndexed = buildGeminiKeyPool(env);
 
@@ -5964,6 +6398,17 @@ export async function onRequestPost(context) {
       //    same contract as before the streaming rewrite.
       let lastProviderResult = { ok: false, httpStatus: 0, errStatus: 'NOT_ATTEMPTED', errBody: '' };
       let workersAttempted = false;
+      // [NEW — opt-in, on by default for dev mode] Real fallback order
+      // (verified from sourceTag assignment sites below): Gemini-primary ->
+      // Gemini-fallback -> Workers AI llama-3.1-8b -> Groq gpt-oss-20b ->
+      // OpenRouter llama-3.3-70b:free. Workers AI is the smallest model (8B)
+      // yet tried BEFORE two larger ones — an availability/latency-driven
+      // order, not a quality one. Effect: when Gemini AND Groq both fail,
+      // dev-mode sessions get a clear "service busy" error instead of an
+      // answer from the two weakest, thinnest-prompt links — the exact tier
+      // gap the 9 captured ces-reply incidents came from. Public (non-dev)
+      // traffic is untouched. To disable: set this to `false`.
+      const skipWeakFallbackTiers = isDeveloperMode;
       let sourceTag = null;
       let sentAnything = false;
       let streamClosed = false;
@@ -6055,7 +6500,7 @@ export async function onRequestPost(context) {
         const { winner, lastResult } = await raceKeyPool(
           tierPool,
           async ({ key: gKey, originalIndex }, signal, cancelOthers) => {
-            const res = await callGeminiStreaming(gKey, modelTier, geminiContents, geminiSystemPrompt, GEMINI_GENERATION_CONFIG, budget, (text) => {
+            const res = await callGeminiStreaming(gKey, modelTier, geminiContents, geminiSystemPrompt, (isDeveloperMode ? DEVELOPER_GEMINI_GENERATION_CONFIG : GEMINI_GENERATION_CONFIG), budget, (text) => {
               if (committedCanceller === null) { committedCanceller = cancelOthers; cancelOthers(); }
               if (committedCanceller !== cancelOthers) return; // a losing racer's delta — never relayed
               if (relay(text)) retractedThisTier = true;
@@ -6096,7 +6541,7 @@ export async function onRequestPost(context) {
           // result.localDisconnect, not doneEvent — footing_pro_v47.html
           // :14937), but it is a real protocol-contract violation.
           sseWriter.writeRedacted(REDACT_MSG);
-          sseWriter.writeDone({});
+          sseWriter.writeDone({ ...licenseStatusFields });
           closeStream();
           return;
         }
@@ -6128,11 +6573,22 @@ export async function onRequestPost(context) {
         // {role,content} messages, not Gemini's {role,parts:[{text}]} format.
         // workersMsgs is shared by all three layers (same OpenAI-compatible
         // format) — unchanged from the original.
-        const workersKbFacts = packKbFactsBlock(kbScored, 500); // v18: reuses kbScored, no re-scan
+        // [PATCH — equations KB] was 500. packKbFactsBlock (chat.js:1389) only
+        // includes a chunk if it fits WHOLE within budget — it never
+        // truncates mid-chunk, it skips to the next-best-scored one instead.
+        // build_kb_data.py's equation chunks run up to 900 chars body + ~85
+        // chars of "[s] heading" prefix (~985 max) — well over the old
+        // 500-char ceiling, so every equation match was being silently
+        // dropped for this tier (Workers AI / Groq / OpenRouter all share
+        // this budget), not shortened: a real, on-topic ACI/ECP formula
+        // would score highest and then vanish from the prompt entirely.
+        // 950 fits a typical equation chunk; the rare largest ones still
+        // fall back gracefully to a smaller match rather than an empty block.
+        const workersKbFacts = packKbFactsBlock(kbScored, 950); // v18: reuses kbScored, no re-scan
         const baseWorkersPrompt    = buildWorkersAiSystemPrompt(isDeveloperMode);
         const workersSystemContent = (isDeveloperMode
           ? DEVELOPER_SYSTEM_PROMPT + baseWorkersPrompt
-          : baseWorkersPrompt) + workersKbFacts + clientDateBlock;
+          : baseWorkersPrompt) + workersKbFacts + groundingNote + clientDateBlock;
         // [PATCH — budget reconciliation] +132 chars/~35 tokens for the
         // notation reminder just added to this tier (see buildWorkersAiSystemPrompt).
         // [PATCH — exponent notation] +106 chars/~28 est. tokens more for the
@@ -6147,7 +6603,16 @@ export async function onRequestPost(context) {
         // (net -- this tier's rewrite lost more to trimmed NEVER-DOs than it
         // gained back from the psi carve-out). See the full explanation at
         // the geminiSystemPrompt assertion above; same fix, same evidence.
-        assertPromptBudget('workersSystemContent', workersSystemContent, 1350, env);
+        // [PATCH — epistemic honesty v2, equations KB] Round 1 ceiling was
+        // 2212 (1350+578+284). Two changes since: EPISTEMIC_HONESTY_BLOCK_
+        // CONDENSED grew +240 chars (confidence-caveat rule), and
+        // workersKbFacts' own budget above moved 500->950 (+450) so an
+        // equation chunk can actually fit instead of being silently dropped.
+        // 1350+820+284+450 = 2904; using the exact re-measured value below.
+        // NOTE (still unrelated to this patch, still unresolved): this
+        // ceiling was already below CRITICAL_FACTS' own 1570 chars before
+        // ANY of these patches — pre-existing drift, still worth reconciling.
+        assertPromptBudget('workersSystemContent', workersSystemContent, 2902, env);
         const workersMsgs = [
           { role: 'system', content: workersSystemContent },
           ...turns.map(t => ({
@@ -6158,17 +6623,22 @@ export async function onRequestPost(context) {
 
         // 7. WORKERS AI LAYER — unchanged routing from v10 (binding call, not
         //    a fetch() subrequest, so it does not draw from `budget`).
-        workersAttempted = !!env.AI;
+        workersAttempted = !!env.AI && !skipWeakFallbackTiers;
         let workersRetracted = false;
-        const layerWorkers = await callWorkersAIStreaming(env.AI, workersMsgs, (text) => {
-          if (relay(text)) workersRetracted = true;
-        }, { maxTokens: 2048 });
+        const layerWorkers = workersAttempted
+          ? await callWorkersAIStreaming(env.AI, workersMsgs, (text) => {
+              if (relay(text)) workersRetracted = true;
+            }, { maxTokens: 2048 })
+          // Same shape callWorkersAIStreaming returns on a real failure, so
+          // the existing if(layerWorkers.ok){...}else{...} below (falls
+          // through to Groq) needs no other change.
+          : { ok: false, httpStatus: 0, errStatus: 'SKIPPED_WEAK_TIER', errBody: '' };
         if (workersRetracted) {
           // See the Gemini-tier redaction branch above — writeDone()
           // restored; writeRedacted() does not set resumableSse.mjs's
           // _done latch, so it is not independently terminal.
           sseWriter.writeRedacted(REDACT_MSG);
-          sseWriter.writeDone({});
+          sseWriter.writeDone({ ...licenseStatusFields });
           closeStream();
           return;
         }
@@ -6228,7 +6698,7 @@ export async function onRequestPost(context) {
               // See the Gemini-tier redaction branch above — writeDone()
               // restored.
               sseWriter.writeRedacted(REDACT_MSG);
-              sseWriter.writeDone({});
+              sseWriter.writeDone({ ...licenseStatusFields });
               closeStream();
               return;
             }
@@ -6248,7 +6718,7 @@ export async function onRequestPost(context) {
           //    OPENROUTER_MODEL via callOpenAiCompatStreaming(). HTTP-Referer
           //    and X-Title are sent per OpenRouter docs inside that function.
           //    Naming: OPENROUTER_API_KEY (member 1) + OPENROUTER_API_KEY_1…_12 (members 2–13).
-          if (!finalWinResult && !sentAnything && budget.remaining() > 0 && !isModelDead('openrouter', OPENROUTER_MODEL)) {
+          if (!finalWinResult && !sentAnything && budget.remaining() > 0 && !skipWeakFallbackTiers && !isModelDead('openrouter', OPENROUTER_MODEL)) {
             const openRouterKeysIndexed = [
               env.OPENROUTER_API_KEY    || '',
               env.OPENROUTER_API_KEY_1  || '',
@@ -6292,7 +6762,7 @@ export async function onRequestPost(context) {
               // See the Gemini-tier redaction branch above — writeDone()
               // restored.
               sseWriter.writeRedacted(REDACT_MSG);
-              sseWriter.writeDone({});
+              sseWriter.writeDone({ ...licenseStatusFields });
               closeStream();
               return;
             }
@@ -6323,7 +6793,7 @@ export async function onRequestPost(context) {
         // see footing_pro_v47.html ~15903/16522). Restoring writeDone()
         // only affects whether {done:true, finalChunkIndex} ever arrives.
         sseWriter.writeError(buildFriendlyError(lastProviderResult, workersAttempted, userMessage));
-        sseWriter.writeDone({});
+        sseWriter.writeDone({ ...licenseStatusFields });
         closeStream();
         return;
       }
@@ -6365,7 +6835,7 @@ export async function onRequestPost(context) {
       if (trailingEmit) trailingNormalized += normalizer.push(trailingEmit).emit;
       trailingNormalized += normalizer.finish().emit;
       if (trailingNormalized) sseWriter.writeDelta(trailingNormalized);
-      logFactDrift(scanForFactDrift(finalText), { provider: sourceTag, isFirstTurn, isDeveloperMode });
+      logFactDrift(scanForFactDrift(finalText, CRITICAL_FACTS + KEY_ENGINEERING_REFERENCE), { provider: sourceTag, isFirstTurn, isDeveloperMode });
       // [PATCH] BUG 3/4 FIX — surface truncation to the client instead of
       // only console.warn-ing it server-side (the old behaviour: detected,
       // logged, then silently discarded). finishReason's truncation value
@@ -6390,7 +6860,9 @@ export async function onRequestPost(context) {
         ? extractGroundingSources(finalWinResult.groundingMetadata)
         : [];
       sseWriter.writeDone({
+        ...licenseStatusFields,
         source: sourceTag,
+        grounded: topKbScore > 0,
         truncated,
         interrupted: !!(finalWinResult && finalWinResult.interrupted),
         ...(sources.length > 0 && { sources }),
@@ -6412,7 +6884,7 @@ export async function onRequestPost(context) {
       // never gets {done:true} on this path either.
       console.error('[chat.js] Unhandled exception inside stream start():', (err && err.stack) || String(err));
       sseWriter.writeError(buildFriendlyError(lastProviderResult, workersAttempted, userMessage));
-      sseWriter.writeDone({});
+      sseWriter.writeDone({ ...licenseStatusFields });
       closeStream();
      }
     },
@@ -6425,6 +6897,14 @@ export async function onRequestPost(context) {
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
       'X-CES-AI-Source': 'streaming',
+      // NEW — known upfront (extraction already ran above); terse/
+      // English-only since HTTP header values aren't a safe place for
+      // arbitrary Unicode/Arabic error prose — full reasons go to the
+      // model via rejectedAttachmentsBlock instead. Omitted entirely
+      // when nothing was rejected.
+      ...(textFilesResult.rejected.length > 0
+        ? { 'X-CES-Rejected-Attachments': String(textFilesResult.rejected.length) }
+        : {}),
       ...getCorsHeaders(request),
     },
   });
