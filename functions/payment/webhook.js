@@ -43,7 +43,7 @@
 
 'use strict';
 
-import { issueLicense } from '../../_lib/licenses.mjs';
+import { issueLicense } from '../_lib/licenses.mjs';
 
 const MAX_BODY_BYTES = 16_384; // 16 KB hard limit
 
