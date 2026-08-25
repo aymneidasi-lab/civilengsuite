@@ -968,6 +968,50 @@ const MATRIX_SPEECH_RE = /\\begin\{(pmatrix|bmatrix|vmatrix|Vmatrix|matrix|array
 // resolution into this function so it survives a Greek-letter
 // substitution running later in the same pass).
 const SUB_SPEECH_RE = /_\{((?:[^{}]|\{[^{}]*\})*)\}|_([+\-0-9A-Za-z])(?![A-Za-z0-9])/g;
+// [ADDED] Leibniz partial-derivative quotient: \partial NUM / \partial VAR.
+// Mirrors the client's identical CES_PARTIAL_DERIV_RE addition -- see that
+// const's own comment for the full "why not generic bare-slash, why not
+// d.../d... too" reasoning. Keep the two in sync if either changes.
+const PARTIAL_DERIV_SPEECH_RE = /\\partial\s*([^\/]+?)\s*\/\s*\\partial\s*([A-Za-z](?:_[A-Za-z0-9]+)?)/g;
+// [ADDED] Generic bare "/" division -- mirrors the client's identical
+// CES_BARE_DIV_RE addition; see that const's own comment for the nesting
+// bound and the accepted "km/hr -> km over hr" tradeoff.
+// [ROUND 2] '* after the base run -- w_c/f'_c (found via this exact pair's
+// own test battery) truncated the match at the prime, stranding "_c"
+// outside the wrap ("(f) c" instead of "(f'_c)" / "(f) over c" instead of
+// "(w_c) over (f_c)"). A prime between a variable and its subscript is
+// this domain's routine strength notation (f'_c, f'_y, f'_t), not an edge
+// case -- worth handling in the token grammar itself rather than pushing
+// callers to pre-sanitize.
+const BARE_DIV_SPEECH_RE = /(\([^()]*(?:\([^()]*\)[^()]*)*\)|[A-Za-z0-9\u0370-\u03FF]+'*(?:_[A-Za-z0-9]+)?)\s*\/\s*(\([^()]*(?:\([^()]*\)[^()]*)*\)|[A-Za-z0-9\u0370-\u03FF]+'*(?:_[A-Za-z0-9]+)?)/g;
+// [ADDED] \, \; \! \: -- LaTeX inter-symbol spacing commands (thin/medium/
+// negative/thick space), zero semantic content. Found leaking literally as
+// "\,dt" into the TTS stream while re-testing this pair's own \int
+// regression case (\int_0^infty psi(t)\,dt) -- the generic backslash-strip
+// safety net only strips a backslash followed by LETTERS, so a spacing
+// command (backslash + punctuation) survives it untouched. Collapsed to a
+// single space; never carries meaning worth preserving.
+const LATEX_SPACING_RE = /\\[,;:!]/g;
+
+// [ROUND 2 — bare-prose defense-in-depth] Mirrors the client's identical
+// addition; see CES_PRIME_SUBSCRIPT_RE's own comment block for the full
+// "why these four are safe on prose, why the blanket strip isn't" reasoning.
+const PRIME_CALL_RE = /([A-Za-z\u0370-\u03FF])('{1,3})(?=\()/g;
+function primeCallWord(base, primes, isAr) {
+  const n = primes.length;
+  const word = isAr
+    ? (n === 1 ? ' مشتقة ' : n === 2 ? ' مشتقة ثانية ' : ` مشتقة من الرتبة ${n} `)
+    : (n === 1 ? ' prime ' : n === 2 ? ' double prime ' : ` order-${n} prime `);
+  return base + word;
+}
+const PRIME_SUBSCRIPT_RE = /([A-Za-z\u0370-\u03FF])'(?=_)/g;
+const PROSE_SLASH_STOPWORDS = new Set(['and','or','he','she','his','her','him','yes','no','on','off','pass','fail','true','false','up','down','in','out','a','an']);
+const UNIT_RESPELL_RE = /(\d[\d,.]*)\s*\b(psi|ksi)\b/gi;
+const UNIT_RESPELL_WORDS = { psi: { ar: 'بي إس آي', en: 'P S I' }, ksi: { ar: 'كيه إس آي', en: 'K S I' } };
+function respellUnits(s, isAr) {
+  return s.replace(UNIT_RESPELL_RE, (_m, numPart, unit) =>
+    numPart + ' ' + UNIT_RESPELL_WORDS[unit.toLowerCase()][isAr ? 'ar' : 'en'] + ' ');
+}
 
 // Mirrors the client's _cesEndsInMacroName -- see that function's own
 // comment.
@@ -989,6 +1033,14 @@ function ordinalSpeech(n) {
     case '3': return s + 'rd';
     default: return s + 'th';
   }
+}
+
+// [ADDED] Mirrors the client's identical _cesWrapOperand -- see that
+// function's own comment for the double-parens defect it closes and why
+// the exact-char check is safe (not a general balanced-paren check) given
+// both callers' capture shapes.
+function _wrapOperand(x) {
+  return (x.charAt(0) === '(' && x.charAt(x.length - 1) === ')') ? x : '(' + x + ')';
 }
 
 function resolveMathInnerForSpeech(inner, isAr) {
@@ -1020,7 +1072,23 @@ function resolveMathInnerForSpeech(inner, isAr) {
       isAr ? ` الجذر التربيعي لـ (${x}) ` : ` square root of (${x}) `);
     s = s.replace(FRAC_SPEECH_RE, (_m, num, den) =>
       isAr ? ` (${num}) على (${den}) ` : ` (${num}) over (${den}) `);
+    // [ADDED] \partial NUM / \partial VAR -- mirrors the client's identical
+    // addition; must run before BARE_DIV_SPEECH_RE and the standalone
+    // \partial mapping below for the same two-word-denominator reason
+    // documented on the client's CES_PARTIAL_DERIV_RE.
+    s = s.replace(PARTIAL_DERIV_SPEECH_RE, (_m, num, denomVar) => {
+      num = num.trim();
+      const n = _wrapOperand(num);
+      return isAr
+        ? ` المشتقة الجزئية لـ ${n} بالنسبة لـ ${denomVar} `
+        : ` the partial derivative of ${n} with respect to ${denomVar} `;
+    });
+    // [ADDED] Generic bare "/" division -- mirrors the client's identical
+    // addition; see BARE_DIV_SPEECH_RE's own comment.
+    s = s.replace(BARE_DIV_SPEECH_RE, (_m, num, den) =>
+      isAr ? ` ${_wrapOperand(num)} على ${_wrapOperand(den)} ` : ` ${_wrapOperand(num)} over ${_wrapOperand(den)} `);
     s = s.replace(/\\left(?=[(\[{])/g, '').replace(/\\right(?=[)\]}])/g, '');
+    s = s.replace(LATEX_SPACING_RE, ' ');
     // [ADDED] Standalone `\\` -- mirrors the client's identical addition;
     // see that line's own comment.
     s = s.replace(/\\\\/g, () => (isAr ? ' سطر جديد ' : ' new line '));
@@ -1058,6 +1126,12 @@ function resolveMathInnerForSpeech(inner, isAr) {
     s = s.replace(/\\sum/g, () => (isAr ? ' مجموع ' : ' sum '));
     s = s.replace(/\\int/g, () => (isAr ? ' تكامل ' : ' integral '));
     s = s.replace(/\\prod/g, () => (isAr ? ' حاصل ضرب ' : ' product '));
+    // [ADDED] \partial/\nabla -- mirrors the client's identical addition.
+    // Any \partial that's half of a Leibniz quotient is already fully
+    // consumed by PARTIAL_DERIV_SPEECH_RE above; this only catches a
+    // \partial/\nabla mentioned standalone.
+    s = s.replace(/\\partial(?![A-Za-z])/g, () => (isAr ? ' جزئي ' : ' partial '));
+    s = s.replace(/\\nabla(?![A-Za-z])/g, () => (isAr ? ' نابلا ' : ' nabla '));
     s = s.replace(/\\%/g, () => (isAr ? ' بالمئة ' : ' percent '));
     s = s.replace(/\\pm/g,  () => (isAr ? ' زائد أو ناقص ' : ' plus or minus '));
     // [ADDED] \min/\max/\Sigma/\forall/\in -- mirrors the client's
@@ -1076,6 +1150,11 @@ function resolveMathInnerForSpeech(inner, isAr) {
     if (s === before) break;
   }
   return s
+    // [ADDED] Prime(s) immediately followed by "(" -- unambiguous calculus
+    // derivative-of-function notation (f'(x), f''(x)); mirrors the
+    // client's identical addition -- see that block's own comment for why
+    // this must run before the blanket strip just below.
+    .replace(/([A-Za-z\u0370-\u03FF])('{1,3})(?=\()/g, (_m, base, primes) => primeCallWord(base, primes, isAr))
     .replace(/'/g, '') // prime marks read as "apostrophe" on every engine -- see stripSuperSubMarkers's own header for the same "don't trust five black boxes" reasoning
     // Same orphaned-underscore fix as the client's _cesResolveMathInner:
     // a Greek base subscripted by another Greek letter (lambda_Delta) has
@@ -1129,6 +1208,30 @@ function flattenLatexForSpeech(text) {
     i++;
   }
   out = out.replace(BARE_GLYPH_RE, (m) => (isAr ? BARE_GLYPH_WORDS_AR : BARE_GLYPH_WORDS_EN)[m]);
+  // [ROUND 2] Bare-prose pass -- mirrors the client's identical addition in
+  // _cesFlattenMathSpans; see PRIME_CALL_RE's own comment block for the
+  // full reasoning. This endpoint is speech-only, so unlike the client's
+  // mode-gated version this always applies (same asymmetry as BARE_GLYPH_RE
+  // just above).
+  out = out.replace(PRIME_CALL_RE, (_m, base, primes) => primeCallWord(base, primes, isAr));
+  out = out.replace(PRIME_SUBSCRIPT_RE, (_m, base) => base);
+  out = out.replace(PARTIAL_DERIV_SPEECH_RE, (_m, num, denomVar) => {
+    num = num.trim();
+    const n = _wrapOperand(num);
+    return isAr
+      ? ` المشتقة الجزئية لـ ${n} بالنسبة لـ ${denomVar} `
+      : ` the partial derivative of ${n} with respect to ${denomVar} `;
+  });
+  out = out.replace(BARE_DIV_SPEECH_RE, (_m, num, den) => {
+    const nLower = /^[A-Za-z]+$/.test(num) ? num.toLowerCase() : null;
+    const dLower = /^[A-Za-z]+$/.test(den) ? den.toLowerCase() : null;
+    if ((nLower && PROSE_SLASH_STOPWORDS.has(nLower)) || (dLower && PROSE_SLASH_STOPWORDS.has(dLower))) return _m;
+    return isAr ? ` ${_wrapOperand(num)} على ${_wrapOperand(den)} ` : ` ${_wrapOperand(num)} over ${_wrapOperand(den)} `;
+  });
+  out = out.replace(/\\partial(?![A-Za-z])/g, () => (isAr ? ' جزئي ' : ' partial '));
+  out = out.replace(/\\nabla(?![A-Za-z])/g, () => (isAr ? ' نابلا ' : ' nabla '));
+  out = out.replace(LATEX_SPACING_RE, ' ');
+  out = respellUnits(out, isAr);
   return out
     .replace(/\$(?!\d)/g, '')          // stray delimiter, not currency (same guard as notationNormalizer.mjs's stripBareDollar)
     .replace(/\\([A-Za-z]+)/g, '$1')   // unmapped macro outside the documented set -> bare word, never a leaked backslash
