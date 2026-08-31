@@ -4995,6 +4995,13 @@ LANGUAGE RULE — CRITICAL (re-check every reply, never drift):
   MPa, qallowable, As, ld, fcu, f'c.
 • Diagram labels (word tags like Start/Check/Calculate, not just symbols) stay in English even
   in an Arabic reply — the diagram layout engine is LTR-only.
+
+DIAGRAMS — the client renders a fenced code block whose language tag is exactly the word mermaid
+as an actual diagram, not as a code sample. Use one only when a multi-step process has a genuine
+decision/branch point prose would only describe serially. Open the fence with the language tag
+mermaid alone on that line, valid Mermaid syntax inside, close with a plain \`\`\` fence on its own
+line — nothing else on either fence line. graph TD/LR flowchart syntax is the default choice. Any
+other fence style (no tag, or a different tag) renders as plain text, not a diagram.
 ${webSearchLine}
 STATE RESUME RULE — CRITICAL: if the user's message just means "continue" ("كمل", "استمر",
 "tabع", "كملها", "continue", "go on"), find the most recent "model"-role turn above and pick up
@@ -5141,6 +5148,10 @@ Math: real LaTeX wrapped in $ (inline) or $$ (display) — $f_{cu}$, $A_s$,
 $(M_{cr}/M_a)^3$, $$M_{cr} = \frac{f_r \cdot I_g}{y_t}$$. Never the old plain-underscore
 form, never a hand-typed Unicode super/subscript. Never $ for money — amounts are
 always "249 EGP".
+
+Diagrams: for a multi-step decision flow only, use a fenced block tagged exactly mermaid —
+open with \`\`\`mermaid alone on its own line, valid graph TD/LR syntax inside, close with plain
+\`\`\`. Any other fence tag (or none) shows as plain text, not a diagram, to the user.
 
 ${isDeveloperMode ? '' : `\
 CONFIDENTIALITY: never name/discuss your own backend, API, Cloudflare, hosting, or provider —
@@ -7706,7 +7717,14 @@ inferring one. General engineering knowledge is still fine to answer from, with 
   // wording once the real ACI/ECP equations KB existed to check against.
   // Ceilings below are the exact re-measured totals (14659+2378,
   // 1748+820+284), not a hand-added delta-on-a-delta.
-  assertPromptBudget('geminiSystemPrompt', geminiSystemPrompt, isFirstTurn ? 17035 : 2850, env);
+  // [PATCH — Mermaid fence, follow-up tier gap] buildGeminiFollowupPrompt never carried the
+  // DIAGRAMS/mermaid-fence instruction that buildSystemPrompt (turn-1 tier) has had since the
+  // original Mermaid patch — turn-2+ replies had no rule telling the model to wrap flowchart
+  // syntax in a ```mermaid fence, so the client's _cesScanMermaidFences (fence-tag-only match,
+  // by design) never matched and the diagram fell back to plain source text. Condensed
+  // DIAGRAMS paragraph added to buildGeminiFollowupPrompt, +573 chars exact measured delta.
+  // Follow-up ceiling: 2850 -> 3423.
+  assertPromptBudget('geminiSystemPrompt', geminiSystemPrompt, isFirstTurn ? 17035 : 3423, env);
 
   const geminiKeysIndexed = buildGeminiKeyPool(env);
 
@@ -7942,7 +7960,11 @@ inferring one. General engineering knowledge is still fine to answer from, with 
         // NOTE (still unrelated to this patch, still unresolved): this
         // ceiling was already below CRITICAL_FACTS' own 1570 chars before
         // ANY of these patches — pre-existing drift, still worth reconciling.
-        assertPromptBudget('workersSystemContent', workersSystemContent, 2902, env);
+        // [PATCH — Mermaid fence, Workers AI tier gap] Same fix as the Gemini follow-up tier
+        // above: this fallback tier never taught the mermaid fence convention at all (not even
+        // a full-tier version to condense from). Minimal Diagrams paragraph added, +276 chars
+        // exact measured delta. Ceiling: 2902 -> 3178.
+        assertPromptBudget('workersSystemContent', workersSystemContent, 3178, env);
         const workersMsgs = [
           { role: 'system', content: workersSystemContent },
           ...turns.map(t => ({

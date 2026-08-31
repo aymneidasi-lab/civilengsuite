@@ -5,6 +5,8 @@
     "/images/*",
     "/fonts/*",
     "/vendor/katex/*",
+    "/vendor/mermaid/*",
+    "/vendor/dxf-kit/*",
     "/footing-pro/images/*",
     "/footing-pro/engineers/*",
     "/footing-pro/offices/*",

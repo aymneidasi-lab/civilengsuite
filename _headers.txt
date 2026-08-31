@@ -51,6 +51,28 @@
 #      header"), so a plain restate here would have produced a doubled,
 #      malformed Cache-Control instead of the intended long-cache value.
 
+#
+# FIX LOG (2026-08-26): MERMAID VENDOR ASSET CACHING
+# [K2] Added /vendor/mermaid/* block: same treatment as [K1]/vendor/katex
+#      above, for the same reason -- pinned (11.17.2), content-stable,
+#      lazy-fetched on first ```mermaid fence. Also needs the "!
+#      Cache-Control" detach for the same /* catch-all join-by-comma
+#      reason documented in [K1].
+
+#
+# FIX LOG (2026-08-31): DXF-KIT VENDOR ASSET CACHING
+# [K3] Added /vendor/dxf-kit/* block: same treatment as [K1]/[K2] above --
+#      pinned/content-stable per-element DXF render modules + the vendored
+#      @tarikjabiri/dxf@2.8.9 copy, lazy dynamic-import()'d only when the
+#      chat widget's DXF download button is clicked. Same "! Cache-Control"
+#      detach for the same /* catch-all join-by-comma reason as [K1]/[K2].
+#      Completes the routing gap that was masking as "Could not generate
+#      the DXF file right now" in the front end -- paired with the
+#      matching /vendor/dxf-kit/* addition to _routes.json's exclude list
+#      and the vendor\/dxf-kit\/.* addition to functions/[[path]].js's
+#      STATIC_PASSTHROUGH regex. All three are required together; this
+#      block alone does nothing if either of the other two is missing.
+
 # [F2] Default cache + security for all static HTML pages
 /*
   X-Frame-Options: DENY
@@ -99,6 +121,16 @@
 
 # [K1] KaTeX vendor assets — pinned version, content-stable, lazy-fetched
 /vendor/katex/*
+  ! Cache-Control
+  Cache-Control: public, max-age=31536000, immutable
+
+# [K2] Mermaid vendor assets — pinned version, content-stable, lazy-fetched
+/vendor/mermaid/*
+  ! Cache-Control
+  Cache-Control: public, max-age=31536000, immutable
+
+# [K3] DXF-kit vendor assets — pinned version, content-stable, lazy-fetched
+/vendor/dxf-kit/*
   ! Cache-Control
   Cache-Control: public, max-age=31536000, immutable
 
