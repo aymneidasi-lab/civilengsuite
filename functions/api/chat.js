@@ -1189,7 +1189,7 @@ import {
 import { validateImagePrompt, generateImageWorkersAI } from '../_lib/imageGen.mjs';
 import {
   classifyFootingDiagram, buildFootingDiagramSvg, svgToDataUri,
-  renderFootingDiagramSVG,
+  parseDiagramCommand, renderFootingDiagramSVG,
 } from '../_lib/footingDiagram.mjs';
 // [Step 11] parseBeamRebarPayload/renderBeamDiagramSVG only — NOT
 // DiagramError or svgToDataUri, even though beamDiagram.mjs re-exports
@@ -1199,80 +1199,6 @@ import {
 // shadow. The one already in scope is byte-identical (both now trace
 // to structuralDrawingKit.mjs's single implementation).
 import { parseBeamRebarPayload, renderBeamDiagramSVG } from '../_lib/beamDiagram.mjs';
-// [Linking beamAsciiToPayload.mjs] beam-only ASCII "key=value" front end
-// for the mode:'rebarDiagram' /rebar path — see that module's own header.
-// Does not touch beamDiagram.mjs's own compute/render/parse exports;
-// purely a syntax translator ahead of parseBeamRebarPayload.
-import { parseBeamAsciiCommand } from '../_lib/beamAsciiToPayload.mjs';
-// [Step 20] Slab/shear-wall/stair — same shape as beamDiagram.mjs's pair
-// above (parse*RebarPayload for mode:'rebarDiagram', render*SVG for both
-// that and the mode:'image' /diagram path below). DiagramError/
-// svgToDataUri not re-imported here for the same duplicate-binding
-// reason noted above.
-import { parseSlabRebarPayload, renderSlabDiagramSVG } from '../_lib/slabDiagram.mjs';
-import { parseShearWallRebarPayload, renderShearWallDiagramSVG } from '../_lib/shearWallDiagram.mjs';
-import { parseStairRebarPayload, renderStairDiagramSVG } from '../_lib/stairDiagram.mjs';
-// [Follow-up to Step 20] Column — same shape as the three imports above.
-// columnDiagram.mjs also re-exports DiagramError/svgToDataUri; not
-// re-imported here for the same duplicate-binding reason noted above.
-import { parseColumnRebarPayload, renderColumnDiagramSVG } from '../_lib/columnDiagram.mjs';
-// [New-element track, Part 2 candidate 1] Retaining wall (cantilever,
-// typical section) — same shape as the four imports above.
-// retainingWallDiagram.mjs also re-exports DiagramError/svgToDataUri;
-// not re-imported here for the same duplicate-binding reason noted above.
-import { parseRetainingWallRebarPayload, renderRetainingWallDiagramSVG } from '../_lib/retainingWallDiagram.mjs';
-// [New-element track, Part 2 candidate 2] Trapezoidal combined footing —
-// same shape as the five imports above. trapezoidalFootingDiagram.mjs
-// also re-exports DiagramError/svgToDataUri; not re-imported here for
-// the same duplicate-binding reason noted above.
-import { parseTrapezoidalFootingRebarPayload, renderTrapezoidalFootingDiagramSVG } from '../_lib/trapezoidalFootingDiagram.mjs';
-// [New-element track, Part 2 candidate 3] Strap footing — same shape as
-// the six imports above. strapFootingDiagram.mjs also re-exports
-// DiagramError/svgToDataUri; not re-imported here for the same
-// duplicate-binding reason noted above.
-import { parseStrapFootingRebarPayload, renderStrapFootingDiagramSVG } from '../_lib/strapFootingDiagram.mjs';
-// [New-element track, Part 2 candidate 4] Grade beam / tie beam — same
-// shape as the seven imports above. gradeBeamDiagram.mjs also re-exports
-// DiagramError/svgToDataUri; not re-imported here for the same
-// duplicate-binding reason noted above.
-import { parseGradeBeamRebarPayload, renderGradeBeamDiagramSVG } from '../_lib/gradeBeamDiagram.mjs';
-// [New-element track] Pile cap — same shape as the eight imports above.
-// pileCapDiagram.mjs also re-exports DiagramError/svgToDataUri; not
-// re-imported here for the same duplicate-binding reason noted above.
-import { parsePileCapRebarPayload, renderPileCapDiagramSVG } from '../_lib/pileCapDiagram.mjs';
-// [New-element track, session25 gate] Flat slab opening reinforcement —
-// same shape as the nine imports above. slabOpeningDiagram.mjs also
-// re-exports DiagramError/svgToDataUri; not re-imported here for the
-// same duplicate-binding reason noted above.
-import { parseSlabOpeningRebarPayload, renderSlabOpeningDiagramSVG } from '../_lib/slabOpeningDiagram.mjs';
-// [New-element track — SVG completeness pass] Ten library modules that
-// already had a full compute/render*SVG/parse*RebarPayload/
-// parseDiagramCommand quadruple (same shape as the twelve pairs above,
-// and already wired into diagramCommandRouter.mjs's own PARSERS array
-// as of this same pass) but were never imported here or reachable
-// through either the /diagram or /rebar endpoints below — found by
-// diffing every render*DiagramSVG export across every *.mjs file in
-// functions/_lib against this file's own import list. Same shape,
-// same re-export-skip reasoning, as every import above.
-import { parseBasementWallRebarPayload, renderBasementWallDiagramSVG } from '../_lib/basementWallDiagram.mjs';
-import { parseBeamColumnJointRebarPayload, renderBeamColumnJointDiagramSVG } from '../_lib/beamColumnJointDiagram.mjs';
-import { parseCircularColumnRebarPayload, renderCircularColumnDiagramSVG } from '../_lib/circularColumnDiagram.mjs';
-import { parseCorbelRebarPayload, renderCorbelDiagramSVG } from '../_lib/corbelDiagram.mjs';
-import { parseCouplingBeamRebarPayload, renderCouplingBeamDiagramSVG } from '../_lib/couplingBeamDiagram.mjs';
-import { parseFlatSlabDropPanelRebarPayload, renderFlatSlabDropPanelDiagramSVG } from '../_lib/flatSlabDropPanelDiagram.mjs';
-import { parseHordiSlabRebarPayload, renderHordiSlabDiagramSVG } from '../_lib/hordiSlabDiagram.mjs';
-import { parsePunchingShearRebarPayload, renderPunchingShearDiagramSVG } from '../_lib/punchingShearDiagram.mjs';
-import { parseRaftPileRebarPayload, renderRaftPileDiagramSVG } from '../_lib/raftPileDiagram.mjs';
-import { parseWallOpeningRebarPayload, renderWallOpeningDiagramSVG } from '../_lib/wallOpeningDiagram.mjs';
-// [Step 20] Single /diagram dispatch point. Supersedes importing
-// footingDiagram.mjs's own parseDiagramCommand directly (removed from
-// the import above) — routeDiagramCommand() tries that exact function
-// first, so every isolated/combined/strip/raft command still resolves
-// through the identical footingDiagram.mjs code path, byte-for-byte;
-// it additionally recognizes slab/shearwall/stair. See
-// diagramCommandRouter.mjs's own header for the full rationale.
-import { routeDiagramCommand } from '../_lib/diagramCommandRouter.mjs';
-
 
 // Bilingual wrapper for footingDiagram.mjs's DiagramError codes (+
 // parseDiagramCommand's own UNSUPPORTED_TYPE). English relays the
@@ -1292,479 +1218,11 @@ function computedDiagramErrorMessage(code, englishDetail, arabic) {
     COLUMN_OUT_OF_BOUNDS: 'موضع العمود خارج حدود القاعدة',
     COLUMNS_OVERLAP  : 'تداخل بين العمودين',
     NO_ROOM_FOR_BARS : 'لا يوجد مسافة كافية لتسليح مع هذا الغطاء الخرساني وقطر السيخ',
-    // [Step 20] Was 'نوع القاعدة غير مدعوم — استخدم isolated أو combined'
-    // — accurate when this module only ever routed footing types, but
-    // routeDiagramCommand() now also recognizes slab/shearwall/stair, so
-    // a hardcoded two-type hint would misinform. The full, current list
-    // is already in englishDetail (routeDiagramCommand's own message
-    // names every wired type) and is appended verbatim below regardless
-    // of language — see this function's own header comment on why
-    // parameter/type-name detail is never translated.
-    UNSUPPORTED_TYPE : 'نوع الرسم غير مدعوم',
+    UNSUPPORTED_TYPE : 'نوع القاعدة غير مدعوم — استخدم isolated أو combined',
   };
   const label = AR[code] || 'قيم غير صالحة';
   return `${label} (${englishDetail || code})`;
 }
-
-// [Step 20] Bilingual wrapper for slabDiagram.mjs's DiagramError codes.
-// Own function, not folded into computedDiagramErrorMessage — same
-// "disjoint code sets get disjoint functions" discipline
-// beamDiagramErrorMessage's own header already established. slabDiagram
-// .mjs currently throws only BAD_PARAM/BAD_UNIT (from the shared kit's
-// toMm) /NO_ROOM_FOR_BARS — no slab-specific code exists yet, but this
-// stays a separate function so a future slab-specific code (like
-// shearWallDiagramErrorMessage's BOUNDARY_EXCEEDS_LENGTH below) has an
-// obvious, uncrowded home.
-function slabDiagramErrorMessage(code, englishDetail, arabic) {
-  if (!arabic) return englishDetail || 'Invalid slab reinforcement data.';
-  const AR = {
-    BAD_PARAM       : 'قيمة غير صالحة',
-    BAD_UNIT        : 'وحدة قياس غير معروفة',
-    NO_ROOM_FOR_BARS: 'لا يوجد مسافة كافية لتسليح مع هذا الغطاء الخرساني وسُمك اللوح',
-  };
-  const label = AR[code] || 'قيم غير صالحة';
-  return `${label} (${englishDetail || code})`;
-}
-
-// [Step 20] Bilingual wrapper for shearWallDiagram.mjs's DiagramError
-// codes. BOUNDARY_EXCEEDS_LENGTH is the one code unique to this module
-// (thrown when two boundary-element zones would overlap or leave no
-// distributed-mesh zone between them — see shearWallDiagram.mjs's own
-// compute function).
-function shearWallDiagramErrorMessage(code, englishDetail, arabic) {
-  if (!arabic) return englishDetail || 'Invalid shear wall reinforcement data.';
-  const AR = {
-    BAD_PARAM              : 'قيمة غير صالحة',
-    BAD_UNIT               : 'وحدة قياس غير معروفة',
-    NO_ROOM_FOR_BARS       : 'لا يوجد مسافة كافية لتسليح مع هذا الغطاء الخرساني وسُمك الحائط',
-    BOUNDARY_EXCEEDS_LENGTH: 'عرض العنصر الحدي من الطرفين أكبر من طول الحائط',
-  };
-  const label = AR[code] || 'قيم غير صالحة';
-  return `${label} (${englishDetail || code})`;
-}
-
-// [Step 20] Bilingual wrapper for stairDiagram.mjs's DiagramError codes.
-function stairDiagramErrorMessage(code, englishDetail, arabic) {
-  if (!arabic) return englishDetail || 'Invalid stair reinforcement data.';
-  const AR = {
-    BAD_PARAM       : 'قيمة غير صالحة',
-    BAD_UNIT        : 'وحدة قياس غير معروفة',
-    NO_ROOM_FOR_BARS: 'لا يوجد مسافة كافية لتسليح مع سُمك الوسط (waist) هذا',
-  };
-  const label = AR[code] || 'قيم غير صالحة';
-  return `${label} (${englishDetail || code})`;
-}
-
-// [Follow-up to Step 20] Bilingual wrapper for columnDiagram.mjs's
-// DiagramError codes. ODD_BAR_COUNT and LAP_EXCEEDS_HEIGHT are unique to
-// this module (see columnDiagram.mjs's own compute function); the rest
-// (BAD_PARAM/BAD_UNIT/NO_ROOM_FOR_BARS) are the same shared-kit codes
-// every sibling wrapper already covers under its own module-specific copy.
-function columnDiagramErrorMessage(code, englishDetail, arabic) {
-  if (!arabic) return englishDetail || 'Invalid column reinforcement data.';
-  const AR = {
-    BAD_PARAM        : 'قيمة غير صالحة',
-    BAD_UNIT         : 'وحدة قياس غير معروفة',
-    NO_ROOM_FOR_BARS : 'لا يوجد مسافة كافية لتسليح مع هذا الغطاء الخرساني وقطر الكانة والسيخ',
-    ODD_BAR_COUNT    : 'عدد الأسياخ يجب أن يكون زوجيًا',
-    LAP_EXCEEDS_HEIGHT: 'طول منطقة التداخل أكبر من ارتفاع العمود',
-  };
-  const label = AR[code] || 'قيم غير صالحة';
-  return `${label} (${englishDetail || code})`;
-}
-
-// [New-element track, Part 2 candidate 1] Bilingual wrapper for
-// retainingWallDiagram.mjs's DiagramError codes. This module currently
-// throws only the same shared-kit codes every sibling wrapper already
-// covers (BAD_PARAM/BAD_UNIT/NO_ROOM_FOR_BARS) — no retaining-wall-
-// specific code exists yet (see that module's own compute function) —
-// but stays a separate function per the same "disjoint code sets get
-// disjoint functions" discipline beamDiagramErrorMessage's header
-// established, so a future module-specific code has an obvious,
-// uncrowded home instead of overloading a shared map.
-function retainingWallDiagramErrorMessage(code, englishDetail, arabic) {
-  if (!arabic) return englishDetail || 'Invalid retaining wall reinforcement data.';
-  const AR = {
-    BAD_PARAM       : 'قيمة غير صالحة',
-    BAD_UNIT        : 'وحدة قياس غير معروفة',
-    NO_ROOM_FOR_BARS: 'لا يوجد مسافة كافية لتسليح مع هذا الغطاء الخرساني وسُمك الحائط أو القاعدة',
-  };
-  const label = AR[code] || 'قيم غير صالحة';
-  return `${label} (${englishDetail || code})`;
-}
-
-// [New-element track, Part 2 candidate 2] Bilingual wrapper for
-// trapezoidalFootingDiagram.mjs's DiagramError codes. NOT_TRAPEZOIDAL,
-// COLUMN_OUT_OF_BOUNDS, and COLUMN_TOO_WIDE are unique to this module;
-// COLUMNS_OVERLAP is the same shape as the shared-kit-adjacent code
-// footingDiagram.mjs's own wrapper (computedDiagramErrorMessage) already
-// covers, but this module throws it independently (own compute
-// function), so it is repeated here rather than shared, per the same
-// "disjoint code sets get disjoint functions" discipline every sibling
-// wrapper in this file already follows.
-function trapezoidalFootingDiagramErrorMessage(code, englishDetail, arabic) {
-  if (!arabic) return englishDetail || 'Invalid trapezoidal footing reinforcement data.';
-  const AR = {
-    BAD_PARAM           : 'قيمة غير صالحة',
-    BAD_UNIT            : 'وحدة قياس غير معروفة',
-    NOT_TRAPEZOIDAL     : 'عرضا القاعدة متساويان تقريبًا — هذا شكل مستطيل وليس شبه منحرف',
-    COLUMN_OUT_OF_BOUNDS: 'موضع العمود خارج حدود القاعدة',
-    COLUMN_TOO_WIDE     : 'عرض العمود أكبر من عرض القاعدة عند موضعه',
-    COLUMNS_OVERLAP     : 'تداخل بين العمودين',
-    NO_ROOM_FOR_BARS    : 'لا يوجد مسافة كافية لتسليح مع هذا الغطاء الخرساني وقطر السيخ',
-  };
-  const label = AR[code] || 'قيم غير صالحة';
-  return `${label} (${englishDetail || code})`;
-}
-
-// [New-element track, Part 2 candidate 4] Bilingual wrapper for
-// gradeBeamDiagram.mjs's DiagramError codes. NODE_OUT_OF_BOUNDS and
-// TOO_MANY_NODES are unique to this module (the annotation-only column/
-// wall/pile markers — see that module's own header for why this is a
-// deliberately distinct code from beam's SUPPORT_OUT_OF_BOUNDS /
-// TOO_MANY_SUPPORTS, not a reuse of them). The bar-group codes
-// (TOO_MANY_BAR_GROUPS, BAR_OUT_OF_BOUNDS, TOO_MANY_ZONES,
-// ZONE_OUT_OF_BOUNDS, ZONES_OVERLAP, TOO_MANY_SECTIONS,
-// SECTION_OUT_OF_BOUNDS, NO_ROOM_FOR_BARS) are the same shape as
-// beamDiagramErrorMessage's own map, repeated here per the same
-// "disjoint code sets get disjoint functions" discipline every sibling
-// wrapper in this file already follows — gradeBeamDiagram.mjs throws
-// them from its own (duplicated, not shared) validation, so a future
-// change to beam's copy cannot silently change this module's messages
-// or vice versa. BAD_SYNTAX/BAD_TOKEN are gradeBeamDiagram.mjs's own
-// local ASCII-grammar codes (see that module's parseGradeBeamAsciiCommand),
-// not beamAsciiToPayload.mjs's — a separate ASCII parser, separate codes,
-// same two label strings by coincidence only (both mean "malformed
-// key=value text").
-function gradeBeamDiagramErrorMessage(code, englishDetail, arabic) {
-  if (!arabic) return englishDetail || 'Invalid grade beam / tie beam reinforcement data.';
-  const AR = {
-    BAD_PARAM          : 'قيمة غير صالحة',
-    BAD_UNIT           : 'وحدة قياس غير معروفة',
-    NO_ROOM_FOR_BARS   : 'لا يوجد مسافة كافية لتسليح مع هذا الغطاء الخرساني',
-    NODE_OUT_OF_BOUNDS : 'موضع العلامة خارج طول الكمرة',
-    TOO_MANY_NODES     : 'عدد العلامات أكبر من الحد المسموح',
-    ZONES_OVERLAP      : 'تداخل بين مناطق الكانات',
-    TOO_MANY_BAR_GROUPS: 'عدد مجموعات الأسياخ أكبر من الحد المسموح',
-    TOO_MANY_ZONES     : 'عدد مناطق الكانات أكبر من الحد المسموح',
-    TOO_MANY_SECTIONS  : 'عدد القطاعات أكبر من الحد المسموح',
-    BAR_OUT_OF_BOUNDS  : 'امتداد السيخ خارج طول الكمرة',
-    ZONE_OUT_OF_BOUNDS : 'امتداد منطقة الكانات خارج طول الكمرة',
-    SECTION_OUT_OF_BOUNDS: 'موضع القطاع خارج طول الكمرة',
-    BAD_SYNTAX         : 'صيغة الأمر غير صحيحة',
-    BAD_TOKEN          : 'قيمة أو مفتاح غير معروف في نص الأمر',
-  };
-  const label = AR[code] || 'قيم غير صالحة';
-  return `${label} (${englishDetail || code})`;
-}
-
-// [New-element track] Bilingual wrapper for pileCapDiagram.mjs's
-// DiagramError codes. TOO_FEW_PILES, TOO_MANY_PILES, PILE_OUT_OF_BOUNDS,
-// PILES_OVERLAP, COLUMN_PILE_OVERLAP, and EMBED_EXCEEDS_DEPTH are unique
-// to this module; COLUMN_TOO_WIDE and NO_ROOM_FOR_BARS are the same
-// shape as codes other footing-family wrappers already cover, but this
-// module throws them independently (own compute function), so they are
-// repeated here rather than shared, per the same "disjoint code sets get
-// disjoint functions" discipline every sibling wrapper in this file
-// already follows. All eight codes enumerated by grepping every
-// `throw new DiagramError(...)` in pileCapDiagram.mjs directly and
-// triggered individually against the real, unmodified
-// computePileCapDiagramGeometry to confirm the `code` value matches.
-function pileCapDiagramErrorMessage(code, englishDetail, arabic) {
-  if (!arabic) return englishDetail || 'Invalid pile cap reinforcement data.';
-  const AR = {
-    BAD_PARAM          : 'قيمة غير صالحة',
-    BAD_UNIT           : 'وحدة قياس غير معروفة',
-    COLUMN_TOO_WIDE    : 'عرض العمود أكبر من عرض القاعدة',
-    TOO_FEW_PILES      : 'عدد الخوازيق أقل من الحد الأدنى',
-    TOO_MANY_PILES     : 'عدد الخوازيق أكبر من الحد المسموح',
-    PILE_OUT_OF_BOUNDS : 'موضع الخازوق خارج حدود القاعدة أو قريب جداً من حافتها',
-    PILES_OVERLAP      : 'تداخل بين خازوقين',
-    COLUMN_PILE_OVERLAP: 'تداخل بين خازوق والعمود',
-    EMBED_EXCEEDS_DEPTH: 'عمق تغلغل الخازوق أكبر من سمك القاعدة',
-    NO_ROOM_FOR_BARS   : 'لا يوجد مسافة كافية لتسليح مع هذا الغطاء الخرساني وقطر السيخ',
-  };
-  const label = AR[code] || 'قيم غير صالحة';
-  return `${label} (${englishDetail || code})`;
-}
-// [New-element track, session25 gate] Bilingual wrapper for
-// slabOpeningDiagram.mjs's DiagramError codes. OPENING_TOO_CLOSE_TO_EDGE
-// is unique to this module; BAD_PARAM/BAD_UNIT/NO_ROOM_FOR_BARS are the
-// same shape as codes other slab-family wrappers already cover, but this
-// module throws them independently (own compute function), so they are
-// repeated here rather than shared, per the same "disjoint code sets get
-// disjoint functions" discipline every sibling wrapper in this file
-// already follows. All four codes enumerated by grepping every `throw
-// new DiagramError(...)` in slabOpeningDiagram.mjs directly and triggered
-// individually against the real, unmodified
-// computeSlabOpeningDiagramGeometry to confirm the `code` value matches
-// (see this module's own build-verification run).
-function slabOpeningDiagramErrorMessage(code, englishDetail, arabic) {
-  if (!arabic) return englishDetail || 'Invalid slab opening reinforcement data.';
-  const AR = {
-    BAD_PARAM               : 'قيمة غير صالحة',
-    BAD_UNIT                : 'وحدة قياس غير معروفة',
-    NO_ROOM_FOR_BARS        : 'لا يوجد مسافة كافية لتسليح مع هذا الغطاء الخرساني وقطر السيخ',
-    OPENING_TOO_CLOSE_TO_EDGE: 'موضع الفتحة قريب جداً من حافة البلاطة أو خارج حدودها',
-  };
-  const label = AR[code] || 'قيم غير صالحة';
-  return `${label} (${englishDetail || code})`;
-}
-// [New-element track — SVG completeness pass] Bilingual wrapper for
-// basementWallDiagram.mjs's DiagramError codes. ZONES_OVERLAP is unique
-// to this module (thrown only when both topExtraBars and
-// bottomExtraBars are supplied and their projections overlap mid-height
-// — see that module's own compute function); BAD_PARAM/BAD_UNIT/
-// NO_ROOM_FOR_BARS are the same shape as codes other wrappers already
-// cover, repeated here per the same "disjoint code sets get disjoint
-// functions" discipline every sibling wrapper in this file follows.
-function basementWallDiagramErrorMessage(code, englishDetail, arabic) {
-  if (!arabic) return englishDetail || 'Invalid basement wall reinforcement data.';
-  const AR = {
-    BAD_PARAM       : 'قيمة غير صالحة',
-    BAD_UNIT        : 'وحدة قياس غير معروفة',
-    NO_ROOM_FOR_BARS: 'لا يوجد مسافة كافية لتسليح مع هذا الغطاء الخرساني وسُمك الحائط',
-    ZONES_OVERLAP   : 'تداخل بين منطقتي الأسياخ الإضافية العلوية والسفلية على ارتفاع الحائط',
-  };
-  const label = AR[code] || 'قيم غير صالحة';
-  return `${label} (${englishDetail || code})`;
-}
-// [New-element track — SVG completeness pass] Bilingual wrapper for
-// beamColumnJointDiagram.mjs's DiagramError codes. ODD_COLUMN_BAR_COUNT,
-// DEV_LENGTH_EXCEEDS_COLUMN, NO_ROOM_FOR_BEAM_BARS, and
-// NO_ROOM_FOR_JOINT_TIE are unique to this module; BAD_PARAM/BAD_UNIT/
-// NO_ROOM_FOR_BARS (the column bars specifically) are the same shape as
-// codes other wrappers already cover, repeated here per the same
-// discipline.
-function beamColumnJointDiagramErrorMessage(code, englishDetail, arabic) {
-  if (!arabic) return englishDetail || 'Invalid beam-column joint reinforcement data.';
-  const AR = {
-    BAD_PARAM               : 'قيمة غير صالحة',
-    BAD_UNIT                : 'وحدة قياس غير معروفة',
-    NO_ROOM_FOR_BARS        : 'لا يوجد مسافة كافية لتسليح أسياخ العمود مع هذا الغطاء الخرساني',
-    NO_ROOM_FOR_BEAM_BARS   : 'لا يوجد مسافة كافية لتسليح أسياخ الكمرة مع هذا الغطاء الخرساني',
-    NO_ROOM_FOR_JOINT_TIE   : 'لا يوجد مسافة كافية لكانة منطقة الوصلة (Joint Core) مع هذا الغطاء الخرساني',
-    ODD_COLUMN_BAR_COUNT    : 'عدد أسياخ العمود يجب أن يكون زوجيًا',
-    DEV_LENGTH_EXCEEDS_COLUMN: 'طول التغلغل (Development Length) أكبر من عرض العمود',
-  };
-  const label = AR[code] || 'قيم غير صالحة';
-  return `${label} (${englishDetail || code})`;
-}
-// [New-element track — SVG completeness pass] Bilingual wrapper for
-// circularColumnDiagram.mjs's DiagramError codes. SPIRAL_OVERLAP is
-// unique to this module; LAP_EXCEEDS_HEIGHT is the same shape as
-// columnDiagramErrorMessage's own code above, repeated here per the
-// same discipline (this module throws it independently, own compute
-// function).
-function circularColumnDiagramErrorMessage(code, englishDetail, arabic) {
-  if (!arabic) return englishDetail || 'Invalid circular column reinforcement data.';
-  const AR = {
-    BAD_PARAM         : 'قيمة غير صالحة',
-    BAD_UNIT          : 'وحدة قياس غير معروفة',
-    NO_ROOM_FOR_BARS  : 'لا يوجد مسافة كافية لتسليح مع هذا الغطاء الخرساني وقطر الحلزون والسيخ',
-    LAP_EXCEEDS_HEIGHT: 'طول منطقة التداخل أكبر من ارتفاع العمود',
-    SPIRAL_OVERLAP    : 'تداخل بين لفات الحلزون (Spiral) — قلّل القطر أو زوّد الخطوة (pitch)',
-  };
-  const label = AR[code] || 'قيم غير صالحة';
-  return `${label} (${englishDetail || code})`;
-}
-// [New-element track — SVG completeness pass] Bilingual wrapper for
-// corbelDiagram.mjs's DiagramError codes. AV_D_RATIO_EXCEEDS_SCOPE,
-// BEARING_EXCEEDS_PROJECTION, TAPER_TOO_STEEP, and NO_ROOM_FOR_TIE_BARS
-// are all unique to this module (see that module's own compute
-// function).
-function corbelDiagramErrorMessage(code, englishDetail, arabic) {
-  if (!arabic) return englishDetail || 'Invalid corbel reinforcement data.';
-  const AR = {
-    BAD_PARAM                 : 'قيمة غير صالحة',
-    BAD_UNIT                  : 'وحدة قياس غير معروفة',
-    NO_ROOM_FOR_TIE_BARS      : 'لا يوجد مسافة كافية لأسياخ الشد العلوية (Tie Bars) مع هذا الغطاء الخرساني',
-    TAPER_TOO_STEEP           : 'ميل السطح العلوي للكابولي شديد الانحدار — راجع h وh1 والامتداد (projection)',
-    AV_D_RATIO_EXCEEDS_SCOPE  : 'النسبة av/d أكبر من 1.0 — العنصر يتصرف ككمرة قصيرة وليس كابولي، وده خارج نطاق هذه الأداة',
-    BEARING_EXCEEDS_PROJECTION: 'لوحة التحميل ومسافة الحافة الدنيا تتجاوز امتداد الكابولي (projection)',
-  };
-  const label = AR[code] || 'قيم غير صالحة';
-  return `${label} (${englishDetail || code})`;
-}
-// [New-element track — SVG completeness pass] Bilingual wrapper for
-// couplingBeamDiagram.mjs's DiagramError codes. UNEVEN_BAR_LAYERS and
-// NO_ROOM_FOR_BUNDLE are unique to this module.
-function couplingBeamDiagramErrorMessage(code, englishDetail, arabic) {
-  if (!arabic) return englishDetail || 'Invalid coupling beam reinforcement data.';
-  const AR = {
-    BAD_PARAM        : 'قيمة غير صالحة',
-    BAD_UNIT         : 'وحدة قياس غير معروفة',
-    NO_ROOM_FOR_BARS : 'لا يوجد مسافة كافية لتسليح مع هذا الغطاء الخرساني',
-    NO_ROOM_FOR_BUNDLE: 'لا يوجد مسافة كافية لحزمة الأسياخ القطرية (Diagonal Bundle) داخل مقطع الكمرة',
-    UNEVEN_BAR_LAYERS: 'عدد الأسياخ القطرية بكل مجموعة لازم يقبل القسمة على عدد الطبقات',
-  };
-  const label = AR[code] || 'قيم غير صالحة';
-  return `${label} (${englishDetail || code})`;
-}
-// [New-element track — SVG completeness pass] Bilingual wrapper for
-// flatSlabDropPanelDiagram.mjs's DiagramError codes. Both codes are
-// unique to this module (own compute function).
-function flatSlabDropPanelDiagramErrorMessage(code, englishDetail, arabic) {
-  if (!arabic) return englishDetail || 'Invalid flat slab drop panel / column capital reinforcement data.';
-  const AR = {
-    BAD_PARAM                          : 'قيمة غير صالحة',
-    BAD_UNIT                           : 'وحدة قياس غير معروفة',
-    CAPITAL_TOP_NOT_LARGER_THAN_COLUMN : 'أبعاد أعلى كرسي العمود (Capital) لازم تكون أكبر من مقطع العمود نفسه',
-    PANEL_NOT_LARGER_THAN_COLUMN       : 'أبعاد بروز البلاطة (Drop Panel) لازم تكون أكبر من مقطع العمود نفسه',
-  };
-  const label = AR[code] || 'قيم غير صالحة';
-  return `${label} (${englishDetail || code})`;
-}
-// [New-element track — SVG completeness pass] Bilingual wrapper for
-// hordiSlabDiagram.mjs's DiagramError codes. TOP_BAR_EXTENT_TOO_LONG
-// and TOTAL_WIDTH_TOO_NARROW are unique to this module.
-function hordiSlabDiagramErrorMessage(code, englishDetail, arabic) {
-  if (!arabic) return englishDetail || 'Invalid hordi (rib) slab reinforcement data.';
-  const AR = {
-    BAD_PARAM              : 'قيمة غير صالحة',
-    BAD_UNIT               : 'وحدة قياس غير معروفة',
-    NO_ROOM_FOR_BARS       : 'لا يوجد مسافة كافية لتسليح مع هذا الغطاء الخرساني وعمق الجسر (Rib)',
-    TOP_BAR_EXTENT_TOO_LONG: 'امتداد الحديد العلوي أكبر من نصف بحر البلاطة',
-    TOTAL_WIDTH_TOO_NARROW : 'العرض الكلي المعروض للبلاطة أصغر من عرض جسر واحد وبلوكة الهوردي',
-  };
-  const label = AR[code] || 'قيم غير صالحة';
-  return `${label} (${englishDetail || code})`;
-}
-// [New-element track — SVG completeness pass] Bilingual wrapper for
-// punchingShearDiagram.mjs's DiagramError codes. All codes except
-// BAD_PARAM/BAD_UNIT are unique to this module (own compute function —
-// stud-rail geometry around a column has no equivalent check in any
-// sibling module).
-function punchingShearDiagramErrorMessage(code, englishDetail, arabic) {
-  if (!arabic) return englishDetail || 'Invalid punching shear (stud rail) reinforcement data.';
-  const AR = {
-    BAD_PARAM                    : 'قيمة غير صالحة',
-    BAD_UNIT                     : 'وحدة قياس غير معروفة',
-    COLUMN_TOO_WIDE              : 'عرض العمود أكبر من أبعاد رقعة البلاطة المعروضة',
-    CRITICAL_SECTION_EXCEEDS_SLAB: 'محيط القص الحرج (Critical Section) يتجاوز حدود رقعة البلاطة المعروضة',
-    D_EXCEEDS_THICKNESS          : 'العمق الفعّال (d) أكبر من سمك البلاطة',
-    RAILS_TOO_CLOSE              : 'تداخل أو تقارب شديد بين خطوط الأسياخ (Rails)',
-    RAIL_OUT_OF_BOUNDS           : 'امتداد أحد خطوط الأسياخ (Rail) خارج حدود رقعة البلاطة المعروضة',
-    TOO_FEW_RAILS                : 'عدد خطوط الأسياخ (Rails) أقل من الحد الأدنى',
-    TOO_MANY_RAILS               : 'عدد خطوط الأسياخ (Rails) أكبر من الحد المسموح',
-  };
-  const label = AR[code] || 'قيم غير صالحة';
-  return `${label} (${englishDetail || code})`;
-}
-// [New-element track — SVG completeness pass] Bilingual wrapper for
-// raftPileDiagram.mjs's DiagramError codes. Same shape as
-// pileCapDiagramErrorMessage's own map above (raft-on-piles is the
-// multi-column, footing-family sibling of pile cap's own single-column
-// case), repeated here rather than shared per the same discipline —
-// this module throws them independently (own compute function).
-// COLUMNS_OVERLAP/COLUMN_OUT_OF_BOUNDS/TOO_MANY_COLUMNS are additionally
-// unique to this module among the pile-family wrappers (pile cap has
-// only one, centered column, so it never needs them).
-function raftPileDiagramErrorMessage(code, englishDetail, arabic) {
-  if (!arabic) return englishDetail || 'Invalid raft-on-piles reinforcement data.';
-  const AR = {
-    BAD_PARAM          : 'قيمة غير صالحة',
-    BAD_UNIT           : 'وحدة قياس غير معروفة',
-    COLUMN_TOO_WIDE    : 'عرض العمود أكبر من عرض القاعدة عند موضعه',
-    COLUMN_OUT_OF_BOUNDS: 'موضع العمود خارج حدود اللبشة',
-    COLUMNS_OVERLAP    : 'تداخل بين عمودين',
-    TOO_MANY_COLUMNS   : 'عدد الأعمدة أكبر من الحد المسموح',
-    TOO_FEW_PILES      : 'عدد الخوازيق أقل من الحد الأدنى',
-    TOO_MANY_PILES     : 'عدد الخوازيق أكبر من الحد المسموح',
-    PILE_OUT_OF_BOUNDS : 'موضع الخازوق خارج حدود اللبشة أو قريب جداً من حافتها',
-    PILES_OVERLAP      : 'تداخل بين خازوقين',
-    COLUMN_PILE_OVERLAP: 'تداخل بين خازوق وعمود',
-    EMBED_EXCEEDS_DEPTH: 'عمق تغلغل الخازوق أكبر من سمك اللبشة',
-    NO_ROOM_FOR_BARS   : 'لا يوجد مسافة كافية لتسليح مع هذا الغطاء الخرساني وقطر السيخ',
-  };
-  const label = AR[code] || 'قيم غير صالحة';
-  return `${label} (${englishDetail || code})`;
-}
-// [New-element track — SVG completeness pass] Bilingual wrapper for
-// wallOpeningDiagram.mjs's DiagramError codes. OPENING_OUT_OF_BOUNDS,
-// TRIM_EXCEEDS_WALL, and DIAGONAL_EXCEEDS_WALL are all unique to this
-// module (own compute function).
-function wallOpeningDiagramErrorMessage(code, englishDetail, arabic) {
-  if (!arabic) return englishDetail || 'Invalid wall opening reinforcement data.';
-  const AR = {
-    BAD_PARAM             : 'قيمة غير صالحة',
-    BAD_UNIT              : 'وحدة قياس غير معروفة',
-    OPENING_OUT_OF_BOUNDS : 'الفتحة لا تقع بالكامل داخل حدود الحائط',
-    TRIM_EXCEEDS_WALL     : 'مسافة أسياخ التعويض حول الفتحة لا تسع داخل حدود الحائط',
-    DIAGONAL_EXCEEDS_WALL : 'أحد الأسياخ القطرية بأركان الفتحة يمتد خارج حدود الحائط',
-  };
-  const label = AR[code] || 'قيم غير صالحة';
-  return `${label} (${englishDetail || code})`;
-}
-// tables for the mode:'image' /diagram path. Keyed by exactly the `type`
-// string each module's own parseDiagramCommand returns: footing's four
-// sub-types stay whatever footingDiagram.mjs itself returns (unchanged by
-// this step); slab/shearwall/stair/column/beam are the literal
-// lower-cased leading command token, matching the "echo the accepted
-// token as `type`" convention every parseDiagramCommand in this app now
-// follows. UNSUPPORTED_TYPE results carry no `type` (no module claimed
-// the input), so error dispatch below falls back to
-// computedDiagramErrorMessage for that one case — its own AR map already
-// has a generic (non-footing-specific) UNSUPPORTED_TYPE entry as of Step
-// 20, see that function's own comment.
-// [Step 23] beam added — beamDiagramErrorMessage (below) already existed
-// (used by REBAR_ELEMENT_DISPATCH.beam since before Step 20); this is the
-// first time it's also reachable from the /diagram path. No other entry
-// in either table changed.
-// [New-element track, Part 2 candidate 4] gradebeam AND tiebeam both
-// keyed here, both pointing at the same renderer/error-message pair —
-// gradeBeamDiagram.mjs's own parseDiagramCommand echoes back whichever
-// literal leading token the caller typed (see that module's header on
-// why the two are treated as one schematic product, two accepted
-// spellings), so both tokens must resolve here or one spelling would
-// silently 500 despite parseDiagramCommand having already accepted it.
-const DIAGRAM_TYPE_RENDERERS = {
-  isolated: renderFootingDiagramSVG, combined: renderFootingDiagramSVG,
-  strip: renderFootingDiagramSVG, raft: renderFootingDiagramSVG,
-  slab: renderSlabDiagramSVG, shearwall: renderShearWallDiagramSVG, stair: renderStairDiagramSVG,
-  column: renderColumnDiagramSVG, beam: renderBeamDiagramSVG,
-  retainingwall: renderRetainingWallDiagramSVG,
-  trapezoidal: renderTrapezoidalFootingDiagramSVG,
-  strap: renderStrapFootingDiagramSVG,
-  gradebeam: renderGradeBeamDiagramSVG, tiebeam: renderGradeBeamDiagramSVG,
-  pilecap: renderPileCapDiagramSVG,
-  slabopening: renderSlabOpeningDiagramSVG,
-  // [New-element track — SVG completeness pass] Ten entries below, same
-  // "type string from parseDiagramCommand -> renderer" shape as every
-  // entry above. corbel/bracket both point at the same renderer for the
-  // same dual-spelling reason gradebeam/tiebeam do above.
-  basementwall: renderBasementWallDiagramSVG,
-  beamcolumnjoint: renderBeamColumnJointDiagramSVG,
-  circularcolumn: renderCircularColumnDiagramSVG,
-  corbel: renderCorbelDiagramSVG, bracket: renderCorbelDiagramSVG,
-  couplingbeam: renderCouplingBeamDiagramSVG,
-  dropcapital: renderFlatSlabDropPanelDiagramSVG,
-  hordi: renderHordiSlabDiagramSVG,
-  punchingshear: renderPunchingShearDiagramSVG,
-  raftpile: renderRaftPileDiagramSVG,
-  wallopening: renderWallOpeningDiagramSVG,
-};
-const DIAGRAM_TYPE_ERROR_MESSAGE = {
-  slab: slabDiagramErrorMessage, shearwall: shearWallDiagramErrorMessage, stair: stairDiagramErrorMessage,
-  column: columnDiagramErrorMessage, beam: beamDiagramErrorMessage,
-  retainingwall: retainingWallDiagramErrorMessage,
-  trapezoidal: trapezoidalFootingDiagramErrorMessage,
-  strap: strapFootingDiagramErrorMessage,
-  gradebeam: gradeBeamDiagramErrorMessage, tiebeam: gradeBeamDiagramErrorMessage,
-  pilecap: pileCapDiagramErrorMessage,
-  slabopening: slabOpeningDiagramErrorMessage,
-  // [New-element track — SVG completeness pass] Same shape as above.
-  basementwall: basementWallDiagramErrorMessage,
-  beamcolumnjoint: beamColumnJointDiagramErrorMessage,
-  circularcolumn: circularColumnDiagramErrorMessage,
-  corbel: corbelDiagramErrorMessage, bracket: corbelDiagramErrorMessage,
-  couplingbeam: couplingBeamDiagramErrorMessage,
-  dropcapital: flatSlabDropPanelDiagramErrorMessage,
-  hordi: hordiSlabDiagramErrorMessage,
-  punchingshear: punchingShearDiagramErrorMessage,
-  raftpile: raftPileDiagramErrorMessage,
-  wallopening: wallOpeningDiagramErrorMessage,
-};
 
 // [Step 11] Bilingual wrapper for beamDiagram.mjs's DiagramError codes.
 // A separate function, not folded into computedDiagramErrorMessage's
@@ -1788,120 +1246,10 @@ function beamDiagramErrorMessage(code, englishDetail, arabic) {
     ZONE_OUT_OF_BOUNDS   : 'امتداد منطقة الكانات خارج طول الكمرة',
     SECTION_OUT_OF_BOUNDS: 'موضع القطاع خارج طول الكمرة',
     UNSUPPORTED_ELEMENT  : 'نوع العنصر غير مدعوم حاليًا',
-    // [Linking beamAsciiToPayload.mjs] that module's own two codes — see
-    // its header's FAILURE MODES section for the BAD_SYNTAX/BAD_TOKEN
-    // split. BAD_SYNTAX itself never reaches the user as this label in
-    // practice (the mode:'rebarDiagram' block below treats it as "fall
-    // back to JSON.parse", not a terminal error) but is listed here for
-    // completeness / in case a future caller surfaces it directly.
-    BAD_SYNTAX           : 'صيغة الأمر غير صحيحة',
-    BAD_TOKEN             : 'قيمة أو مفتاح غير معروف في نص الأمر',
-    // [Found during this change's own verification, pre-existing gap —
-    // unrelated to beamAsciiToPayload.mjs itself: computeBeamDiagramGeometry
-    // has thrown these two codes for raw.lapZones since Step 16, but they
-    // were never added to this map. Any existing JSON /rebar caller using
-    // lapZones could already hit this fallback-to-generic-label gap; fixed
-    // here as a strict addition (no existing key's value changed).]
-    TOO_MANY_LAP_ZONES    : 'عدد مناطق التداخل (lap) أكبر من الحد المسموح',
-    LAP_ZONE_OUT_OF_BOUNDS: 'امتداد منطقة التداخل خارج طول الكمرة',
   };
   const label = AR[code] || 'قيم غير صالحة';
   return `${label} (${englishDetail || code})`;
 }
-
-// [New-element track, Part 2 candidate 3] Bilingual wrapper for
-// strapFootingDiagram.mjs's DiagramError codes. COLUMN_OUT_OF_BOUNDS,
-// FOOTINGS_OVERLAP, and NOT_A_STRAP are unique to this module;
-// COLUMN_TOO_WIDE and NO_ROOM_FOR_BARS are the same shape as codes other
-// footing-family wrappers already cover, but this module throws them
-// independently (own compute function), so they are repeated here rather
-// than shared, per the same "disjoint code sets get disjoint functions"
-// discipline every sibling wrapper in this file already follows. All
-// seven codes below enumerated by grepping every `throw new
-// DiagramError(...)` in the module directly, not guessed, and each
-// triggered individually against the real, unmodified
-// computeStrapFootingGeometry to confirm the `code` value matches (see
-// this step's own CHANGELOG entry).
-function strapFootingDiagramErrorMessage(code, englishDetail, arabic) {
-  if (!arabic) return englishDetail || 'Invalid strap footing reinforcement data.';
-  const AR = {
-    BAD_PARAM           : 'قيمة غير صالحة',
-    BAD_UNIT            : 'وحدة قياس غير معروفة',
-    COLUMN_TOO_WIDE     : 'عرض العمود أكبر من عرض القاعدة',
-    COLUMN_OUT_OF_BOUNDS: 'موضع العمود خارج حدود القاعدة الخارجية (اللامركزية)',
-    FOOTINGS_OVERLAP    : 'القاعدتان متداخلتان على امتداد كمرة الحزام',
-    NOT_A_STRAP         : 'الفراغ بين القاعدتين صغير جداً ليكون كمرة حزام حقيقية — استخدم القاعدة المشتركة المستطيلة بدلاً من ذلك',
-    NO_ROOM_FOR_BARS    : 'لا يوجد مسافة كافية لتسليح مع هذا الغطاء الخرساني وقطر السيخ',
-  };
-  const label = AR[code] || 'قيم غير صالحة';
-  return `${label} (${englishDetail || code})`;
-}
-
-// [Step 20] Dispatch table for the mode:'rebarDiagram' path (structured
-// JSON payload, e.g. a calculator page's own results panel — see
-// beamDiagram.mjs's header for the payload contract every parse*RebarPayload
-// function here follows). Keys are lower-case on purpose: the /rebar
-// chat-widget command already lower-cases whatever element name the user
-// types (`rebarMatch[1].trim().toLowerCase()` — see footing_pro's chat
-// input handler) before it ever reaches this server, so a calculator-page
-// button calling requestRebarDiagram(elementType, ...) directly must use
-// the same lower-case convention to be reachable through both entry
-// points identically. body.element itself is also explicitly lower-cased
-// below before this lookup, as a second line of defense for any caller
-// that doesn't already follow the convention.
-const REBAR_ELEMENT_DISPATCH = {
-  beam: { parse: parseBeamRebarPayload, render: renderBeamDiagramSVG, errorMessage: beamDiagramErrorMessage },
-  slab: { parse: parseSlabRebarPayload, render: renderSlabDiagramSVG, errorMessage: slabDiagramErrorMessage },
-  shearwall: { parse: parseShearWallRebarPayload, render: renderShearWallDiagramSVG, errorMessage: shearWallDiagramErrorMessage },
-  stair: { parse: parseStairRebarPayload, render: renderStairDiagramSVG, errorMessage: stairDiagramErrorMessage },
-  column: { parse: parseColumnRebarPayload, render: renderColumnDiagramSVG, errorMessage: columnDiagramErrorMessage },
-  retainingwall: { parse: parseRetainingWallRebarPayload, render: renderRetainingWallDiagramSVG, errorMessage: retainingWallDiagramErrorMessage },
-  trapezoidal: { parse: parseTrapezoidalFootingRebarPayload, render: renderTrapezoidalFootingDiagramSVG, errorMessage: trapezoidalFootingDiagramErrorMessage },
-  strap: { parse: parseStrapFootingRebarPayload, render: renderStrapFootingDiagramSVG, errorMessage: strapFootingDiagramErrorMessage },
-  // [New-element track, Part 2 candidate 4] Both keys point at the same
-  // parse/render/errorMessage triple — see DIAGRAM_TYPE_RENDERERS' own
-  // comment above for why both spellings must resolve identically.
-  gradebeam: { parse: parseGradeBeamRebarPayload, render: renderGradeBeamDiagramSVG, errorMessage: gradeBeamDiagramErrorMessage },
-  tiebeam: { parse: parseGradeBeamRebarPayload, render: renderGradeBeamDiagramSVG, errorMessage: gradeBeamDiagramErrorMessage },
-  pilecap: { parse: parsePileCapRebarPayload, render: renderPileCapDiagramSVG, errorMessage: pileCapDiagramErrorMessage },
-  slabopening: { parse: parseSlabOpeningRebarPayload, render: renderSlabOpeningDiagramSVG, errorMessage: slabOpeningDiagramErrorMessage },
-  // [New-element track — SVG completeness pass] Ten entries below, same
-  // shape as every entry above. corbel/bracket both point at the same
-  // parse/render/errorMessage triple for the same dual-spelling reason
-  // gradebeam/tiebeam do above.
-  basementwall: { parse: parseBasementWallRebarPayload, render: renderBasementWallDiagramSVG, errorMessage: basementWallDiagramErrorMessage },
-  beamcolumnjoint: { parse: parseBeamColumnJointRebarPayload, render: renderBeamColumnJointDiagramSVG, errorMessage: beamColumnJointDiagramErrorMessage },
-  circularcolumn: { parse: parseCircularColumnRebarPayload, render: renderCircularColumnDiagramSVG, errorMessage: circularColumnDiagramErrorMessage },
-  corbel: { parse: parseCorbelRebarPayload, render: renderCorbelDiagramSVG, errorMessage: corbelDiagramErrorMessage },
-  bracket: { parse: parseCorbelRebarPayload, render: renderCorbelDiagramSVG, errorMessage: corbelDiagramErrorMessage },
-  couplingbeam: { parse: parseCouplingBeamRebarPayload, render: renderCouplingBeamDiagramSVG, errorMessage: couplingBeamDiagramErrorMessage },
-  dropcapital: { parse: parseFlatSlabDropPanelRebarPayload, render: renderFlatSlabDropPanelDiagramSVG, errorMessage: flatSlabDropPanelDiagramErrorMessage },
-  hordi: { parse: parseHordiSlabRebarPayload, render: renderHordiSlabDiagramSVG, errorMessage: hordiSlabDiagramErrorMessage },
-  punchingshear: { parse: parsePunchingShearRebarPayload, render: renderPunchingShearDiagramSVG, errorMessage: punchingShearDiagramErrorMessage },
-  raftpile: { parse: parseRaftPileRebarPayload, render: renderRaftPileDiagramSVG, errorMessage: raftPileDiagramErrorMessage },
-  wallopening: { parse: parseWallOpeningRebarPayload, render: renderWallOpeningDiagramSVG, errorMessage: wallOpeningDiagramErrorMessage },
-};
-
-// [DXF export track] Element-type keys that have a real, working
-// functions/_lib/<Element>.dxf.mjs sibling (verified by actually
-// executing each one against the shared kit — not assumed from filename
-// existence). chat.js itself never imports @tarikjabiri/dxf or any
-// .dxf.mjs module: DXF generation happens client-side (browser
-// dynamic-imports the matching vendor/dxf-kit/<Element>.dxf.mjs and
-// runs the exact same renderer function against the geometry object
-// this server already computed for the SVG). This Set only gates the
-// `dxfAvailable` flag on the two JSON response sites below, so the
-// front-end knows whether to offer a DXF download button at all. Six
-// element types have an SVG renderer but no DXF module yet
-// (beamcolumnjoint, circularcolumn, couplingbeam, punchingshear,
-// raftpile, wallopening) — deliberately absent here, not an oversight.
-const DXF_READY_TYPES = new Set([
-  'isolated', 'combined', 'strip', 'raft',
-  'slab', 'shearwall', 'stair', 'column', 'beam',
-  'retainingwall', 'trapezoidal', 'strap',
-  'gradebeam', 'tiebeam', 'pilecap', 'slabopening',
-  'basementwall', 'corbel', 'bracket', 'dropcapital', 'hordi',
-]);
 
 // [v27] Session save/load/list/delete logic — extracted to
 // functions/_lib/sessions.mjs so chat.js and the dedicated
@@ -3377,53 +2725,6 @@ Arabic text mixed with its boxes and arrows. The reply's own prose still follows
 exactly as before — only the text inside the fence is exempt from it.
 Keep it to what the decision actually needs — a handful of nodes a reader takes in at a glance,
 not a restatement of every calculation step already given in the prose above it.
-
-════════════════════════════════════════
-THIS CHAT WINDOW'S OWN INTERFACE — draw menu & license key
-════════════════════════════════════════
-Two buttons live in the header of THIS chat window (not the desktop app, not a hypothetical —
-verified directly against the widget's own HTML/JS). Know them and route users to them; never
-describe the interface from a guess.
-
-⊞ "Draw menu" (grid icon, chat header) — opens a tap-through element-picker. It lists every
-element this chat can generate a computed, deterministic reinforcement-detail SVG for right now:
-footing (isolated / combined / strip / raft / trapezoidal / strap), column, beam, slab, shear
-wall, stair, retaining wall, grade beam / tie beam. Tapping one shows a filled-in example command
-and a field-by-field explanation table, then pre-fills the chat input so the user only has to edit
-the numbers to their own dimensions and send. These are real computed drawings (arithmetic on the
-numbers supplied — bar positions, spacing, schedule table), never an AI-guessed image.
-WHEN TO POINT A USER HERE: any time they ask to draw/detail/reinforce a structural element, ask
-what this chat can draw, or type a rough drawing request with no filled-in numbers ("ارسم لي
-عمود", "draw me a footing", "detail this slab") — tell them to tap the ⊞ icon at the top of this
-chat for the guided menu. If they've already stated real dimensions in their message, you may
-instead give them the exact `/diagram <type> key=value key=value ...` command directly (or point
-them to the button either way — both are correct, use judgement on which is faster for them).
-Grade beam and tie beam are the SAME element in this tool (a beam bearing continuously along its
-length / tying two foundations) — either `/diagram gradebeam ...` or `/diagram tiebeam ...` works
-identically; use whichever word the user themselves used.
-Beam is reinforcement-detail only (`/rebar`) in this chat window's own Draw menu — its bar-group/
-stirrup-zone structure is more than a single flat command line comfortably explains in the picker
-UI, so it stays on `/rebar beam ...` there even though the server also accepts `/diagram beam ...`
-for other callers. Say so plainly if asked why beam behaves differently in the menu, don't invent
-a `/diagram beam` example for the picker that doesn't match what it actually shows.
-
-🔑 "License / Subscription" (key icon, chat header) — opens THIS chat's own key-entry panel:
-paste a CES-XXXX-XXXX-XXXX-XXXX key and save it, or subscribe from inside the same panel (an
-online-payment button, or fill in name/email/phone and contact the developer for manual
-payment — the key is then issued by hand once payment is confirmed). A validated key removes
-this chat's free daily message-quota limit and raises its file/image attachment caps for the
-session.
-WHEN TO POINT A USER HERE: any question about entering, activating, checking, or removing a
-key/subscription for THIS CHAT specifically — tell them to tap the 🔑 icon at the top of this
-chat window; do not describe it as a file-based or download-first process, that is the different
-flow below.
-CRITICAL DISAMBIGUATION — do not conflate this with the desktop Footing Pro application's own
-device-locked activation (SCENARIO A further below: download PCsuite 2026, generate a .dat file,
-send it to the developer). Both ultimately grant the same underlying CES subscription, but they
-are two different mechanisms for two different products — this 🔑 button is a direct paste-a-key
-(or pay-in-panel) flow scoped to this chat; the desktop app instead needs its own separate
-device-registration file. If a user's question doesn't make clear which one they mean, ask, or
-briefly cover both rather than assuming.
 
 EMOJI — SEMANTIC & FUNCTIONAL CODING, NOT DECORATION: an emoji is a traffic sign that tells the
 eye what KIND of information is coming before it reads a word of it — not a flourish bolted on
@@ -5098,12 +4399,6 @@ form (creates an encrypted .dat file on the Desktop) → send that file to aymne
 WhatsApp +201287232413 → developer confirms price → pay → receive the activated app.
 
 ${KEY_ENGINEERING_REFERENCE}
-THIS CHAT'S OWN BUTTONS — reminder, condensed (full detail established earlier this thread):
-⊞ grid icon in this chat's header = guided draw-menu (footing/column/beam/slab/shearwall/stair/
-retaining wall computed reinforcement SVGs). 🔑 key icon in this chat's header = this chat's own
-license-key panel (paste CES-XXXX key, or subscribe in-panel) — separate mechanism from the
-desktop app's PCsuite/.dat activation below, same underlying subscription. Point users to the
-matching icon for either; don't re-explain from scratch if already covered earlier in this thread.
 BEHAVIOUR RULES:
 • Never invent pricing, discount percentages, release dates, or features not listed here or
   established earlier in this conversation.
@@ -5210,10 +4505,7 @@ RARE AT 249 EGP/YR (7): Smart Install (~70 MB, no admin) · Fully Offline During
 
 SELF: if asked what you can do, mention — you remember the conversation (no re-explaining on
 follow-ups), you run identically on the website and inside the app, and you can speak replies
-aloud in the correct per-language voice. Also: this chat's header has a ⊞ grid icon (guided menu
-to draw computed reinforcement SVGs — footing/column/beam/slab/shearwall/stair/retaining wall)
-and a 🔑 key icon (this chat's own license-key panel — separate from PCsuite/.dat activation
-below). Point drawing requests to ⊞, key/subscription questions for THIS chat to 🔑.
+aloud in the correct per-language voice.
 
 BEHAVIOUR:
 • Answer like a knowledgeable engineer texting a colleague — direct, warm, not scripted.
@@ -6987,59 +6279,33 @@ export async function onRequestPost(context) {
     // that is answered directly, not handed to the diffusion model as a
     // raw "isolated b=... l=..." art prompt (which would both burn a
     // rate-limited image slot and produce nothing useful).
-    //
-    // [Step 20] parseDiagramCommand -> routeDiagramCommand. Tries
-    // footingDiagram.mjs's own parseDiagramCommand first (unchanged
-    // behavior, verified byte-identical by diagramCommandRouter.mjs's own
-    // test suite), then slab/shearwall/stair. Render + error-message
-    // dispatch below is now keyed off diagramCmd.type via the two lookup
-    // tables defined near this file's imports, instead of a single
-    // hardcoded renderFootingDiagramSVG/computedDiagramErrorMessage call.
     let diagramCmd;
     try {
-      diagramCmd = routeDiagramCommand(promptCheck.prompt);
+      diagramCmd = parseDiagramCommand(promptCheck.prompt);
     } catch (err) {
-      // Programmer-error path only (see routeDiagramCommand's own delegates'
-      // catch blocks — a genuine DiagramError never reaches here). Log and
-      // fall through to the existing behavior rather than 500 the request.
-      console.error('[chat.js] routeDiagramCommand threw unexpectedly:', err);
+      // Programmer-error path only (see that function's own catch block
+      // — a genuine DiagramError never reaches here). Log and fall
+      // through to the existing behavior rather than 500 the request.
+      console.error('[chat.js] parseDiagramCommand threw unexpectedly:', err);
       diagramCmd = { ok: false, code: 'BAD_SYNTAX' };
     }
     if (diagramCmd.ok) {
-      const renderFn = DIAGRAM_TYPE_RENDERERS[diagramCmd.type];
-      const svg = renderFn(diagramCmd.geometry, { lang: imageLang });
+      const svg = renderFootingDiagramSVG(diagramCmd.geometry, { lang: imageLang });
       return json(
         {
           ok      : true,
           dataUri : svgToDataUri(svg),
           mimeType: 'image/svg+xml',
           source  : 'computed-template:' + diagramCmd.type,
-          // [DXF export track] Additive fields only — no existing field
-          // renamed/removed, so any older client ignoring these three
-          // still works exactly as before. elementType/geometry let the
-          // browser re-run the SAME geometry through the matching
-          // vendor/dxf-kit/<Element>.dxf.mjs renderer client-side;
-          // dxfAvailable tells it whether that module actually exists
-          // (see DXF_READY_TYPES's own header comment).
-          elementType : diagramCmd.type,
-          geometry    : diagramCmd.geometry,
-          dxfAvailable: DXF_READY_TYPES.has(diagramCmd.type),
         },
         200, undefined, request,
       );
     }
     if (diagramCmd.code !== 'BAD_SYNTAX') {
-      // diagramCmd.type is only present when a specific module matched
-      // the leading token and then hit a real param error (BAD_PARAM,
-      // BAD_UNIT, NO_ROOM_FOR_BARS, BOUNDARY_EXCEEDS_LENGTH, ...) — see
-      // slab/shearWall/stairDiagram.mjs's own parseDiagramCommand catch
-      // blocks. UNSUPPORTED_TYPE carries no `type` (no module claimed the
-      // input), so it correctly falls through to the default.
-      const errorMessageFn = DIAGRAM_TYPE_ERROR_MESSAGE[diagramCmd.type] || computedDiagramErrorMessage;
       return json(
         {
           ok   : false,
-          error: errorMessageFn(diagramCmd.code, diagramCmd.message, imageIsArabic),
+          error: computedDiagramErrorMessage(diagramCmd.code, diagramCmd.message, imageIsArabic),
           code : diagramCmd.code,
         },
         400, undefined, request,
@@ -7111,34 +6377,26 @@ export async function onRequestPost(context) {
     );
   }
 
-  // 3b-6. Structural reinforcement-detail short-circuit. [Step 11, widened
-  //     Step 20] Client (or a calculator page's own results panel — see
-  //     beamDiagram.mjs's header for the payload contract every element's
-  //     parse*RebarPayload function follows) sends
-  //     { mode: 'rebarDiagram', element: 'beam'|'slab'|'shearWall'|'stair'|
-  //     'column', data: {...} }. A dedicated mode, not folded into mode:'image': the
-  //     payload is nested/array-shaped (bar groups, mesh specs, boundary
-  //     elements...), which does not fit parseDiagramCommand's flat ASCII
-  //     `key=value` syntax. Same buffered-JSON-response shape as
-  //     mode:'image' (see that block's own comment on why: a hand-rolled
-  //     VBA JSON reader needs it, not just a browser client), for the same
-  //     reason. Zero Workers-AI-neuron cost (this path never calls env.AI),
-  //     so it does NOT share the :image rate bucket — see its own :rebar
-  //     bucket below. `element` is matched case-insensitively — see
-  //     REBAR_ELEMENT_DISPATCH's own header comment for why.
+  // 3b-6. Structural reinforcement-detail short-circuit. [Step 11] Client
+  //     (or a calculator page's own results panel — see beamDiagram.mjs's
+  //     header for the payload contract) sends
+  //     { mode: 'rebarDiagram', element: 'beam', data: {...} }. A
+  //     dedicated mode, not folded into mode:'image': the payload is
+  //     nested/array-shaped (bar groups, stirrup zones), which does not
+  //     fit parseDiagramCommand's flat ASCII `key=value` syntax. Same
+  //     buffered-JSON-response shape as mode:'image' (see that block's
+  //     own comment on why: a hand-rolled VBA JSON reader needs it, not
+  //     just a browser client), for the same reason. Zero Workers-AI-
+  //     neuron cost (this path never calls env.AI), so it does NOT share
+  //     the :image rate bucket — see its own :rebar bucket below.
   if (body.mode === 'rebarDiagram') {
-    // [Step 20] element -> dispatch-table lookup, replacing the
-    // beam-only `body.element !== 'beam'` gate. See REBAR_ELEMENT_DISPATCH's
-    // own comment (near this file's imports) for why the key is lower-cased.
-    const elementKey = String(body.element || '').toLowerCase();
-    const dispatch = REBAR_ELEMENT_DISPATCH[elementKey];
-    if (!dispatch) {
+    if (body.element !== 'beam') {
       return json(
         {
           ok   : false,
           error: likelyArabic
-            ? 'نوع العنصر غير مدعوم حاليًا. المتاح الآن: beam, slab, shearWall, stair, column, retainingWall, trapezoidal, strap, gradeBeam, tieBeam, pileCap, slabOpening.'
-            : 'Unsupported element type. Currently available: beam, slab, shearWall, stair, column, retainingWall, trapezoidal, strap, gradeBeam, tieBeam, pileCap, slabOpening.',
+            ? 'نوع العنصر غير مدعوم حاليًا. المتاح الآن: beam.'
+            : 'Unsupported element type. Currently available: beam.',
           code : 'UNSUPPORTED_ELEMENT',
         },
         400, undefined, request,
@@ -7165,63 +6423,12 @@ export async function onRequestPost(context) {
       );
     }
 
-    // [Linking beamAsciiToPayload.mjs] beam only: body.data may now
-    // arrive as a raw ASCII string instead of an already-parsed JSON
-    // object — see footing_pro_v71-1-2-6.html's /rebar handler, which no
-    // longer hard-fails on a beam JSON.parse error and instead forwards
-    // the raw text here. Every other element's dispatch, and every
-    // existing beam caller that already sends a parsed object (e.g. a
-    // calculator page's own results panel), is untouched by this block:
-    // the `typeof rebarData === 'string'` guard means an object payload
-    // skips it entirely, identical to before this change.
-    let rebarData = body.data;
-    if (elementKey === 'beam' && typeof rebarData === 'string') {
-      const asciiResult = parseBeamAsciiCommand(rebarData);
-      if (asciiResult.ok) {
-        rebarData = asciiResult.payload;
-      } else if (asciiResult.code === 'BAD_TOKEN') {
-        // A real typo in an ASCII-shaped command (recognized key=value
-        // tokens but one key/value is wrong) — report it immediately with
-        // the offending token, per beamAsciiToPayload.mjs's own header:
-        // never silently re-attempt this as JSON, which would only
-        // produce a far less specific "Unexpected token" message.
-        return json(
-          {
-            ok   : false,
-            error: dispatch.errorMessage(asciiResult.code, asciiResult.message, likelyArabic),
-            code : asciiResult.code,
-          },
-          400, undefined, request,
-        );
-      } else {
-        // BAD_SYNTAX — not shaped as key=value tokens at all (a real JSON
-        // payload, by far the common case for this branch since every
-        // pre-Step JSON /rebar caller lands here too). Fall back to the
-        // exact JSON.parse this path unconditionally required before this
-        // change, preserving that behavior byte-for-byte for JSON callers.
-        try {
-          rebarData = JSON.parse(rebarData);
-        } catch (err) {
-          return json(
-            {
-              ok   : false,
-              error: likelyArabic
-                ? 'تعذر قراءة بيانات JSON — تأكد من صيغة أمر /rebar وحاول تاني.'
-                : 'Could not parse that as JSON — check the /rebar payload and try again.',
-              code : 'BAD_JSON',
-            },
-            400, undefined, request,
-          );
-        }
-      }
-    }
-
-    const result = dispatch.parse(rebarData);
+    const result = parseBeamRebarPayload(body.data);
     if (!result.ok) {
       return json(
         {
           ok   : false,
-          error: dispatch.errorMessage(result.code, result.message, likelyArabic),
+          error: beamDiagramErrorMessage(result.code, result.message, likelyArabic),
           code : result.code,
         },
         400, undefined, request,
@@ -7236,22 +6443,14 @@ export async function onRequestPost(context) {
     // this line), just now consistent with mode:'image' instead of
     // being the only one of the two that had it right.
     const rebarLang = (body.lang === 'ar' || body.lang === 'en') ? body.lang : (likelyArabic ? 'ar' : 'en');
-    const svg = dispatch.render(result.geometry, { lang: rebarLang });
+    const svg = renderBeamDiagramSVG(result.geometry, { lang: rebarLang });
     return json(
       {
         ok      : true,
         dataUri : svgToDataUri(svg),
         mimeType: 'image/svg+xml',
         lang    : rebarLang, // client uses this instead of re-guessing RTL from a nonexistent "prompt"
-        source  : 'computed-rebar:' + elementKey,
-        // [DXF export track] Same three additive fields as the /diagram
-        // branch above — see that site's comment and DXF_READY_TYPES's
-        // own header for the full rationale. elementKey is already the
-        // lower-cased dispatch-table key (beam/slab/hordi/...), the same
-        // vocabulary the front-end's own DXF_MODULE_MAP is keyed on.
-        elementType : elementKey,
-        geometry    : result.geometry,
-        dxfAvailable: DXF_READY_TYPES.has(elementKey),
+        source  : 'computed-rebar:beam',
       },
       200, undefined, request,
     );
