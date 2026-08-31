@@ -872,6 +872,61 @@ function findLastResolvedMathEnd(buf) {
 // and non-blocking, not a frozen stream.
 const MATH_MAX_HOLDBACK = 2000;
 
+// ---- Fence-span protection (mirrors the $/$$ math-span protection above) ----
+// A ```...``` fenced block (any language tag, including a future mermaid
+// renderer) is DSL/code, not prose and not LaTeX -- the six passes below
+// must never touch its interior, same reasoning as resolved $ spans.
+// No escaping semantics for backticks (unlike \$), so this is simpler
+// than the math scanner: plain left-to-right ``` ... ``` pairing.
+
+function findResolvedFenceSpans(text) {
+  const spans = [];
+  let i = 0;
+  while (true) {
+    const openIdx = text.indexOf('```', i);
+    if (openIdx === -1) break;
+    const closeIdx = text.indexOf('```', openIdx + 3);
+    if (closeIdx === -1) break; // unresolved trailing fence -- not this function's job, see findOpenFenceDelimiter
+    spans.push([openIdx, closeIdx + 3]);
+    i = closeIdx + 3;
+  }
+  return spans;
+}
+
+// Mirrors findOpenMathDelimiter's contract: -1 if every ``` in text is
+// part of a complete pair; else the start index of the first unresolved
+// (never-closed) opening fence -- used by push() to withhold a fence
+// opened mid-stream until its close arrives, same as an open $.
+function findOpenFenceDelimiter(text) {
+  let i = 0;
+  while (true) {
+    const openIdx = text.indexOf('```', i);
+    if (openIdx === -1) return -1;
+    const closeIdx = text.indexOf('```', openIdx + 3);
+    if (closeIdx === -1) return openIdx;
+    i = closeIdx + 3;
+  }
+}
+
+// Same-length blanking of every COMPLETE fence span's interior, so the
+// EXISTING (unmodified) findOpenMathDelimiter/walkMathSpans can be called
+// on the result without ever seeing a '$' that lives inside a code fence
+// (a stray unpaired '$' inside a fence -- e.g. a cost label -- must never
+// be treated as an opening math delimiter, or push() would withhold the
+// whole fence until MATH_MAX_HOLDBACK's safety valve force-flushes it).
+// Positions are preserved exactly (NUL can never itself look like '$' or
+// resolve/open a span), so this is only ever used for the boolean
+// "is anything open" check in push(), never for the actual rendered text.
+function maskCompleteFences(text) {
+  const spans = findResolvedFenceSpans(text);
+  if (spans.length === 0) return text;
+  let out = text;
+  for (const [start, end] of spans) {
+    out = out.slice(0, start) + '\u0000'.repeat(end - start) + out.slice(end);
+  }
+  return out;
+}
+
 export class NotationNormalizer {
   constructor() {
     this._buf = '';
@@ -903,7 +958,12 @@ export class NotationNormalizer {
   //    MATH_MAX_HOLDBACK for the bounded exception.
   push(deltaText) {
     this._buf += deltaText;
-    const openAt = findOpenMathDelimiter(this._buf);
+    const fenceOpenAt = findOpenFenceDelimiter(this._buf);
+    const mathOpenAt = findOpenMathDelimiter(maskCompleteFences(this._buf));
+    const openAt =
+      fenceOpenAt === -1 ? mathOpenAt :
+      mathOpenAt === -1 ? fenceOpenAt :
+      Math.min(fenceOpenAt, mathOpenAt);
     let cut;
     if (openAt === -1) {
       const spanEnd = findLastResolvedMathEnd(this._buf);
@@ -948,7 +1008,11 @@ export class NotationNormalizer {
   // nothing (unless a digit follows it, preserving genuine "$5/mo"-style
   // currency) instead of leaking a literal '$' into a reply where '$' now
   // means "LaTeX begins here" to the client.
-  _render(text) {
+  // [PATCH — fence protection] Unchanged from before this patch, EXCEPT
+  // renamed: this is the original single-pass body, now called only on
+  // text guaranteed (by _render below) to contain no fence at all. Every
+  // line inside is byte-identical to the pre-patch _render.
+  _renderNoFences(text) {
     let out = '', i = 0;
     while (i < text.length) {
       if (text[i] === '$' && text[i - 1] !== '\\') {
@@ -979,6 +1043,25 @@ export class NotationNormalizer {
         expandGreekSubscriptBases(expandBarePsiSubscriptBase(convertBareLeftRight(convertBareFrac(convertSqrtBraces(segment)))))))));
       i = next;
     }
+    return out;
+  }
+
+  // [PATCH — fence protection] New outer layer. `text` is guaranteed (by
+  // push()'s fenceOpenAt-aware cut, mirroring its existing $-openness
+  // guarantee) to contain only COMPLETE ``` spans, never a dangling open
+  // one. Fence interiors -- Mermaid or any other fenced code -- are
+  // copied through with NONE of the six passes and NONE of the $-math
+  // logic applied: that text is a diagram/code DSL, not prose or LaTeX.
+  _render(text) {
+    const spans = findResolvedFenceSpans(text);
+    if (spans.length === 0) return this._renderNoFences(text);
+    let out = '', cursor = 0;
+    for (const [start, end] of spans) {
+      if (start > cursor) out += this._renderNoFences(text.slice(cursor, start));
+      out += text.slice(start, end); // fence, delimiters included, byte-for-byte
+      cursor = end;
+    }
+    if (cursor < text.length) out += this._renderNoFences(text.slice(cursor));
     return out;
   }
 }

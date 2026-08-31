@@ -2,5 +2,9 @@
   "dependencies": {
     "sharp": "^0.34.5",
     "worker-mailer": "^1.2.1"
-  }
+  },
+  "devDependencies": {
+    "dxf": "5.3.1"
+  },
+  "//devDependencies.dxf": "Independent DXF reader/parser, test-only — never imported by chat.js or any shipped bundle. Used by every test_<Element>DXF.mjs (root-level) to actually parse and round-trip-verify each vendor/dxf-kit/<Element>.dxf.mjs renderer's output, not just check that it didn't throw. Whenever a new element gets its own <NewElement>.dxf.mjs (e.g. the beamColumnJoint/circularColumn/couplingBeam/punchingShear/raftPile/wallOpening additions), this package is what its matching test_<NewElement>DXF.mjs will need — keep it here even if dependencies above ever look unused by a dependency-checker, it is still exercised via `node test_*.mjs`, just not via an import chat.js or the browser ever reaches."
 }

@@ -900,9 +900,22 @@ function stripCodeMarkers(text) {
 // _cesRenderBotHtml's mirror of them -- keep these three in sync if any
 // changes.
 function stripSuperSubMarkers(text) {
+  // [ROUND 4] Fuse decision is now length-conditional (2+ chars fuse, a
+  // single char gets a space) -- brings this defense-in-depth path in line
+  // with resolveMathInnerForSpeech's SUB_SPEECH_RE (f_{cu} -> "fcu"), which
+  // already fuses 2+ char clusters. This function's own two patterns
+  // previously used an unconditional space for every length, which was
+  // already correct for the single-char case (no x_i-into-"xi" risk here)
+  // but inconsistent with the primary path for a 2+ char cluster like this
+  // same "f_cu" written bare instead of $-wrapped -- confirmed empirically
+  // as "f cu" here against "fcu" there for the same notation. NOT the same
+  // gap as the client's identical-looking fix: the client's
+  // _cesStripSubscriptMarkers genuinely fused every length unconditionally
+  // (a real x_i-type bug); this function did not.
+  const fuseOrSpace = (_m, base, sub) => (sub.length >= 2 ? base + sub : base + ' ' + sub);
   return text
-    .replace(/([A-Za-z\u03B2\u03B3\u03B5\u03BB\u03C1\u03C4\u03C8])[_^]\{([A-Za-z0-9+\-=()]{1,8})\}/g, '$1 $2')
-    .replace(/([A-Za-z0-9\u03B2\u03B3\u03B5\u03BB\u03C1\u03C4\u03C8])[_^]([A-Za-z0-9+\-]{1,3})(?![A-Za-z0-9])/g, '$1 $2')
+    .replace(/([A-Za-z\u03B2\u03B3\u03B5\u03BB\u03C1\u03C4\u03C8])[_^]\{([A-Za-z0-9+\-=()]{1,8})\}/g, fuseOrSpace)
+    .replace(/([A-Za-z0-9\u03B2\u03B3\u03B5\u03BB\u03C1\u03C4\u03C8])[_^]([A-Za-z0-9+\-]{1,3})(?![A-Za-z0-9])/g, fuseOrSpace)
     .replace(SUPERSUB_RE, ch => SUPERSUB_TO_ASCII[ch]);
 }
 
@@ -938,6 +951,80 @@ const GREEK_MACRO_SPEECH_WORDS = {
   '\\Phi': { ar: 'فاي', en: 'Phi' }, '\\eta': { ar: 'إيتا', en: 'eta' },
 };
 const GREEK_MACRO_SPEECH_RE = /\\(?:alpha|beta|gamma|delta|Delta|phi|rho|lambda|mu|sigma|tau|psi|varepsilon|epsilon|pi|theta|omega|Omega|Phi|eta)(?![A-Za-z])/g;
+
+// [FIX] Structural/civil-engineering unit abbreviations that reach this
+// function as bare \text{}/\mathrm{} content (see TYPEWRAP_SPEECH_RE below).
+// Previously these passed through completely untouched -- confirmed
+// empirically (tts_test_battery item 4: "psi" survives as literal Latin
+// text with zero adaptation for the target voice). Exact-whole-argument
+// match only (never a substring replace): \text{} is documented elsewhere
+// in this file as a typographic wrapper for UNIT/LABEL text, never a
+// variable name, so an ordinary prose label like \text{applied moment}
+// can never collide with a dictionary key here -- it simply won't match
+// any entry and falls through to the old bare-passthrough behavior.
+const UNIT_SPEECH_WORDS = {
+  'psi':    { ar: 'بي إس آي',                 en: 'P S I' },
+  'ksi':    { ar: 'كي إس آي',                 en: 'K S I' },
+  'kn':     { ar: 'كيلونيوتن',                en: 'kilonewton' },
+  'kn/m':   { ar: 'كيلونيوتن على متر',        en: 'kilonewton per meter' },
+  'kn/m2':  { ar: 'كيلونيوتن على متر مربع',   en: 'kilonewton per square meter' },
+  'kn/m3':  { ar: 'كيلونيوتن على متر مكعب',   en: 'kilonewton per cubic meter' },
+  'n':      { ar: 'نيوتن',                    en: 'newton' },
+  'n/mm2':  { ar: 'نيوتن على مليمتر مربع',    en: 'newton per square millimeter' },
+  'mpa':    { ar: 'ميجا باسكال',              en: 'megapascal' },
+  'kpa':    { ar: 'كيلو باسكال',              en: 'kilopascal' },
+  'pa':     { ar: 'باسكال',                   en: 'pascal' },
+  'kip':    { ar: 'كيب',                      en: 'kip' },
+  'lb':     { ar: 'باوند',                    en: 'pound' },
+  'lbs':    { ar: 'باوند',                    en: 'pounds' },
+  'ft':     { ar: 'قدم',                      en: 'foot' },
+  'in':     { ar: 'إنش',                      en: 'inch' },
+  'mm':     { ar: 'مليمتر',                   en: 'millimeter' },
+  'cm':     { ar: 'سنتيمتر',                  en: 'centimeter' },
+  'm':      { ar: 'متر',                      en: 'meter' },
+  'm2':     { ar: 'متر مربع',                 en: 'square meter' },
+  'm3':     { ar: 'متر مكعب',                 en: 'cubic meter' },
+  'kg':     { ar: 'كيلوجرام',                 en: 'kilogram' },
+  'kg/m2':  { ar: 'كيلوجرام على متر مربع',    en: 'kilogram per square meter' },
+  'kg/m3':  { ar: 'كيلوجرام على متر مكعب',    en: 'kilogram per cubic meter' },
+};
+function unitSpeech(rawArg) {
+  const key = rawArg.trim().toLowerCase().replace(/\s+/g, '');
+  return UNIT_SPEECH_WORDS[key] || null;
+}
+
+// [FIX] \mathbb{R}/{Z}/{N}/{Q}/{C} -- blackboard-bold number-set notation.
+// Previously unhandled: absent from TYPEWRAP_SPEECH_RE's macro list, so it
+// fell through to the generic unmapped-backslash safety net, which strips
+// only the backslash and leaves the bare command NAME as literal spoken
+// text fused onto its argument -- confirmed empirically as "mathbbR"
+// (tts_test_battery item 30). Named sets get their full meaning; any other
+// single letter (\mathbb{X}) degrades to the bare letter, matching the old
+// \text{}-style fallback rather than leaking "mathbb".
+const MATHBB_SPEECH_WORDS = {
+  R: { ar: 'الأعداد الحقيقية',  en: 'the real numbers' },
+  Z: { ar: 'الأعداد الصحيحة',   en: 'the integers' },
+  N: { ar: 'الأعداد الطبيعية',  en: 'the natural numbers' },
+  Q: { ar: 'الأعداد النسبية',   en: 'the rational numbers' },
+  C: { ar: 'الأعداد المركبة',   en: 'the complex numbers' },
+};
+const MATHBB_SPEECH_RE = /\\mathbb\{([A-Za-z])\}/g;
+
+// [FIX] \int with Leibniz-style bounds: \int_{LO}^{UP} / \int_LO^UP (each
+// bound optionally braced, each optional independently). Previously bounds
+// fell through to the GENERIC sub/sup passes, which read them as
+// exponentiation -- confirmed empirically as "integral 0 TO THE POWER OF
+// infinity" (tts_test_battery items 8 and 17), a literal exponent reading
+// that is not just stylistically off but mathematically misleading. Must
+// run before SUB_SPEECH_RE/SUP_SPEECH_RE (else they consume the markers
+// first) and produces the "integral" word itself, so the later standalone
+// \int->"integral" line becomes a harmless no-op for anything this already
+// consumed. Sub-before-sup order only (\int_a^b, not \int^b_a) -- the
+// reversed order is valid LaTeX but not a shape this domain's replies or
+// the test battery ever produce; same "bounded, not a parser" scope as
+// every other construct-specific regex in this file.
+const INTEGRAL_SPEECH_RE = /\\int(?:_(?:\{([^{}]*)\}|([^\s{}\\^_]+)))?(?:\^(?:\{([^{}]*)\}|([^\s{}\\^_]+)))?/g;
+
 // One level of nested braces (see the client's identical comment on its own
 // CES_FRAC_RE/CES_SQRT_RE/CES_SUP_RE) — a subscript inside a frac numerator
 // (\frac{M_{cr}}{M_a}) is routine in real replies; a plain [^{}]* argument
@@ -950,7 +1037,7 @@ const SQRT_SPEECH_RE = /\\sqrt\{((?:[^{}]|\{[^{}]*\})*)\}/g;
 // end of flattenLatexForSpeech as the broken, literal "sqrt[3]8" (verified
 // empirically before this fix). Mirrors the client's CES_NTH_ROOT_RE.
 const NTH_ROOT_SPEECH_RE = /\\sqrt\[((?:[^\[\]]|\[[^\[\]]*\])*)\]\{((?:[^{}]|\{[^{}]*\})*)\}/g;
-const SUP_SPEECH_RE = /\^\{((?:[^{}]|\{[^{}]*\})*)\}|\^([+\-0-9A-Za-z])(?![A-Za-z0-9])/g;
+const SUP_SPEECH_RE = /\^\{((?:[^{}]|\{[^{}]*\})*)\}|\^([+-]?[0-9]+|[A-Za-z])(?![A-Za-z0-9])/g;
 // [ADDED] \text{}/\mathrm{}/\mathbf{}/\mathit{}/\boldsymbol{}/\overline{}/
 // \bar{}/\hat{}/\underline{}/\mathcal{} -- typographic wrappers with no
 // spoken content of their own. Previously unhandled: fell through to the
@@ -976,42 +1063,16 @@ const PARTIAL_DERIV_SPEECH_RE = /\\partial\s*([^\/]+?)\s*\/\s*\\partial\s*([A-Za
 // [ADDED] Generic bare "/" division -- mirrors the client's identical
 // CES_BARE_DIV_RE addition; see that const's own comment for the nesting
 // bound and the accepted "km/hr -> km over hr" tradeoff.
-// [ROUND 2] '* after the base run -- w_c/f'_c (found via this exact pair's
-// own test battery) truncated the match at the prime, stranding "_c"
-// outside the wrap ("(f) c" instead of "(f'_c)" / "(f) over c" instead of
-// "(w_c) over (f_c)"). A prime between a variable and its subscript is
-// this domain's routine strength notation (f'_c, f'_y, f'_t), not an edge
-// case -- worth handling in the token grammar itself rather than pushing
-// callers to pre-sanitize.
-const BARE_DIV_SPEECH_RE = /(\([^()]*(?:\([^()]*\)[^()]*)*\)|[A-Za-z0-9\u0370-\u03FF]+'*(?:_[A-Za-z0-9]+)?)\s*\/\s*(\([^()]*(?:\([^()]*\)[^()]*)*\)|[A-Za-z0-9\u0370-\u03FF]+'*(?:_[A-Za-z0-9]+)?)/g;
-// [ADDED] \, \; \! \: -- LaTeX inter-symbol spacing commands (thin/medium/
-// negative/thick space), zero semantic content. Found leaking literally as
-// "\,dt" into the TTS stream while re-testing this pair's own \int
-// regression case (\int_0^infty psi(t)\,dt) -- the generic backslash-strip
-// safety net only strips a backslash followed by LETTERS, so a spacing
-// command (backslash + punctuation) survives it untouched. Collapsed to a
-// single space; never carries meaning worth preserving.
-const LATEX_SPACING_RE = /\\[,;:!]/g;
-
-// [ROUND 2 — bare-prose defense-in-depth] Mirrors the client's identical
-// addition; see CES_PRIME_SUBSCRIPT_RE's own comment block for the full
-// "why these four are safe on prose, why the blanket strip isn't" reasoning.
-const PRIME_CALL_RE = /([A-Za-z\u0370-\u03FF])('{1,3})(?=\()/g;
-function primeCallWord(base, primes, isAr) {
-  const n = primes.length;
-  const word = isAr
-    ? (n === 1 ? ' مشتقة ' : n === 2 ? ' مشتقة ثانية ' : ` مشتقة من الرتبة ${n} `)
-    : (n === 1 ? ' prime ' : n === 2 ? ' double prime ' : ` order-${n} prime `);
-  return base + word;
-}
-const PRIME_SUBSCRIPT_RE = /([A-Za-z\u0370-\u03FF])'(?=_)/g;
-const PROSE_SLASH_STOPWORDS = new Set(['and','or','he','she','his','her','him','yes','no','on','off','pass','fail','true','false','up','down','in','out','a','an']);
-const UNIT_RESPELL_RE = /(\d[\d,.]*)\s*\b(psi|ksi)\b/gi;
-const UNIT_RESPELL_WORDS = { psi: { ar: 'بي إس آي', en: 'P S I' }, ksi: { ar: 'كيه إس آي', en: 'K S I' } };
-function respellUnits(s, isAr) {
-  return s.replace(UNIT_RESPELL_RE, (_m, numPart, unit) =>
-    numPart + ' ' + UNIT_RESPELL_WORDS[unit.toLowerCase()][isAr ? 'ar' : 'en'] + ' ');
-}
+// [FIX] Operand atom now allows an optional 1-3 char prime run between the
+// base and an optional subscript (f'_c, f''_c) -- previously the class
+// stopped at the base letters, so "w_c/f'_c" only captured "w_c" / "f" as
+// the two operands and stranded "'_c" to be mopped up by later, less
+// coherent passes -- confirmed empirically as "(f) c" (tts_test_battery
+// item 5): the subscript ends up OUTSIDE the operand's parenthetical
+// grouping instead of read as part of the single term it denotes. Zero
+// primes (the overwhelmingly common case) is unaffected -- this is a
+// strict widening, not a behavior change for any prime-free operand.
+const BARE_DIV_SPEECH_RE = /(\([^()]*(?:\([^()]*\)[^()]*)*\)|[A-Za-z0-9\u0370-\u03FF]+'{0,3}(?:_[A-Za-z0-9]+)?)\s*\/\s*(\([^()]*(?:\([^()]*\)[^()]*)*\)|[A-Za-z0-9\u0370-\u03FF]+'{0,3}(?:_[A-Za-z0-9]+)?)/g;
 
 // Mirrors the client's _cesEndsInMacroName -- see that function's own
 // comment.
@@ -1043,6 +1104,58 @@ function _wrapOperand(x) {
   return (x.charAt(0) === '(' && x.charAt(x.length - 1) === ')') ? x : '(' + x + ')';
 }
 
+// [ROUND 3] Promoted to a shared const from the start this time -- an
+// earlier pass of this same fix (on a sibling file) left a second, inline
+// copy of this exact pattern elsewhere with the old lookahead, and the two
+// silently drifted out of sync. One definition, two call sites below.
+// [ROUND 4] Added a negative lookbehind so the base letter can't itself be
+// preceded by another letter. Without it, this fires on any English
+// contraction/possessive in bare prose -- confirmed empirically ("the
+// beam's reaction force" -> "the beam prime s reaction force", "it's" ->
+// "it prime s", "doesn't" -> "doesn prime t"). A genuine math
+// variable-with-prime is a standalone single letter (y', f'(x)); the
+// character before it is never itself a letter. Costs nothing there and
+// closes a false-positive path that would otherwise fire on ordinary
+// conversational sentences, not just formulas -- a far more severe defect
+// than the derivative-notation gap this const was added to close.
+const PRIME_CALL_RE = /(?<![A-Za-z])([A-Za-z\u0370-\u03FF])('{1,3})(?!_)/g;
+function primeCallWord(base, primes, isAr) {
+  const n = primes.length;
+  const word = isAr
+    ? (n === 1 ? ' مشتقة ' : n === 2 ? ' مشتقة ثانية ' : n === 3 ? ' مشتقة ثالثة ' : ` مشتقة من الرتبة ${n} `)
+    : (n === 1 ? ' prime ' : n === 2 ? ' double prime ' : n === 3 ? ' triple prime ' : ` order-${n} prime `);
+  return base + word;
+}
+// Prime immediately before "_" -- e.g. bare-prose "f'_c". Unambiguous
+// engineering-strength notation (no English contraction is ever shaped
+// "word'_something"), so -- unlike the blanket strip -- this is safe to run
+// outside math spans too.
+const PRIME_SUBSCRIPT_RE = /([A-Za-z\u0370-\u03FF])'(?=_)/g;
+// and/or, he/she, pass/fail, etc. -- idiomatic English slash-shorthand that
+// BARE_DIV_SPEECH_RE's own token grammar can't tell apart from a genuine
+// variable ratio once it's sitting in bare prose with no surrounding LaTeX
+// to signal "this is math". Only the bare-prose pass needs this guard --
+// inside an actual math span nobody writes "and"/"or" inside $...$.
+const PROSE_SLASH_STOPWORDS = new Set(['and','or','he','she','his','her','him','yes','no','on','off','pass','fail','true','false','up','down','in','out','a','an']);
+// [ROUND 2 equivalent] Bare-prose unit respelling -- UNIT_SPEECH_WORDS/
+// unitSpeech() above only fire when the unit is the full argument of a
+// \text{}/\mathrm{}/etc. wrapper, which by definition only exists inside a
+// math span. A bare "4000 psi" in ordinary prose (no LaTeX at all) never
+// reaches that path. Reuses the exact same dictionary via unitSpeech() so
+// the two paths can never disagree on what counts as a known unit; a
+// number-anchored trigger keeps this from ever firing on a non-unit word
+// (unitSpeech returns null for anything not in the table, so this is a
+// safe no-op for "5 apples" or a stray variable name) and, incidentally,
+// keeps it from colliding with \psi-derived "psi" (a Greek-letter variable
+// name is never preceded by a bare number the way a unit quantity is).
+const BARE_UNIT_TRIGGER_RE = /(\d[\d,.]*)\s*([A-Za-z]+(?:\/[A-Za-z0-9]+)?)\b/g;
+function bareUnitRespell(s, isAr) {
+  return s.replace(BARE_UNIT_TRIGGER_RE, (m, numPart, unitPart) => {
+    const w = unitSpeech(unitPart);
+    return w ? numPart + ' ' + (isAr ? w.ar : w.en) + ' ' : m;
+  });
+}
+
 function resolveMathInnerForSpeech(inner, isAr) {
   // [ADDED] `\_` (LaTeX's escaped-literal-underscore) always means "print
   // an underscore", never a subscript delimiter -- mirrors the client's
@@ -1050,6 +1163,23 @@ function resolveMathInnerForSpeech(inner, isAr) {
   // empirical case ("$q_{allowable\_net}$" -> literally "q_allowable\_net",
   // a raw backslash reaching the TTS engine, before this fix).
   let s = inner.replace(/\\_/g, ' ');
+  // [ROUND 3 — REORDERED] Prime resolution runs HERE, before the per-pass
+  // loop, not in this function's tail where an earlier pass of this fix
+  // (on a sibling file) originally placed it. Reason, found via direct
+  // execution against $f'_c$, not by inspection: SUB_SPEECH_RE runs inside
+  // the loop below and, for "f'_c", sees "_c" preceded by a non-alnum char
+  // (the prime) and treats it as NOT adjacent to a fusable base -- so it
+  // rewrites "_c" to " c " (a space, not an underscore) as part of its own
+  // "speak separately" branch. If prime resolution ran after that (in the
+  // tail, as originally), the (?!_) check below would find a space where
+  // it expected to check for "_", always pass, and wrongly speak "prime"
+  // for every f'_c-style engineering-notation prime too. Resolving primes
+  // first, while the literal "_" is still intact, is the fix; nothing
+  // later in the pipeline depends on a literal "'" surviving past this
+  // point.
+  s = s
+    .replace(PRIME_CALL_RE, (_m, base, primes) => primeCallWord(base, primes, isAr))
+    .replace(/'/g, ''); // prime marks read as "apostrophe" on every engine -- see stripSuperSubMarkers's own header for the same "don't trust five black boxes" reasoning
   for (let pass = 0; pass < 4; pass++) {
     const before = s;
     // [ADDED] Matrix/array environment -- see MATRIX_SPEECH_RE's own
@@ -1062,7 +1192,14 @@ function resolveMathInnerForSpeech(inner, isAr) {
         .filter(r => r.length > 0);
       return (isAr ? ' المصفوفة: ' : ' the matrix: ') + rows.join(sep) + ' ';
     });
-    s = s.replace(TYPEWRAP_SPEECH_RE, (_m, arg) => ' ' + arg + ' ');
+    s = s.replace(TYPEWRAP_SPEECH_RE, (_m, arg) => {
+      const w = unitSpeech(arg);
+      return w ? ` ${isAr ? w.ar : w.en} ` : ' ' + arg + ' ';
+    });
+    s = s.replace(MATHBB_SPEECH_RE, (_m, letter) => {
+      const w = MATHBB_SPEECH_WORDS[letter];
+      return w ? ` ${isAr ? w.ar : w.en} ` : ` ${letter} `;
+    });
     s = s.replace(NTH_ROOT_SPEECH_RE, (_m, order, x) => {
       if (order === '2') return isAr ? ` الجذر التربيعي لـ (${x}) ` : ` square root of (${x}) `;
       if (order === '3') return isAr ? ` الجذر التكعيبي لـ (${x}) ` : ` cube root of (${x}) `;
@@ -1083,12 +1220,49 @@ function resolveMathInnerForSpeech(inner, isAr) {
         ? ` المشتقة الجزئية لـ ${n} بالنسبة لـ ${denomVar} `
         : ` the partial derivative of ${n} with respect to ${denomVar} `;
     });
+    // [FIX] \int with bounds -- must run before the generic BARE_DIV pass
+    // below so that a parenthesized integral (as in item 8's numerator)
+    // gets its bounds resolved on the same pass its content is exposed,
+    // not left for BARE_DIV to (incorrectly) try to split as a division.
+    s = s.replace(INTEGRAL_SPEECH_RE, (_m, lb, lb2, ub, ub2) => {
+      const lower = lb !== undefined ? lb : lb2;
+      const upper = ub !== undefined ? ub : ub2;
+      if (lower !== undefined && upper !== undefined)
+        return isAr ? ` تكامل من ${lower} إلى ${upper} ` : ` integral from ${lower} to ${upper} `;
+      if (lower !== undefined) return isAr ? ` تكامل من ${lower} ` : ` integral from ${lower} `;
+      if (upper !== undefined) return isAr ? ` تكامل إلى ${upper} ` : ` integral to ${upper} `;
+      return isAr ? ' تكامل ' : ' integral ';
+    });
     // [ADDED] Generic bare "/" division -- mirrors the client's identical
     // addition; see BARE_DIV_SPEECH_RE's own comment.
     s = s.replace(BARE_DIV_SPEECH_RE, (_m, num, den) =>
       isAr ? ` ${_wrapOperand(num)} على ${_wrapOperand(den)} ` : ` ${_wrapOperand(num)} over ${_wrapOperand(den)} `);
+    // [FIX] Pure LaTeX spacing directives (\, \! \; \: \quad \qquad) carry
+    // no spoken content -- \, in particular is the near-universal separator
+    // immediately before a differential (\,dx, \,dt) in integral notation.
+    // Previously unhandled: the existing unmapped-backslash safety net only
+    // matches "\" + LETTERS, so "\," (backslash + punctuation) never
+    // matched anything and reached the TTS engine as a literal, unspoken
+    // backslash-comma pair -- confirmed empirically (tts_test_battery item
+    // 8's "\,dt"). A single space avoids fusing the tokens on either side.
+    s = s.replace(/\\(?:qquad|quad|,|!|;|:)/g, ' ');
+    // [FIX] \nabla \cdot X (divergence) / \nabla \times X (curl) / bare
+    // \nabla X (gradient) -- named vector-calculus operators. Previously
+    // \cdot and \times were mapped generically to "times"/"في" regardless
+    // of context, so a real divergence expression read as the meaningless
+    // "nabla times A" instead of naming the actual operation -- flagged
+    // explicitly against this file's own test battery (item 10, which
+    // corrects an earlier × to · specifically because × means curl, a
+    // different operator entirely, and the two must not collapse to the
+    // same reading). Must run before the generic \cdot/\times mapping and
+    // before the standalone \nabla mapping below. Operand is left
+    // unconsumed and untouched -- by this point in the pass, \mathbf{A}
+    // has already been unwrapped to bare "A" by TYPEWRAP above, so it
+    // continues through the rest of this same pass exactly as before.
+    s = s.replace(/\\nabla\s*\\cdot\s*/g, () => (isAr ? ' ديفرجنس لـ ' : ' the divergence of '));
+    s = s.replace(/\\nabla\s*\\times\s*/g, () => (isAr ? ' كيرل لـ ' : ' the curl of '));
+    s = s.replace(/\\nabla(?=\s*[A-Za-z])/g, () => (isAr ? ' جرادينت لـ ' : ' the gradient of '));
     s = s.replace(/\\left(?=[(\[{])/g, '').replace(/\\right(?=[)\]}])/g, '');
-    s = s.replace(LATEX_SPACING_RE, ' ');
     // [ADDED] Standalone `\\` -- mirrors the client's identical addition;
     // see that line's own comment.
     s = s.replace(/\\\\/g, () => (isAr ? ' سطر جديد ' : ' new line '));
@@ -1099,20 +1273,63 @@ function resolveMathInnerForSpeech(inner, isAr) {
       const sub = braced !== undefined ? braced : bare;
       const prevChar = offset > 0 ? str.charAt(offset - 1) : '';
       const adjacent = /[A-Za-z0-9]/.test(prevChar) && !_endsInMacroName(str, offset - 1);
-      if (adjacent && /^[A-Za-z0-9+\-=()]{1,8}$/.test(sub)) return sub;
+      // [FIX] Fuse (zero-separator) branch now requires length >= 2.
+      // Single-character alphabetic subscripts previously fused onto their
+      // base letter unconditionally (same rule that correctly turns f_cu
+      // into "fcu" also turned x_i into "xi" and w_c into "wc") -- but a
+      // fused single letter risks landing on an unrelated real word or
+      // Greek-letter name (xi = the letter Xi), which is a genuine
+      // mispronunciation risk, not just a stylistic fusion. Confirmed
+      // directly against this file's own test battery (item 25: x_i must
+      // read as two distinct letters, explicitly NOT fused). Clusters of
+      // 2+ chars (fcu, cu, min...) are unaffected and keep fusing exactly
+      // as before.
+      if (adjacent && sub.length >= 2 && /^[A-Za-z0-9+\-=()]{1,8}$/.test(sub)) return sub;
       const spoken = sub.replace(/,\s*/g, isAr ? '، ' : ', ').replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
       return ' ' + spoken + ' ';
     });
     s = s.replace(SUP_SPEECH_RE, (_m, braced, bare) => {
-      const exp = braced !== undefined ? braced : bare;
-      if (exp === '2') return isAr ? ' تربيع ' : ' squared ';
-      if (exp === '3') return isAr ? ' تكعيب ' : ' cubed ';
-      return isAr ? ` أُس ${exp} ` : ` to the power ${exp} `;
+      let exp = braced !== undefined ? braced : bare;
+      // [ROUND 3] A leading sign was previously left in the output
+      // verbatim ("to the power -1"), relying on the engine to correctly
+      // vocalize a bare "-N" -- confirmed empirically that at least one
+      // backend doesn't. Stripped and re-spoken as an explicit word;
+      // checked BEFORE the squared/cubed shortcut below, or x^-2 would
+      // wrongly say "squared" off the trailing digit alone.
+      let negative = false;
+      if (exp.charAt(0) === '-') { negative = true; exp = exp.slice(1); }
+      else if (exp.charAt(0) === '+') { exp = exp.slice(1); }
+      if (!negative) {
+        if (exp === '2') return isAr ? ' تربيع ' : ' squared ';
+        if (exp === '3') return isAr ? ' تكعيب ' : ' cubed ';
+      }
+      const expWord = negative ? (isAr ? `سالب ${exp}` : `negative ${exp}`) : exp;
+      return isAr ? ` أُس ${expWord} ` : ` to the power ${expWord} `;
     });
     // [ADDED] Isolated `^`/`_` -- mirrors the client's identical fallback;
     // see that pair's own comment.
     s = s.replace(/\^(?![A-Za-z0-9{])/g, () => (isAr ? ' إشارة الأس ' : ' the caret symbol '));
     s = s.replace(/_(?![A-Za-z0-9{])/g, () => (isAr ? ' الشرطة السفلية ' : ' the underscore symbol '));
+    // [ROUND 3] "-" as subtraction/negative-sign -- confirmed empirically
+    // that "a - b", "-5", "M = -12" all reach the engine as a bare literal
+    // hyphen with zero handling anywhere in this file. Fires only when a
+    // digit sits directly on at least one side (optional whitespace aside)
+    // of the "-" -- deliberately NOT a blanket letter-to-letter rule:
+    // \text{}-sourced engineering terms un-wrap to plain hyphenated words
+    // earlier in this same pass (pre-stressed, non-linear, post-tensioned
+    // are routine in this domain), and a digit-free "-" between two letter
+    // runs is far more likely to be one of those than genuine subtraction.
+    // Leaves a rarer, purely-symbolic case like "M_n - M_u" (no digit
+    // either side) still a bare hyphen -- accepted tradeoff, favoring zero
+    // false positives over full coverage, the same shape of call this file
+    // already makes for km/hr -> "over" not "per".
+    s = s.replace(/([0-9A-Za-z)\]}'])?\s*-\s*(?=([0-9A-Za-z]))/g, (_m, prevTok, nextChar) => {
+      const prevIsDigit = !!prevTok && /[0-9]/.test(prevTok);
+      const nextIsDigit = /[0-9]/.test(nextChar);
+      if (!prevIsDigit && !nextIsDigit) return _m;
+      if (prevTok) return prevTok + (isAr ? ' ناقص ' : ' minus ');
+      return isAr ? ' سالب ' : ' negative ';
+    });
     s = s.replace(/\\cdot|\\times/g, () => (isAr ? ' في ' : ' times '));
     s = s.replace(/\\leq/g, () => (isAr ? ' أصغر من أو يساوي ' : ' less than or equal to '));
     s = s.replace(/\\geq/g, () => (isAr ? ' أكبر من أو يساوي ' : ' greater than or equal to '));
@@ -1150,12 +1367,6 @@ function resolveMathInnerForSpeech(inner, isAr) {
     if (s === before) break;
   }
   return s
-    // [ADDED] Prime(s) immediately followed by "(" -- unambiguous calculus
-    // derivative-of-function notation (f'(x), f''(x)); mirrors the
-    // client's identical addition -- see that block's own comment for why
-    // this must run before the blanket strip just below.
-    .replace(/([A-Za-z\u0370-\u03FF])('{1,3})(?=\()/g, (_m, base, primes) => primeCallWord(base, primes, isAr))
-    .replace(/'/g, '') // prime marks read as "apostrophe" on every engine -- see stripSuperSubMarkers's own header for the same "don't trust five black boxes" reasoning
     // Same orphaned-underscore fix as the client's _cesResolveMathInner:
     // a Greek base subscripted by another Greek letter (lambda_Delta) has
     // both sides expanded to spoken words above, stranding the underscore
@@ -1174,9 +1385,35 @@ function resolveMathInnerForSpeech(inner, isAr) {
 // survived every pass unchanged before this addition). This endpoint is
 // speech-only (no 'plain'/download mode exists server-side), so unlike
 // the client's identical table this one always applies, unconditionally.
-const BARE_GLYPH_RE = /[\u2264\u2265\u00B1\u2260\u2248\u221E\u00D7\u00F7]/g;
-const BARE_GLYPH_WORDS_AR = { '\u2264':' أصغر من أو يساوي ', '\u2265':' أكبر من أو يساوي ', '\u00B1':' زائد أو ناقص ', '\u2260':' لا يساوي ', '\u2248':' يساوي تقريبًا ', '\u221E':' لانهاية ', '\u00D7':' في ', '\u00F7':' على ' };
-const BARE_GLYPH_WORDS_EN = { '\u2264':' less than or equal to ', '\u2265':' greater than or equal to ', '\u00B1':' plus or minus ', '\u2260':' not equal to ', '\u2248':' approximately equal to ', '\u221E':' infinity ', '\u00D7':' times ', '\u00F7':' divided by ' };
+// [FIX] Extended to cover bare (non-\macro) Greek letters + ∇ + √, which
+// previously leaked completely untouched whenever the model writes the
+// literal Unicode glyph directly instead of the \alpha/\nabla/\sqrt LaTeX
+// macro -- confirmed empirically for α, β, Δ, ∇ and √[n]{} (test items 16,
+// 20-22). This table already runs across the WHOLE text (inside and
+// outside $...$ spans alike), so it also covers a model slipping a bare
+// Greek letter into ordinary un-delimited prose, not just inside math
+// spans. √ can only contribute a fixed leading phrase (it has no way to
+// capture "what follows" the way \sqrt{} does) -- an imperfect but
+// strictly-better-than-silent fallback for this one non-LaTeX hybrid form.
+const BARE_GLYPH_RE = /[\u2264\u2265\u00B1\u2260\u2248\u221E\u00D7\u00F7\u0391-\u03A9\u03B1-\u03C9\u2202\u2207\u221A]/g;
+const BARE_GLYPH_WORDS_AR = {
+  '\u2264':' أصغر من أو يساوي ', '\u2265':' أكبر من أو يساوي ', '\u00B1':' زائد أو ناقص ', '\u2260':' لا يساوي ',
+  '\u2248':' يساوي تقريبًا ', '\u221E':' لانهاية ', '\u00D7':' في ', '\u00F7':' على ',
+  '\u03B1':' ألفا ', '\u03B2':' بيتا ', '\u03B3':' جاما ', '\u03B4':' دلتا ', '\u0394':' دلتا ',
+  '\u03B5':' إبسيلون ', '\u03B8':' ثيتا ', '\u03BB':' لامدا ', '\u03BC':' ميو ', '\u03C0':' باي ',
+  '\u03C1':' رو ', '\u03C3':' سيجما ', '\u03C4':' تاو ', '\u03C6':' فاي ', '\u03C8':' باي ',
+  '\u03C9':' أوميجا ', '\u03A9':' أوميجا ', '\u03A6':' فاي ',
+  '\u2202':' جزئي ', '\u2207':' نابلا ', '\u221A':' الجذر التربيعي لـ ',
+};
+const BARE_GLYPH_WORDS_EN = {
+  '\u2264':' less than or equal to ', '\u2265':' greater than or equal to ', '\u00B1':' plus or minus ', '\u2260':' not equal to ',
+  '\u2248':' approximately equal to ', '\u221E':' infinity ', '\u00D7':' times ', '\u00F7':' divided by ',
+  '\u03B1':' alpha ', '\u03B2':' beta ', '\u03B3':' gamma ', '\u03B4':' delta ', '\u0394':' delta ',
+  '\u03B5':' epsilon ', '\u03B8':' theta ', '\u03BB':' lambda ', '\u03BC':' mu ', '\u03C0':' pi ',
+  '\u03C1':' rho ', '\u03C3':' sigma ', '\u03C4':' tau ', '\u03C6':' phi ', '\u03C8':' psi ',
+  '\u03C9':' omega ', '\u03A9':' omega ', '\u03A6':' Phi ',
+  '\u2202':' partial ', '\u2207':' nabla ', '\u221A':' square root of ',
+};
 
 // Same $/$$ walk as notationNormalizer.mjs's walkMathSpans (see that
 // module's own header for the escaping/pairing rules this mirrors exactly),
@@ -1208,11 +1445,24 @@ function flattenLatexForSpeech(text) {
     i++;
   }
   out = out.replace(BARE_GLYPH_RE, (m) => (isAr ? BARE_GLYPH_WORDS_AR : BARE_GLYPH_WORDS_EN)[m]);
-  // [ROUND 2] Bare-prose pass -- mirrors the client's identical addition in
-  // _cesFlattenMathSpans; see PRIME_CALL_RE's own comment block for the
-  // full reasoning. This endpoint is speech-only, so unlike the client's
-  // mode-gated version this always applies (same asymmetry as BARE_GLYPH_RE
-  // just above).
+  // [ROUND 2 — bare-prose defense-in-depth] Everything above only ever
+  // runs on text the model wrapped in $.../$$...$$. Verified empirically
+  // (paired wrapped-vs-bare test) that this domain's notation doesn't
+  // always arrive that way -- f'_c and a bare "d/2" written as plain prose
+  // reach the TTS engine completely untouched, landing on whichever of
+  // five different backend providers with no consistency between them.
+  // Re-run the same narrow, already-battle-tested patterns over the fully
+  // assembled text, in and out of math spans, rather than widen
+  // resolveMathInnerForSpeech itself. Safe on prose because each pattern
+  // requires a specific structural shape prose doesn't produce by accident
+  // -- UNLIKE the plain blanket "'"->'' strip (would corrupt an English
+  // contraction like "it's") or the full \frac/\int/Greek-letter machinery
+  // (backslash macros can't occur in prose at all). Idempotent against
+  // content already resolved inside a math span: nothing left there to
+  // match. "-" as subtraction is deliberately NOT extended to this pass --
+  // ordinary hyphenated words are even more common in unwrapped prose than
+  // inside a \text{} argument, and the risk of mangling one outweighs the
+  // benefit here.
   out = out.replace(PRIME_CALL_RE, (_m, base, primes) => primeCallWord(base, primes, isAr));
   out = out.replace(PRIME_SUBSCRIPT_RE, (_m, base) => base);
   out = out.replace(PARTIAL_DERIV_SPEECH_RE, (_m, num, denomVar) => {
@@ -1222,16 +1472,19 @@ function flattenLatexForSpeech(text) {
       ? ` المشتقة الجزئية لـ ${n} بالنسبة لـ ${denomVar} `
       : ` the partial derivative of ${n} with respect to ${denomVar} `;
   });
+  out = bareUnitRespell(out, isAr);
   out = out.replace(BARE_DIV_SPEECH_RE, (_m, num, den) => {
     const nLower = /^[A-Za-z]+$/.test(num) ? num.toLowerCase() : null;
     const dLower = /^[A-Za-z]+$/.test(den) ? den.toLowerCase() : null;
     if ((nLower && PROSE_SLASH_STOPWORDS.has(nLower)) || (dLower && PROSE_SLASH_STOPWORDS.has(dLower))) return _m;
     return isAr ? ` ${_wrapOperand(num)} على ${_wrapOperand(den)} ` : ` ${_wrapOperand(num)} over ${_wrapOperand(den)} `;
   });
+  out = out.replace(/\\nabla\s*\\cdot\s*/g, () => (isAr ? ' ديفرجنس لـ ' : ' the divergence of '));
+  out = out.replace(/\\nabla\s*\\times\s*/g, () => (isAr ? ' كيرل لـ ' : ' the curl of '));
+  out = out.replace(/\\nabla(?=\s*[A-Za-z])/g, () => (isAr ? ' جرادينت لـ ' : ' the gradient of '));
   out = out.replace(/\\partial(?![A-Za-z])/g, () => (isAr ? ' جزئي ' : ' partial '));
   out = out.replace(/\\nabla(?![A-Za-z])/g, () => (isAr ? ' نابلا ' : ' nabla '));
-  out = out.replace(LATEX_SPACING_RE, ' ');
-  out = respellUnits(out, isAr);
+  out = out.replace(/\\(?:qquad|quad|,|!|;|:)/g, ' ');
   return out
     .replace(/\$(?!\d)/g, '')          // stray delimiter, not currency (same guard as notationNormalizer.mjs's stripBareDollar)
     .replace(/\\([A-Za-z]+)/g, '$1')   // unmapped macro outside the documented set -> bare word, never a leaked backslash
