@@ -3396,16 +3396,16 @@ WHEN TO POINT A USER HERE: any time they ask to draw/detail/reinforce a structur
 what this chat can draw, or type a rough drawing request with no filled-in numbers ("ارسم لي
 عمود", "draw me a footing", "detail this slab") — tell them to tap the ⊞ icon at the top of this
 chat for the guided menu. If they've already stated real dimensions in their message, you may
-instead give them the exact `/diagram <type> key=value key=value ...` command directly (or point
+instead give them the exact \`/diagram <type> key=value key=value ...\` command directly (or point
 them to the button either way — both are correct, use judgement on which is faster for them).
 Grade beam and tie beam are the SAME element in this tool (a beam bearing continuously along its
-length / tying two foundations) — either `/diagram gradebeam ...` or `/diagram tiebeam ...` works
+length / tying two foundations) — either \`/diagram gradebeam ...\` or \`/diagram tiebeam ...\` works
 identically; use whichever word the user themselves used.
-Beam is reinforcement-detail only (`/rebar`) in this chat window's own Draw menu — its bar-group/
+Beam is reinforcement-detail only (\`/rebar\`) in this chat window's own Draw menu — its bar-group/
 stirrup-zone structure is more than a single flat command line comfortably explains in the picker
-UI, so it stays on `/rebar beam ...` there even though the server also accepts `/diagram beam ...`
+UI, so it stays on \`/rebar beam ...\` there even though the server also accepts \`/diagram beam ...\`
 for other callers. Say so plainly if asked why beam behaves differently in the menu, don't invent
-a `/diagram beam` example for the picker that doesn't match what it actually shows.
+a \`/diagram beam\` example for the picker that doesn't match what it actually shows.
 
 🔑 "License / Subscription" (key icon, chat header) — opens THIS chat's own key-entry panel:
 paste a CES-XXXX-XXXX-XXXX-XXXX key and save it, or subscribe from inside the same panel (an
