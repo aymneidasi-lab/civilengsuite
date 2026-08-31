@@ -1198,53 +1198,53 @@ import {
 // this module would be a duplicate-binding SyntaxError, not a silent
 // shadow. The one already in scope is byte-identical (both now trace
 // to structuralDrawingKit.mjs's single implementation).
-import { parseBeamRebarPayload, renderBeamDiagramSVG } from '../_lib/beamDiagram.mjs';
+import { parseBeamRebarPayload, renderBeamDiagramSVG } from '../../public/vendor/dxf-kit/beamDiagram.mjs';
 // [Linking beamAsciiToPayload.mjs] beam-only ASCII "key=value" front end
 // for the mode:'rebarDiagram' /rebar path — see that module's own header.
 // Does not touch beamDiagram.mjs's own compute/render/parse exports;
 // purely a syntax translator ahead of parseBeamRebarPayload.
-import { parseBeamAsciiCommand } from '../_lib/beamAsciiToPayload.mjs';
+import { parseBeamAsciiCommand } from '../../public/vendor/dxf-kit/beamAsciiToPayload.mjs';
 // [Step 20] Slab/shear-wall/stair — same shape as beamDiagram.mjs's pair
 // above (parse*RebarPayload for mode:'rebarDiagram', render*SVG for both
 // that and the mode:'image' /diagram path below). DiagramError/
 // svgToDataUri not re-imported here for the same duplicate-binding
 // reason noted above.
-import { parseSlabRebarPayload, renderSlabDiagramSVG } from '../_lib/slabDiagram.mjs';
-import { parseShearWallRebarPayload, renderShearWallDiagramSVG } from '../_lib/shearWallDiagram.mjs';
-import { parseStairRebarPayload, renderStairDiagramSVG } from '../_lib/stairDiagram.mjs';
+import { parseSlabRebarPayload, renderSlabDiagramSVG } from '../../public/vendor/dxf-kit/slabDiagram.mjs';
+import { parseShearWallRebarPayload, renderShearWallDiagramSVG } from '../../public/vendor/dxf-kit/shearWallDiagram.mjs';
+import { parseStairRebarPayload, renderStairDiagramSVG } from '../../public/vendor/dxf-kit/stairDiagram.mjs';
 // [Follow-up to Step 20] Column — same shape as the three imports above.
 // columnDiagram.mjs also re-exports DiagramError/svgToDataUri; not
 // re-imported here for the same duplicate-binding reason noted above.
-import { parseColumnRebarPayload, renderColumnDiagramSVG } from '../_lib/columnDiagram.mjs';
+import { parseColumnRebarPayload, renderColumnDiagramSVG } from '../../public/vendor/dxf-kit/columnDiagram.mjs';
 // [New-element track, Part 2 candidate 1] Retaining wall (cantilever,
 // typical section) — same shape as the four imports above.
 // retainingWallDiagram.mjs also re-exports DiagramError/svgToDataUri;
 // not re-imported here for the same duplicate-binding reason noted above.
-import { parseRetainingWallRebarPayload, renderRetainingWallDiagramSVG } from '../_lib/retainingWallDiagram.mjs';
+import { parseRetainingWallRebarPayload, renderRetainingWallDiagramSVG } from '../../public/vendor/dxf-kit/retainingWallDiagram.mjs';
 // [New-element track, Part 2 candidate 2] Trapezoidal combined footing —
 // same shape as the five imports above. trapezoidalFootingDiagram.mjs
 // also re-exports DiagramError/svgToDataUri; not re-imported here for
 // the same duplicate-binding reason noted above.
-import { parseTrapezoidalFootingRebarPayload, renderTrapezoidalFootingDiagramSVG } from '../_lib/trapezoidalFootingDiagram.mjs';
+import { parseTrapezoidalFootingRebarPayload, renderTrapezoidalFootingDiagramSVG } from '../../public/vendor/dxf-kit/trapezoidalFootingDiagram.mjs';
 // [New-element track, Part 2 candidate 3] Strap footing — same shape as
 // the six imports above. strapFootingDiagram.mjs also re-exports
 // DiagramError/svgToDataUri; not re-imported here for the same
 // duplicate-binding reason noted above.
-import { parseStrapFootingRebarPayload, renderStrapFootingDiagramSVG } from '../_lib/strapFootingDiagram.mjs';
+import { parseStrapFootingRebarPayload, renderStrapFootingDiagramSVG } from '../../public/vendor/dxf-kit/strapFootingDiagram.mjs';
 // [New-element track, Part 2 candidate 4] Grade beam / tie beam — same
 // shape as the seven imports above. gradeBeamDiagram.mjs also re-exports
 // DiagramError/svgToDataUri; not re-imported here for the same
 // duplicate-binding reason noted above.
-import { parseGradeBeamRebarPayload, renderGradeBeamDiagramSVG } from '../_lib/gradeBeamDiagram.mjs';
+import { parseGradeBeamRebarPayload, renderGradeBeamDiagramSVG } from '../../public/vendor/dxf-kit/gradeBeamDiagram.mjs';
 // [New-element track] Pile cap — same shape as the eight imports above.
 // pileCapDiagram.mjs also re-exports DiagramError/svgToDataUri; not
 // re-imported here for the same duplicate-binding reason noted above.
-import { parsePileCapRebarPayload, renderPileCapDiagramSVG } from '../_lib/pileCapDiagram.mjs';
+import { parsePileCapRebarPayload, renderPileCapDiagramSVG } from '../../public/vendor/dxf-kit/pileCapDiagram.mjs';
 // [New-element track, session25 gate] Flat slab opening reinforcement —
 // same shape as the nine imports above. slabOpeningDiagram.mjs also
 // re-exports DiagramError/svgToDataUri; not re-imported here for the
 // same duplicate-binding reason noted above.
-import { parseSlabOpeningRebarPayload, renderSlabOpeningDiagramSVG } from '../_lib/slabOpeningDiagram.mjs';
+import { parseSlabOpeningRebarPayload, renderSlabOpeningDiagramSVG } from '../../public/vendor/dxf-kit/slabOpeningDiagram.mjs';
 // [New-element track — SVG completeness pass] Ten library modules that
 // already had a full compute/render*SVG/parse*RebarPayload/
 // parseDiagramCommand quadruple (same shape as the twelve pairs above,
@@ -1254,16 +1254,16 @@ import { parseSlabOpeningRebarPayload, renderSlabOpeningDiagramSVG } from '../_l
 // diffing every render*DiagramSVG export across every *.mjs file in
 // functions/_lib against this file's own import list. Same shape,
 // same re-export-skip reasoning, as every import above.
-import { parseBasementWallRebarPayload, renderBasementWallDiagramSVG } from '../_lib/basementWallDiagram.mjs';
-import { parseBeamColumnJointRebarPayload, renderBeamColumnJointDiagramSVG } from '../_lib/beamColumnJointDiagram.mjs';
-import { parseCircularColumnRebarPayload, renderCircularColumnDiagramSVG } from '../_lib/circularColumnDiagram.mjs';
-import { parseCorbelRebarPayload, renderCorbelDiagramSVG } from '../_lib/corbelDiagram.mjs';
-import { parseCouplingBeamRebarPayload, renderCouplingBeamDiagramSVG } from '../_lib/couplingBeamDiagram.mjs';
-import { parseFlatSlabDropPanelRebarPayload, renderFlatSlabDropPanelDiagramSVG } from '../_lib/flatSlabDropPanelDiagram.mjs';
-import { parseHordiSlabRebarPayload, renderHordiSlabDiagramSVG } from '../_lib/hordiSlabDiagram.mjs';
-import { parsePunchingShearRebarPayload, renderPunchingShearDiagramSVG } from '../_lib/punchingShearDiagram.mjs';
-import { parseRaftPileRebarPayload, renderRaftPileDiagramSVG } from '../_lib/raftPileDiagram.mjs';
-import { parseWallOpeningRebarPayload, renderWallOpeningDiagramSVG } from '../_lib/wallOpeningDiagram.mjs';
+import { parseBasementWallRebarPayload, renderBasementWallDiagramSVG } from '../../public/vendor/dxf-kit/basementWallDiagram.mjs';
+import { parseBeamColumnJointRebarPayload, renderBeamColumnJointDiagramSVG } from '../../public/vendor/dxf-kit/beamColumnJointDiagram.mjs';
+import { parseCircularColumnRebarPayload, renderCircularColumnDiagramSVG } from '../../public/vendor/dxf-kit/circularColumnDiagram.mjs';
+import { parseCorbelRebarPayload, renderCorbelDiagramSVG } from '../../public/vendor/dxf-kit/corbelDiagram.mjs';
+import { parseCouplingBeamRebarPayload, renderCouplingBeamDiagramSVG } from '../../public/vendor/dxf-kit/couplingBeamDiagram.mjs';
+import { parseFlatSlabDropPanelRebarPayload, renderFlatSlabDropPanelDiagramSVG } from '../../public/vendor/dxf-kit/flatSlabDropPanelDiagram.mjs';
+import { parseHordiSlabRebarPayload, renderHordiSlabDiagramSVG } from '../../public/vendor/dxf-kit/hordiSlabDiagram.mjs';
+import { parsePunchingShearRebarPayload, renderPunchingShearDiagramSVG } from '../../public/vendor/dxf-kit/punchingShearDiagram.mjs';
+import { parseRaftPileRebarPayload, renderRaftPileDiagramSVG } from '../../public/vendor/dxf-kit/raftPileDiagram.mjs';
+import { parseWallOpeningRebarPayload, renderWallOpeningDiagramSVG } from '../../public/vendor/dxf-kit/wallOpeningDiagram.mjs';
 // [Step 20] Single /diagram dispatch point. Supersedes importing
 // footingDiagram.mjs's own parseDiagramCommand directly (removed from
 // the import above) — routeDiagramCommand() tries that exact function
@@ -1271,7 +1271,7 @@ import { parseWallOpeningRebarPayload, renderWallOpeningDiagramSVG } from '../_l
 // through the identical footingDiagram.mjs code path, byte-for-byte;
 // it additionally recognizes slab/shearwall/stair. See
 // diagramCommandRouter.mjs's own header for the full rationale.
-import { routeDiagramCommand } from '../_lib/diagramCommandRouter.mjs';
+import { routeDiagramCommand } from '../../public/vendor/dxf-kit/diagramCommandRouter.mjs';
 
 
 // Bilingual wrapper for footingDiagram.mjs's DiagramError codes (+
