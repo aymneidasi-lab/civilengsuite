@@ -65,9 +65,34 @@
 #   what made this take multiple rounds of client-side and prompt-side
 #   fixes to isolate down to this single missing line.
 
+# FIX K3 — DXF-kit vendor assets: /vendor/dxf-kit/* → /public/vendor/dxf-kit/:splat
+#   Physical location: public/vendor/dxf-kit/{footingDiagram.dxf.mjs,
+#   beamDiagram.dxf.mjs, columnDiagram.dxf.mjs, ...all 25 *.dxf.mjs files}
+#   Browser requests:  /vendor/dxf-kit/beamDiagram.dxf.mjs etc.
+#   THIRD occurrence of the identical K2/K2-M bug, same root cause: _routes.json
+#   excludes /vendor/dxf-kit/* from the Function (confirmed present) and
+#   _headers sets long-term caching on it via the [K3] block (confirmed
+#   present) — but this file had NO rewrite rule for it, so every request
+#   404'd before either of those ever mattered. Confirmed on disk: the
+#   files physically exist at public/vendor/dxf-kit/*.dxf.mjs (repo
+#   folder listing, 31/08/2026) — this was never a missing-file problem,
+#   only a missing-rewrite problem, identical to K2/K2-M. Symptom: DXF
+#   button's dynamic import() rejects, ceProbeDxfModuleFailure's own
+#   fetch() confirms stage=http-404, client shows "Could not generate the
+#   DXF file right now" — a real 404 from Cloudflare's static resolver,
+#   not a client bug. This is the third time this exact class of bug has
+#   shipped (K1 katex, K2 mermaid, now K3 dxf-kit) — recommend one
+#   permanent rule instead of one per vendor subfolder:
+#     /vendor/*    /public/vendor/:splat    200
+#   placed once, ahead of the specific vendor lines below, so any future
+#   /vendor/<new-tool>/* addition can never reproduce this bug again by
+#   omission. Left as explicit per-folder lines below for now to match
+#   the existing K1/K2 style without changing behavior beyond the fix.
+
 /fonts/*                    /public/fonts/:splat                    200
 /vendor/katex/*             /public/vendor/katex/:splat             200
 /vendor/mermaid/*           /public/vendor/mermaid/:splat           200
+/vendor/dxf-kit/*           /public/vendor/dxf-kit/:splat           200
 /images/*                   /public/images/:splat                   200
 /footing-pro/images/*       /public/footing-pro/images/:splat       200
 /beam-pro/images/*          /public/beam-pro/images/:splat          200
