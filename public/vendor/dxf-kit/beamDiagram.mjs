@@ -667,7 +667,7 @@ export function renderBeamDiagramSVG(geometry, opts = {}) {
   const sectionScale = fitScale([{ contentW: b, contentH: h, boxW: SECTION_SIZE - 50, boxH: SECTION_SIZE - 70 }]);
   const sectionsRowW = geometry.sections.length * SECTION_SIZE + (geometry.sections.length - 1) * SECTION_GAP;
   const sectionsX0 = (CANVAS_W - sectionsRowW) / 2;
-  const sectionsY = beamY + beamH + 130;
+  const sectionsY = beamY + beamH + 170;
 
   const tableRows = buildScheduleRows(geometry, l);
   const tableColW = Math.floor((CANVAS_W - 120) / 5);
@@ -688,7 +688,8 @@ export function renderBeamDiagramSVG(geometry, opts = {}) {
   const style = kitStyleBlock({ defaultFontStack, scriptFontStack, lang }) + `
     .beam-title { font-size:20px; font-weight:bold; fill:#111; font-family: ${scriptFontStack}; }
     .zone-label { font-size:10.5px; fill:#2f7a3d; font-family: ${defaultFontStack}; }
-    .support-label { font-size:11px; fill:#333; font-family: ${defaultFontStack}; }`;
+    .support-label { font-size:11px; fill:#333; font-family: ${defaultFontStack}; }
+    .support-break-line { stroke:#1a1a1a; stroke-width:1.7; fill:none; }`;
 
   return `<svg viewBox="0 0 ${CANVAS_W} ${CANVAS_H}" xmlns="http://www.w3.org/2000/svg" font-family="${defaultFontStack}">
   <defs>${hatchDefs()}</defs>
@@ -712,6 +713,26 @@ export function renderBeamDiagramSVG(geometry, opts = {}) {
 // bar diameter/spacing is exaggerated relative to beam length wherever
 // the true ratio would make a mark unreadable, by construction of the
 // `scale` this function is handed (see fitScale's own header).
+function renderSupportBreakSymbol(lo, hi, topY, botY) {
+  // Break-line ("this member continues beyond the sheet") convention —
+  // two open edges with a short double-diagonal break plus a dashed
+  // centerline, replacing a solid hatched block. Matches the structural
+  // details guide's own wall/column callout at a beam end, not a
+  // poured-concrete member being detailed in this drawing itself.
+  const cx = (lo + hi) / 2;
+  const breakY = topY + (botY - topY) * 0.32;
+  const gap = 9, zig = 9;
+  let svg = '';
+  for (const edgeX of [lo, hi]) {
+    svg += `<line x1="${edgeX}" y1="${topY}" x2="${edgeX}" y2="${breakY - gap}" class="support-break-line"/>`;
+    svg += `<line x1="${edgeX - zig / 2}" y1="${breakY - gap}" x2="${edgeX + zig / 2}" y2="${breakY - gap + 11}" class="support-break-line"/>`;
+    svg += `<line x1="${edgeX - zig / 2}" y1="${breakY + gap - 11}" x2="${edgeX + zig / 2}" y2="${breakY + gap}" class="support-break-line"/>`;
+    svg += `<line x1="${edgeX}" y1="${breakY + gap}" x2="${edgeX}" y2="${botY}" class="support-break-line"/>`;
+  }
+  svg += `<line x1="${cx}" y1="${topY}" x2="${cx}" y2="${botY}" class="cut-line"/>`;
+  return svg;
+}
+
 function renderElevation(geometry, scale, beamX, beamY, beamW, beamH, l) {
   const { totalLength, supports, longitudinalBars, stirrupZones, cover } = geometry;
   let svg = `<g class="elevation">`;
@@ -726,7 +747,7 @@ function renderElevation(geometry, scale, beamX, beamY, beamW, beamH, l) {
   });
   supports.forEach((s, i) => {
     const { lo, hi } = supportPxRanges[i];
-    svg += `<rect x="${lo}" y="${supportTopY}" width="${hi - lo}" height="${supportBotY - supportTopY}" class="support-outline" fill="url(#concreteHatch)"/>`;
+    svg += renderSupportBreakSymbol(lo, hi, supportTopY, supportBotY);
     const label = s.label || (s.type === 'wall' ? 'W' : 'S') + (i + 1);
     svg += `<text x="${(lo + hi) / 2}" y="${supportBotY + 14}" text-anchor="middle" class="support-label">${esc(label)}</text>`;
   });
@@ -739,6 +760,11 @@ function renderElevation(geometry, scale, beamX, beamY, beamW, beamH, l) {
   // steel (it is typically centered exactly on the support it resists
   // moment over) — not an edge case to ignore. Push the tag clear of
   // that support's hatch instead of letting it render on top of it.
+  // Layer also staggers tag distance from the bar line: two same-face
+  // groups with similar midpoints (a full-length nominal bar under a
+  // shorter curtailed one, e.g.) would otherwise place both tags at
+  // nearly the same point — real symptom seen when reproducing the
+  // structural-details-guide's own 2-group-per-face curtailment pattern.
   for (const g of longitudinalBars) {
     const x1 = beamX + g.startX * scale, x2 = beamX + g.endX * scale;
     const y = beamY + g.yFromTopMM * scale;
@@ -749,16 +775,20 @@ function renderElevation(geometry, scale, beamX, beamY, beamW, beamH, l) {
       const shiftRight = collided.hi + 18, shiftLeft = collided.lo - 18;
       tagX = shiftRight <= x2 ? shiftRight : (shiftLeft >= x1 ? shiftLeft : tagX);
     }
-    const tagY = g.face === 'top' ? y - 13 : y + 13;
+    const stagger = 13 + Math.max(0, (g.layer ?? 1) - 1) * 24;
+    const tagY = g.face === 'top' ? y - stagger : y + stagger;
     svg += barMarkTag(tagX, tagY, `${g.markId} \u00d8${g.dia}-${g.count}`, { r: 11 });
   }
 
-  // Stirrup zones — representative ticks + spacing callout + zone extent dimension
+  // Stirrup zones — bounding outline (reuses kitStyleBlock's own
+  // pre-existing .stirrup-outline class, not previously drawn by this
+  // file) + representative ticks + spacing callout + zone extent dimension
   const tieTopY = beamY + (cover * 0.4) * scale;
   const tieBotY = beamY + beamH - (cover * 0.4) * scale;
   const zoneRowY = beamY + beamH + 50;
   stirrupZones.forEach((z) => {
     const x1 = beamX + z.startX * scale, x2 = beamX + z.endX * scale;
+    svg += `<rect x="${x1}" y="${tieTopY}" width="${x2 - x1}" height="${tieBotY - tieTopY}" class="stirrup-outline"/>`;
     const realCount = Math.max(2, Math.round((z.endX - z.startX) / z.spacing) + 1);
     const drawCount = Math.min(realCount, MAX_DRAWN_TIES_PER_ZONE);
     for (const tx of distributeTicks(x1, x2, drawCount)) {
@@ -767,8 +797,17 @@ function renderElevation(geometry, scale, beamX, beamY, beamW, beamH, l) {
     svg += dimensionLine(x1, zoneRowY, x2, zoneRowY, `${z.markId} \u00d8${z.dia}-${z.legs}L@${z.spacing}`, { orientation: 'h', tick: 5 });
   });
 
+  // Clear-span (Ln, face of first support to face of last support) —
+  // the structural-details-guide's own primary span callout — drawn
+  // above the overall centerline-to-centerline length, not replacing it:
+  // both are legitimate, different-purpose numbers (Ln for moment/
+  // detailing reference, L for formwork/fabrication).
+  const lnLoPx = supportPxRanges[0].hi, lnHiPx = supportPxRanges[supportPxRanges.length - 1].lo;
+  const lnMM = supports[supports.length - 1].x - supports[supports.length - 1].width / 2 - (supports[0].x + supports[0].width / 2);
+  svg += dimensionLine(lnLoPx, zoneRowY + 34, lnHiPx, zoneRowY + 34, `Ln = ${(lnMM / 1000).toFixed(2)}m`, { orientation: 'h' });
+
   // Overall length dimension
-  svg += dimensionLine(beamX, zoneRowY + 34, beamX + beamW, zoneRowY + 34, `L = ${(totalLength / 1000).toFixed(2)}m`, { orientation: 'h' });
+  svg += dimensionLine(beamX, zoneRowY + 68, beamX + beamW, zoneRowY + 68, `L = ${(totalLength / 1000).toFixed(2)}m`, { orientation: 'h' });
 
   svg += `</g>`;
   return svg;

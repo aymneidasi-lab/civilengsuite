@@ -96,12 +96,12 @@ export const DxfWriter = _DxfWriter;
 export const LAYERS = Object.freeze({
   REBAR_TOP: { name: 'REBAR-TOP', hex: '#1f5aa6' }, // bar-dot-shearwall, bar-top
   REBAR_BOTTOM: { name: 'REBAR-BOTTOM', hex: '#c0392b' }, // bar-bottom
-  CONCRETE_OUTLINE: { name: 'CONCRETE-OUTLINE', hex: '#1a1a1a' }, // concrete-outline (stroke color; #f4f4f4 fill has no meaning for an unfilled LWPolyline — HATCH is v1-excluded anyway)
+  CONCRETE_OUTLINE: { name: 'CONCRETE-OUTLINE', hex: '#ffffff' }, // concrete-outline (stroke color; #f4f4f4 fill has no meaning for an unfilled LWPolyline — HATCH is v1-excluded anyway)
   STIRRUP_TIE: { name: 'STIRRUP-TIE', hex: '#2f7a3d' }, // stirrup-outline, stirrup-tick
   ZONE_LABEL: { name: 'ZONE-LABEL', hex: '#8a6d00' }, // zone-label — already this element's confirmed color pre-unification
-  MARK_TAGS: { name: 'MARK-TAGS', hex: '#000000' }, // "white/black neutral" per prompt table — black chosen for visibility on white background
+  MARK_TAGS: { name: 'MARK-TAGS', hex: '#ffffff' }, // "white/black neutral" per prompt table — black chosen for visibility on white background
   DIMENSIONS: { name: 'DIMENSIONS', hex: '#333333' }, // dim-line/dim-tick/dim-label
-  ANNOTATION: { name: 'ANNOTATION', hex: '#111111' }, // view-title etc. — prompt table says color "varies"; also used for support-label, which has NO confirmed CSS rule in either source file (verified: grep found zero rule for .support-label) — flagged, not a table-confirmed assignment.
+  ANNOTATION: { name: 'ANNOTATION', hex: '#ffffff' }, // view-title etc. — prompt table says color "varies"; also used for support-label, which has NO confirmed CSS rule in either source file (verified: grep found zero rule for .support-label) — flagged, not a table-confirmed assignment.
 
   // ── basementWallDiagram additions (برومبت_تحويل_DXF_عام_v1.md's layer table) ──
   REBAR_HORIZONTAL: { name: 'REBAR-HORIZONTAL', hex: '#6c3fa0' }, // bar-dot-horiz (basementWallDiagram). Table: "purple, NEW — not STIRRUP-TIE's green". Verified directly against basementWallDiagram.mjs's own style block: .bar-dot-horiz is ACTUALLY #2f7a3d there (STIRRUP-TIE's exact color) — an SVG/DXF divergence, not a scan error: the shared multi-element DXF layer table keeps basement-wall horizontal steel and stirrup/tie confinement marks separable (toggle one without the other in a combined drawing set), even though the single-element SVG happened to reuse one green for both. Followed as already-decided per that table, not re-litigated here.
@@ -257,11 +257,39 @@ export const LAYERS = Object.freeze({
   // those two is coincidental, not a reuse decision).
   SHEAR_STUDS: { name: 'SHEAR-STUDS', hex: '#1f5aa6' },
   RAIL_LINE: { name: 'RAIL-LINE', hex: '#2a5a8c' },
+
+  // Added for expansionJointDiagram.dxf.mjs. A movement-joint dowel is a
+  // SMOOTH bar, bonded (embedded) on one side and deliberately DEBONDED
+  // (through a sleeve/cap) on the other so the joint can open/close
+  // without restraint — a functionally distinct reinforcement category
+  // from every existing layer here: not flexural (REBAR_TOP/BOTTOM), not
+  // a distributed mesh (REBAR_MESH_LINE), not a confinement tie
+  // (STIRRUP_TIE), not a wall bar (REBAR_HORIZONTAL/EXTRA). Independent
+  // new layer per the same "genuinely distinct sub-feature gets its own
+  // layer" precedent PILE/BEARING_PLATE/DIAGONAL_BAR/LAP_ZONE/
+  // NODE_MARKER/JOINT_CORE_ZONE/HINGE_ZONE/BLOCK/SHEAR_STUDS/RAIL_LINE
+  // all already establish above — this is the first genuinely new LAYERS
+  // addition since raftPileDiagram's own session (every element built in
+  // between reused only pre-existing layers). Hex chosen distinct from
+  // every existing entry (#6c3fa0/REBAR_HORIZONTAL is the nearest
+  // purple-family neighbor; this uses a separate teal so a combined sheet
+  // can still tell dowels and wall-horizontal bars apart at a glance).
+  DOWEL_BAR: { name: 'DOWEL-BAR', hex: '#0e7c7b' },
 });
 
 const ACI_FALLBACK = {
-  REBAR_TOP: 5, REBAR_BOTTOM: 1, CONCRETE_OUTLINE: 8, STIRRUP_TIE: 3,
-  ZONE_LABEL: 2, MARK_TAGS: 7, DIMENSIONS: 8, ANNOTATION: 8,
+  // CONCRETE_OUTLINE, MARK_TAGS, ANNOTATION all use ACI 7 — the
+  // standard AutoCAD "White" index, which is also the one index that
+  // auto-inverts to black on a white viewer background and white on a
+  // black one. Changed from black/near-black true-color hexes (and, for
+  // the two that weren't already on it, from ACI 8 "dark gray") after a
+  // real black-Model-Space-background DXF viewer render showed these
+  // three layers effectively invisible — screenshot-verified, not a
+  // hypothetical. DIMENSIONS/NODE_MARKER's #333333 is a genuinely
+  // different (dark gray, not black) color and was left unchanged —
+  // not requested, and still has some contrast against pure black.
+  REBAR_TOP: 5, REBAR_BOTTOM: 1, CONCRETE_OUTLINE: 7, STIRRUP_TIE: 3,
+  ZONE_LABEL: 2, MARK_TAGS: 7, DIMENSIONS: 8, ANNOTATION: 7,
   REBAR_HORIZONTAL: 6, REBAR_EXTRA: 2, SOIL: 8, LAP_ZONE: 2,
   NODE_MARKER: 8, BEARING_LABEL: 8, PILE: 5, OPENING_TRIM: 2,
   BEARING_PLATE: 5,
@@ -273,6 +301,7 @@ const ACI_FALLBACK = {
   REBAR_MESH_LINE: 5, // blue family, same ACI index as REBAR_TOP/PILE/BEARING_PLATE/JOINT_CORE_ZONE — hue-matched to #9ab3cf
   SHEAR_STUDS: 5, // blue family, same ACI index as REBAR_TOP — hue-matched to #1f5aa6
   RAIL_LINE: 5, // blue family, same ACI index as PILE/BEARING_PLATE — hue-matched to #2a5a8c
+  DOWEL_BAR: 4, // cyan/teal family — closest ACI standard-color index to #0e7c7b, no existing entry shares this hue
 };
 
 /** Create every layer this kit uses on the given DxfWriter, with an exact

@@ -110,6 +110,8 @@ import {
   distributeTicks,
   minPairwiseDistanceMM,
   DiagramError,
+  defineDashedLType,
+  DASHED_LTYPE_NAME,
 } from './structuralDrawingDxfKit.mjs';
 import { TextHorizontalAlignment, TextVerticalAlignment } from './tarikjabiri-dxf.esm.js';
 
@@ -156,6 +158,23 @@ function fmt0(mm) {
 // regardless of which face a bar is on, so every real-y conversion below
 // is `topY - g.yFromTopMM`, the exact inverse of the SVG source's own
 // screen-down `beamY + g.yFromTopMM*scale`.
+function renderSupportBreakSymbolDXF(dxf, lo, hi, topY, botY) {
+  // Same break-line convention as beamDiagram.mjs's own
+  // renderSupportBreakSymbol — real member outline for the beam itself
+  // is drawn separately; this end callout represents the wall/column it
+  // frames into, not a poured member this sheet is detailing.
+  const cx = (lo + hi) / 2;
+  const breakY = topY - (topY - botY) * 0.32; // topY > botY in this y-up frame, so "32% down from top" is topY - 0.32*(topY-botY)
+  const gap = 9, zig = 9;
+  for (const edgeX of [lo, hi]) {
+    dxf.addLine(point3d(edgeX, topY), point3d(edgeX, breakY + gap), { layerName: LAYERS.CONCRETE_OUTLINE.name });
+    dxf.addLine(point3d(edgeX - zig / 2, breakY + gap), point3d(edgeX + zig / 2, breakY + gap - 11), { layerName: LAYERS.CONCRETE_OUTLINE.name });
+    dxf.addLine(point3d(edgeX - zig / 2, breakY - gap + 11), point3d(edgeX + zig / 2, breakY - gap), { layerName: LAYERS.CONCRETE_OUTLINE.name });
+    dxf.addLine(point3d(edgeX, breakY - gap), point3d(edgeX, botY), { layerName: LAYERS.CONCRETE_OUTLINE.name });
+  }
+  dxf.addLine(point3d(cx, topY), point3d(cx, botY), { layerName: LAYERS.CONCRETE_OUTLINE.name, lineType: DASHED_LTYPE_NAME });
+}
+
 function renderElevationDXF(dxf, geometry, baseY, opts) {
   const {
     totalLength, supports, longitudinalBars, stirrupZones, cover,
@@ -171,7 +190,7 @@ function renderElevationDXF(dxf, geometry, baseY, opts) {
   const supportBotY = baseY - SUPPORT_OVERHANG_MM;
   supports.forEach((s, i) => {
     const { lo, hi } = supportRanges[i];
-    closedRectDXF(dxf, lo, supportBotY, hi - lo, supportTopY - supportBotY, LAYERS.CONCRETE_OUTLINE.name);
+    renderSupportBreakSymbolDXF(dxf, lo, hi, supportTopY, supportBotY);
     const label = s.label || (s.type === 'wall' ? 'W' : 'S') + (i + 1);
     dxfText(dxf, (lo + hi) / 2, supportBotY - MARGIN_MM * 0.3, SUBTITLE_HEIGHT_MM, label, {
       layerName: LAYERS.ANNOTATION.name, hAlign: TextHorizontalAlignment.Center, vAlign: TextVerticalAlignment.Top,
@@ -186,7 +205,10 @@ function renderElevationDXF(dxf, geometry, baseY, opts) {
   // over), not an edge case — shift the tag clear of that support's own
   // outline instead of letting it render on top of it, same collision
   // logic the SVG source's own renderElevation applies (ported to real
-  // support x-ranges here instead of px ranges).
+  // support x-ranges here instead of px ranges). Layer also staggers tag
+  // distance from the bar line — same fix as the SVG source's own
+  // renderElevation, for the same observed symptom (two same-face
+  // groups with similar midpoints placing overlapping tags).
   for (const g of longitudinalBars) {
     const y = topY - g.yFromTopMM;
     const layerName = g.face === 'top' ? LAYERS.REBAR_TOP.name : LAYERS.REBAR_BOTTOM.name;
@@ -199,22 +221,26 @@ function renderElevationDXF(dxf, geometry, baseY, opts) {
       const shiftLeft = collided.lo - SUPPORT_TAG_CLEAR_MM;
       tagX = shiftRight <= g.endX ? shiftRight : (shiftLeft >= g.startX ? shiftLeft : tagX);
     }
-    const tagY = g.face === 'top' ? y + MARK_TAG_OFFSET_MM : y - MARK_TAG_OFFSET_MM;
+    const stagger = MARK_TAG_OFFSET_MM + Math.max(0, (g.layer ?? 1) - 1) * MARK_TAG_OFFSET_MM * 1.8;
+    const tagY = g.face === 'top' ? y + stagger : y - stagger;
     barMarkTagDXF(dxf, tagX, tagY, `${g.markId} \u00d8${fmt0(g.dia)}-${g.count}`, LAYERS.MARK_TAGS.name);
   }
 
-  // Stirrup zones — representative ticks + spacing callout, one
-  // dimension-line row shared by every zone (safe: stirrupZones are
-  // already guaranteed non-overlapping in X by computeBeamDiagramGeometry's
-  // own assertNoIntervalOverlap, so their labels can never collide
+  // Stirrup zones — bounding outline (new: was ticks-only before) +
+  // representative ticks + spacing callout, one dimension-line row
+  // shared by every zone (safe: stirrupZones are already guaranteed
+  // non-overlapping in X by computeBeamDiagramGeometry's own
+  // assertNoIntervalOverlap, so their labels can never collide
   // horizontally on one shared row).
   const tieTopY = topY - cover * 0.4;
   const tieBotY = baseY + cover * 0.4;
   const supportLabelY = supportBotY - MARGIN_MM * 0.3;
   const zoneRowY = supportLabelY - MARGIN_MM * 1.5;
-  const lengthRowY = zoneRowY - MARGIN_MM * 1.8;
+  const lnRowY = zoneRowY - MARGIN_MM * 1.8;
+  const lengthRowY = lnRowY - MARGIN_MM * 1.8;
   stirrupZones.forEach((z) => {
     const x1 = z.startX, x2 = z.endX;
+    closedRectDXF(dxf, x1, tieBotY, x2 - x1, tieTopY - tieBotY, LAYERS.STIRRUP_TIE.name);
     const realCount = Math.max(2, Math.round((z.endX - z.startX) / z.spacing) + 1);
     const drawCount = Math.min(realCount, MAX_DRAWN_TIES_PER_ZONE);
     for (const tx of distributeTicks(x1, x2, drawCount)) {
@@ -223,14 +249,25 @@ function renderElevationDXF(dxf, geometry, baseY, opts) {
     dimensionLineDXF(dxf, x1, zoneRowY, x2, zoneRowY, `${z.markId} \u00d8${fmt0(z.dia)}-${z.legs}L@${fmt0(z.spacing)}`, { orientation: 'h', textHeightMM: DIM_TEXT_HEIGHT_MM });
   });
 
+  // Clear-span (Ln, face of first support to face of last support) —
+  // the structural-details-guide's own primary span callout — drawn
+  // above the overall centerline-to-centerline length, not replacing
+  // it: both are legitimate, different-purpose numbers (Ln for moment/
+  // detailing reference, L for formwork/fabrication).
+  const lnLo = supportRanges[0].hi, lnHi = supportRanges[supportRanges.length - 1].lo;
+  dimensionLineDXF(dxf, lnLo, lnRowY, lnHi, lnRowY, `Ln = ${((lnHi - lnLo) / 1000).toFixed(2)}m`, { orientation: 'h', textHeightMM: DIM_TEXT_HEIGHT_MM });
+
   dimensionLineDXF(dxf, 0, lengthRowY, totalLength, lengthRowY, `L = ${(totalLength / 1000).toFixed(2)}m`, { orientation: 'h', textHeightMM: DIM_TEXT_HEIGHT_MM });
 
   // View title well clear of the highest a top-face bar's own mark tag
-  // can reach (tag center at up to topY + MARK_TAG_OFFSET_MM, tag TEXT
-  // extending a further ~MARK_TAG_RADIUS_MM*0.6 above that per
-  // barMarkTagDXF's own text-height default) — MARGIN_MM*2 clears that
-  // with real margin to spare for any realistic cover/dia combination.
-  const titleY = topY + MARGIN_MM * 2;
+  // can reach (tag center at up to topY + stagger, stagger now up to
+  // MARK_TAG_OFFSET_MM*1.8*(maxLayer-1) beyond the old fixed
+  // MARK_TAG_OFFSET_MM — MARGIN_MM*2 no longer guaranteed clear for a
+  // high layer count, so this now measures the real highest tag instead
+  // of assuming a fixed single-layer offset).
+  const maxTopLayer = longitudinalBars.filter((g) => g.face === 'top').reduce((m, g) => Math.max(m, g.layer ?? 1), 1);
+  const highestTagTopY = topY + MARK_TAG_OFFSET_MM + Math.max(0, maxTopLayer - 1) * MARK_TAG_OFFSET_MM * 1.8 + MARK_TAG_RADIUS_MM;
+  const titleY = Math.max(topY + MARGIN_MM * 2, highestTagTopY + MARGIN_MM * 0.6);
   dxfText(dxf, totalLength / 2, titleY, SUBTITLE_HEIGHT_MM, 'ELEVATION', {
     layerName: LAYERS.ANNOTATION.name, hAlign: TextHorizontalAlignment.Center, vAlign: TextVerticalAlignment.Bottom,
   });
@@ -287,6 +324,7 @@ export function renderBeamDiagramDXF(geometry, opts = {}) {
   const dxf = new DxfWriter();
   dxf.setUnits(Units.Millimeters);
   defineDxfLayers(dxf);
+  defineDashedLType(dxf);
 
   // Stacked bottom-to-top in DXF model space: SECTION-CUTS row lowest,
   // ELEVATION above it — reproducing the SVG source's own top-to-bottom
