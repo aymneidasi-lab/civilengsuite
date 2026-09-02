@@ -791,7 +791,14 @@ const CSP_COMMON = [
   // [V2-TTS] media-src: 'none' → 'self'
   // HTMLAudioElement in the chat widget loads audio from /api/tts (same origin).
   // 'self' permits that. 'none' blocked it, silently preventing proxy TTS playback.
-  "media-src 'self'",
+  // [V4-TTS] media-src: added 'data:' -- audioUnlock() (client JS) plays a 43-byte
+  // silent data:audio/wav;base64,... clip on first user gesture to satisfy iOS
+  // Safari's audio-unlock requirement ahead of real TTS playback. 'self' alone does
+  // not cover data: URIs, so that call was CSP-blocked (silently -- its promise
+  // rejection is caught and swallowed by design). Low risk: the source is a fixed,
+  // hardcoded, non-user-controlled 43-byte clip, not a general data: allowance for
+  // arbitrary/attacker-influenced audio.
+  "media-src 'self' data:",
   "style-src 'self' 'unsafe-inline'",
   "font-src 'self'",
   "img-src 'self' data: https://www.google-analytics.com",
