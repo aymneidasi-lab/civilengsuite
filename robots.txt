@@ -1,48 +1,15 @@
-# ═══════════════════════════════════════════════════════
-#  robots.txt — Civil Engineering Suite
-#  https://civilengsuite.pages.dev
-#  Updated: 2026-04-23
-#
-#  FIX LOG (2026-04-14):
-#  [F1] Removed: Disallow: /*?*utm_
-#       → Was blocking Google from discovering canonical URLs through
-#         shared social/email links that include UTM parameters.
-#         Google ignores UTM params for deduplication — no need to block.
-#  [F2] Added: Disallow: /public/
-#       → Prevents crawlers from reaching encrypted .enc files.
-#  [F3] Kept /manifest.json Allow BEFORE /*.json$ Disallow (order correct).
-#
-#  FIX LOG (2026-04-17):
-#  [F4] Added: Disallow: /payment/
-#       → Payment checkout flow must never be indexed.
-#         Contains sensitive user-input forms; no SEO value.
-#  [F5] Added: Disallow: /api/payment/
-#       → Server-side payment endpoints must not be crawled.
-#         Crawling these returns 405/400 responses and wastes crawl budget.
-#
-#  FIX LOG (2026-04-23): AGENT READINESS
-#  [A1] Added: Content-Signal directives (https://contentsignals.org/)
-#       → Declares AI usage preferences per draft-romm-aipref-contentsignals.
-#         ai-train=no  — content must not be used to train AI/ML models.
-#         search=yes   — content may be indexed and surfaced in search results.
-#         ai-input=no  — content must not be used as direct AI system input.
-#       These directives supplement (do not replace) the per-bot User-agent
-#       rules below. Compliant AI systems should honour both.
-# ═══════════════════════════════════════════════════════
-
-# ── Content Signals — AI usage preferences (https://contentsignals.org/) ──────
-# [A1] Proprietary engineering software. Training and direct AI input disallowed.
+# robots.txt — Civil Engineering Suite
+# https://civilengsuite.pages.dev
 
 # ── Allow all compliant search engine bots ──
 User-agent: *
+Content-Signal: search=yes, ai-input=no, ai-train=no
 Allow: /
 Allow: /manifest.json
 Disallow: /cdn-cgi/
 Disallow: /*.json$
-# [F2] Block encrypted source files from being crawled / indexed
 Disallow: /public/
 Disallow: /api/
-# [F4] Block payment checkout flow from indexing
 Disallow: /payment/
 Disallow: /*og-image.html
 

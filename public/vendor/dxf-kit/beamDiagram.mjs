@@ -109,6 +109,7 @@ import {
   stirrupTick, distributeTicks, barMarkTag, fitScale, scheduleTable, svgToDataUri,
 } from './structuralDrawingKit.mjs';
 import { parseBeamAsciiCommand } from './beamAsciiToPayload.mjs';
+import { curtailmentLegendSimpleSVG, CURTAILMENT_LEGEND_SIMPLE_NATURAL_HEIGHT_PT, CURTAILMENT_LEGEND_SIMPLE_NATURAL_WIDTH_PT } from './beamCurtailmentLegendSimple.mjs';
 
 export { DiagramError, svgToDataUri };
 
@@ -603,6 +604,10 @@ const L = {
     workshopExtentSuffix: ' (extent)',
     workshopCaption: 'Shop/workshop drawing: sequential bar numbers, a fixing-order convention (bottom bars \u2192 stirrups \u2192 top bars), and install notes below are a general RC fixing-practice convention this tool applies for readability \u2014 they are not a project-specific method statement. Verify against your own design and site sequencing before fabrication. The "Shape" column is a cross-reference label only (rows sharing a letter share the same bend pattern); this tool does not draw bend/pictogram geometry.',
     extraSectionLabel: 'extra section',
+    // This session's addition — opt-in curtailment legend panel (see
+    // beamCurtailmentLegendSimple.mjs). No parens/dash, matching this
+    // file's own established safe-string convention for new strings.
+    curtailmentLegendTitle: 'Curtailment convention, simple beam under vertical loads only, ECP 2001 p.51',
   },
   ar: {
     title: (id) => `تفريد حديد الكمرة ${id}`,
@@ -638,6 +643,9 @@ const L = {
     workshopExtentSuffix: ' امتداد',
     workshopCaption: 'رسم ورشة: الأرقام التسلسلية للأسياخ وتسلسل التركيب المقترح من السفلي إلى الكانات إلى العلوي وملاحظات التركيب أدناه هي عرف تنفيذي عام يطبقه هذا الأداة لتسهيل القراءة، وليست بياناً تنفيذياً خاصاً بمشروعك. راجعها وفق تصميمك وترتيب التنفيذ الفعلي في الموقع قبل التصنيع. عمود الشكل مرجع مقارنة فقط، الصفوف التي تشترك في نفس الرمز تشترك في نفس نمط الانحناء، هذه الأداة لا ترسم شكل الانحناء نفسه.',
     extraSectionLabel: 'قطاع إضافي',
+    // This session's addition — see the matching English key's comment.
+    // Parenthesis/dash-free, per the warning at the top of this block.
+    curtailmentLegendTitle: 'عرف تقطيع تسليح الكمرات البسيطة تحت أحمال رأسية فقط، الكود المصري 2001 صفحة 51',
   },
 };
 
@@ -683,13 +691,29 @@ export function renderBeamDiagramSVG(geometry, opts = {}) {
 
   const captionY = tableY + table.height + 34;
   const captionLines = captionLineCount(l.caption, 110);
-  const CANVAS_H = captionY + captionLines * 15 + 24;
+
+  // Optional static legend panel (see beamCurtailmentLegendSimple.mjs for
+  // full scope notes): caller-opt-in only, because it's specific to the
+  // "simple beam, vertical loads only" scenario, not universal to every
+  // beam this module can render -- computeBeamDiagramGeometry() has no
+  // way to know if that scenario applies, so this module doesn't guess
+  // either; it only draws the legend when explicitly asked.
+  assertOneOf('curtailmentLegend', opts.curtailmentLegend || false, [false, 'simple']);
+  const legendY = captionY + captionLines * 15 + 30;
+  const legendW = CANVAS_W - 120;
+  const legendH = legendW * (CURTAILMENT_LEGEND_SIMPLE_NATURAL_HEIGHT_PT / CURTAILMENT_LEGEND_SIMPLE_NATURAL_WIDTH_PT);
+  const legendBlock = opts.curtailmentLegend === 'simple'
+    ? `<text x="${CANVAS_W / 2}" y="${legendY - 10}" text-anchor="middle" class="view-title" dir="${l.dirAttr}">${esc(l.curtailmentLegendTitle)}</text>` +
+      curtailmentLegendSimpleSVG({ x: 60, y: legendY, width: legendW })
+    : '';
+  const CANVAS_H = (opts.curtailmentLegend === 'simple' ? legendY + legendH + 20 : captionY + captionLines * 15 + 24);
 
   const style = kitStyleBlock({ defaultFontStack, scriptFontStack, lang }) + `
     .beam-title { font-size:20px; font-weight:bold; fill:#111; font-family: ${scriptFontStack}; }
     .zone-label { font-size:10.5px; fill:#2f7a3d; font-family: ${defaultFontStack}; }
     .support-label { font-size:11px; fill:#333; font-family: ${defaultFontStack}; }
-    .support-break-line { stroke:#1a1a1a; stroke-width:1.7; fill:none; }`;
+    .support-break-line { stroke:#1a1a1a; stroke-width:1.7; fill:none; }
+    .section-cut-label { font-size:10px; fill:#555; font-family: ${defaultFontStack}; }`;
 
   return `<svg viewBox="0 0 ${CANVAS_W} ${CANVAS_H}" xmlns="http://www.w3.org/2000/svg" font-family="${defaultFontStack}">
   <defs>${hatchDefs()}</defs>
@@ -700,6 +724,7 @@ export function renderBeamDiagramSVG(geometry, opts = {}) {
   ${renderSections(geometry, sectionScale, sectionsX0, sectionsY, l)}
   ${table.svg}
   ${renderCaptionAt(l.caption, { x: lang === 'ar' ? CANVAS_W - 60 : 60, startY: captionY, lang, maxCharsPerLine: 110, lineHeight: 15 })}
+  ${legendBlock}
 </svg>`;
 }
 

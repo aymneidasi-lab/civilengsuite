@@ -100,7 +100,8 @@ export const LAYERS = Object.freeze({
   STIRRUP_TIE: { name: 'STIRRUP-TIE', hex: '#2f7a3d' }, // stirrup-outline, stirrup-tick
   ZONE_LABEL: { name: 'ZONE-LABEL', hex: '#8a6d00' }, // zone-label — already this element's confirmed color pre-unification
   MARK_TAGS: { name: 'MARK-TAGS', hex: '#ffffff' }, // "white/black neutral" per prompt table — black chosen for visibility on white background
-  DIMENSIONS: { name: 'DIMENSIONS', hex: '#333333' }, // dim-line/dim-tick/dim-label
+  DIMENSIONS: { name: 'DIMENSIONS', hex: '#ff00ff' }, // dim-line/dim-tick — magenta. Changed from #333333 (dark gray) after a real black-Model-Space-background DXF render showed dimension lines effectively invisible even after the earlier black->white pass (that pass deliberately left this alone since #333333 isn't literally black — screenshot evidence now shows it needed fixing too, not guessed pre-emptively).
+  DIM_TEXT: { name: 'DIM-TEXT', hex: '#00ff00' }, // dim-label only — split out of DIMENSIONS so the line and its text can carry different colors (explicit request); dimensionLineDXF's own line/tick entities stay on DIMENSIONS, only its text entity moves here. Every other caller of dxfText() is unaffected — this split is local to dimensionLineDXF alone.
   ANNOTATION: { name: 'ANNOTATION', hex: '#ffffff' }, // view-title etc. — prompt table says color "varies"; also used for support-label, which has NO confirmed CSS rule in either source file (verified: grep found zero rule for .support-label) — flagged, not a table-confirmed assignment.
 
   // ── basementWallDiagram additions (برومبت_تحويل_DXF_عام_v1.md's layer table) ──
@@ -289,7 +290,7 @@ const ACI_FALLBACK = {
   // different (dark gray, not black) color and was left unchanged —
   // not requested, and still has some contrast against pure black.
   REBAR_TOP: 5, REBAR_BOTTOM: 1, CONCRETE_OUTLINE: 7, STIRRUP_TIE: 3,
-  ZONE_LABEL: 2, MARK_TAGS: 7, DIMENSIONS: 8, ANNOTATION: 7,
+  ZONE_LABEL: 2, MARK_TAGS: 7, DIMENSIONS: 6, DIM_TEXT: 3, ANNOTATION: 7,
   REBAR_HORIZONTAL: 6, REBAR_EXTRA: 2, SOIL: 8, LAP_ZONE: 2,
   NODE_MARKER: 8, BEARING_LABEL: 8, PILE: 5, OPENING_TRIM: 2,
   BEARING_PLATE: 5,
@@ -540,6 +541,7 @@ export const LABEL_GAP_MM = 120; // convention — mm-space analogue of the SVG 
 
 export function dimensionLineDXF(dxf, x1, y1, x2, y2, label, opts = {}) {
   const layerName = LAYERS.DIMENSIONS.name;
+  const textLayerName = LAYERS.DIM_TEXT.name;
   const orientation = opts.orientation || (Math.abs(x1 - x2) >= Math.abs(y1 - y2) ? 'h' : 'v');
   const tick = opts.tick ?? TICK_CAP_MM; // mm-space default — the original's px default (6) does not carry over as a unit
   const gap = opts.labelGapMM ?? LABEL_GAP_MM;
@@ -553,8 +555,8 @@ export function dimensionLineDXF(dxf, x1, y1, x2, y2, label, opts = {}) {
 
   const midX = (x1 + x2) / 2, midY = (y1 + y2) / 2;
   entities.label = orientation === 'h'
-    ? dxfText(dxf, midX, midY + gap, textHeightMM, label, { layerName, hAlign: TextHorizontalAlignment.Center, vAlign: TextVerticalAlignment.Bottom })
-    : dxfText(dxf, midX - gap, midY, textHeightMM, label, { layerName, hAlign: TextHorizontalAlignment.Right, vAlign: TextVerticalAlignment.Middle });
+    ? dxfText(dxf, midX, midY + gap, textHeightMM, label, { layerName: textLayerName, hAlign: TextHorizontalAlignment.Center, vAlign: TextVerticalAlignment.Bottom })
+    : dxfText(dxf, midX - gap, midY, textHeightMM, label, { layerName: textLayerName, hAlign: TextHorizontalAlignment.Right, vAlign: TextVerticalAlignment.Middle });
   return entities;
 }
 
