@@ -2268,6 +2268,18 @@ const KB_FIELD_TIER = {
   'Applicability': 3, 'Scope (AR)': 3, 'Keywords': 3, 'Confidence Tier': 3,
   'Corroborating Source': 3, 'Known Issue': 3, 'Verified By': 3,
   'Revision Note': 3, 'Source Verified': 3,
+  // Added for the Structural Details source (ECP 203 Appendix 2 — construction
+  // detail drawings/rules, see parse_structural_details() in build_kb_data.py).
+  // 'Page' and 'Code' above are REUSED as-is (same meaning: a citable code +
+  // printed page number), not redefined, so a Structural Details record and
+  // an equation record degrade under the same rule. 'Detail' is this source's
+  // equivalent of 'Formula'/'LaTeX' — the actual payload, tier 1 because
+  // without it the record is just a citation to nothing. Tier 2/3 mirror the
+  // equations' Division/Applicability split: what helps interpret the detail
+  // vs. what's nice-to-have provenance.
+  'Detail': 1,
+  'Source Document': 2, 'Type': 2, 'PDF Page': 2,
+  'Related Refs': 3, 'Reference Image': 3,
 };
 const KB_FIELD_LABEL_RE = /^([A-Za-z][A-Za-z \-()]*?):\s?(.*)$/;
 
@@ -2346,7 +2358,7 @@ function packKbFactsBlock(scored, maxChars) {
 
   return (
     '\n\n════════════════════════════════════════\n' +
-    'RETRIEVED FACTS (Footing Pro / PC Suite / ECP 203 / ACI 318 — grounded, may be partial)\n' +
+    'RETRIEVED FACTS (Footing Pro / PC Suite / ECP 203 / ACI 318 / ECP 203 Structural Details — grounded, may be partial)\n' +
     '════════════════════════════════════════\n' +
     'Use these if relevant to the question. Do not contradict them. If the answer\n' +
     "isn't in these facts or in the rules above, say you don't have that exact\n" +
