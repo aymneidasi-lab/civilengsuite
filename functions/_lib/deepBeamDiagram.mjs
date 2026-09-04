@@ -380,39 +380,49 @@ export function renderDeepBeamDiagramSVG(geometry, opts = {}) {
 // comment describes in full — see that file for the build-failure
 // root cause and the tryNewElementDiagramParsers contract this
 // satisfies. This module's raw shape has two variable-length arrays
-// (supports, mainBars) and a two-key nested group (webReinforcement),
-// so its flat-ASCII encoding uses colon/comma-packed sub-tokens
-// (each still a single whitespace-free key=value pair) rather than
-// cantileverSlabDiagram.mjs's flatter one-field-per-key scheme:
+// (supports, mainBars) and a two-key nested group (webReinforcement);
+// unlike an earlier draft of this parser, these are NOT colon/comma-
+// packed sub-tokens — they use the same flat one-field-per-key scheme
+// as every sibling parser (cantileverSlabDiagram.mjs, elevatorPitDiagram
+// .mjs), with a numbered-group suffix (m{n}...) for the two variable-
+// length arrays, identical in spirit to raftPileDiagram.mjs's own
+// col{n}../pile{n}.. convention:
 //
 //   id=<string>                  default DB1
 //   unit=mm|cm|m                 default mm
-//   span=<number>                -> spanClearMM   (required)
+//   span=<number>                 -> spanClearMM   (required)
 //   depth=<number>                -> depthMM        (required)
 //   width=<number>                -> widthMM        (required)
 //   cover=<number>                -> coverMM        (required)
-//   supports=W1[:LABEL1],W2[:LABEL2]
-//                                  -> supports[]    (required, exactly
-//                                     2 groups; LABEL defaults to
-//                                     C1/C2 inside compute*Geometry)
-//   mainbars=FACE:DIA:COUNT[:EXTRA...],...
-//                                  -> mainBars[]    (required, 1-12
-//                                     comma-separated groups). FACE is
-//                                     top|bottom. Each EXTRA segment
-//                                     after COUNT is order-independent:
-//                                     a numeric one is cuttingLengthMM,
-//                                     a non-numeric one is markId — so
-//                                     both "bottom:20:6:5800" and
-//                                     "bottom:20:6:M1" and
-//                                     "bottom:20:6:5800:M1" are valid.
-//   webh=DIA:SPACING[:CUTLEN]      -> webReinforcement.horizontal
-//                                     (required)
-//   webv=DIA:SPACING[:CUTLEN]      -> webReinforcement.vertical
-//                                     (required)
+//   s1w=<number>, s2w=<number>    -> supports[0].widthMM,
+//                                     supports[1].widthMM (both
+//                                     required — exactly 2 end
+//                                     supports, v1 scope)
+//   s1mark=<string>, s2mark=<string>
+//                                  -> supports[].label (optional;
+//                                     defaults to C1/C2 inside
+//                                     compute*Geometry)
+//   mainbars=<integer N>          -> count of main-bar groups scanned
+//                                     below (required, 1-12)
+//   m{n}face=top|bottom           -> mainBars[n-1].face   (required)
+//   m{n}dia=<number>              -> mainBars[n-1].diameterMM (required)
+//   m{n}count=<integer>           -> mainBars[n-1].count  (required)
+//   m{n}cut=<number>              -> mainBars[n-1].cuttingLengthMM
+//                                     (optional)
+//   m{n}mark=<string>             -> mainBars[n-1].markId (optional;
+//                                     defaults to M{n} inside
+//                                     compute*Geometry)
+//   avhdia=<number>, avhspacing=<number>, avhcut=<number>
+//                                  -> webReinforcement.horizontal (Avh)
+//                                     (dia/spacing required, cut optional)
+//   avdia=<number>, avspacing=<number>, avcut=<number>
+//                                  -> webReinforcement.vertical (Av)
+//                                     (dia/spacing required, cut optional)
 //
-// e.g. "deepbeam id=DB1 span=4000 depth=1200 width=300 cover=40
-//       supports=400:C1,400:C2 mainbars=bottom:20:6,top:16:4
-//       webh=10:200 webv=10:200"
+// e.g. "deepbeam id=DB1 span=4000 depth=1800 width=400 cover=40
+//       s1w=400 s2w=400 mainbars=2 m1face=bottom m1dia=20 m1count=4
+//       m2face=top m2dia=16 m2count=3 avhdia=10 avhspacing=200
+//       avdia=10 avspacing=150"
 //
 // Same three-shape return contract, same "never throws" discipline,
 // as cantileverSlabDiagram.mjs's own parseDiagramCommand — see that
@@ -432,38 +442,35 @@ function tokenizeDiagramCommand(text) {
   return tokens;
 }
 
-function parseSupportsToken(v) {
-  return v.split(',').map((part) => {
-    const bits = part.split(':');
-    return { widthMM: Number(bits[0]), label: bits[1] };
-  });
+function readSupportsFlat(t, num) {
+  return [
+    { widthMM: num('s1w'), label: t.s1mark },
+    { widthMM: num('s2w'), label: t.s2mark },
+  ];
 }
 
-function parseMainBarsToken(v) {
-  return v.split(',').map((part) => {
-    const bits = part.split(':');
-    const group = {
-      face: (bits[0] || '').toLowerCase(),
-      diameterMM: Number(bits[1]),
-      count: Number(bits[2]),
-    };
-    for (const extra of bits.slice(3)) {
-      if (extra === undefined || extra === '') continue;
-      const n = Number(extra);
-      if (Number.isFinite(n)) group.cuttingLengthMM = n;
-      else group.markId = extra;
-    }
-    return group;
-  });
-}
-
-function parseWebToken(v) {
-  const bits = v.split(':');
-  return {
-    diameterMM: Number(bits[0]),
-    spacingMM: Number(bits[1]),
-    cuttingLengthMM: bits[2] !== undefined && bits[2] !== '' ? Number(bits[2]) : null,
-  };
+// `mainbars=N` gives the group count; groups themselves are scanned as
+// m1face/m1dia/m1count[/m1cut][/m1mark], m2face/m2dia/m2count..., etc.
+// — same numbered-suffix convention raftPileDiagram.mjs's own
+// col{n}../pile{n}.. scan uses. N itself is left un-validated here
+// (NaN/out-of-range values fall straight through to mainBars=[] or a
+// partially-NaN'd array, which computeDeepBeamDiagramGeometry's own
+// BAD_PARAM/OUT_OF_RANGE checks catch) — same "zero validation in the
+// parser, one source of truth in compute*Geometry" discipline every
+// sibling parser here already follows.
+function readMainBarsFlat(t, num, count) {
+  const groups = [];
+  if (!Number.isFinite(count)) return groups;
+  for (let i = 1; i <= count; i++) {
+    groups.push({
+      face: t[`m${i}face`] !== undefined ? t[`m${i}face`].toLowerCase() : undefined,
+      diameterMM: num(`m${i}dia`),
+      count: num(`m${i}count`),
+      cuttingLengthMM: t[`m${i}cut`] !== undefined ? num(`m${i}cut`) : null,
+      markId: t[`m${i}mark`],
+    });
+  }
+  return groups;
 }
 
 export function parseDiagramCommand(promptText) {
@@ -485,11 +492,11 @@ export function parseDiagramCommand(promptText) {
       depthMM: num('depth'),
       widthMM: num('width'),
       coverMM: num('cover'),
-      supports: t.supports !== undefined ? parseSupportsToken(t.supports) : undefined,
-      mainBars: t.mainbars !== undefined ? parseMainBarsToken(t.mainbars) : undefined,
+      supports: readSupportsFlat(t, num),
+      mainBars: readMainBarsFlat(t, num, t.mainbars !== undefined ? Number(t.mainbars) : NaN),
       webReinforcement: {
-        horizontal: t.webh !== undefined ? parseWebToken(t.webh) : undefined,
-        vertical: t.webv !== undefined ? parseWebToken(t.webv) : undefined,
+        horizontal: { diameterMM: num('avhdia'), spacingMM: num('avhspacing'), cuttingLengthMM: t.avhcut !== undefined ? num('avhcut') : null },
+        vertical: { diameterMM: num('avdia'), spacingMM: num('avspacing'), cuttingLengthMM: t.avcut !== undefined ? num('avcut') : null },
       },
     };
 

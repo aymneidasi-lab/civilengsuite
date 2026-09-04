@@ -304,12 +304,12 @@ export function renderCantileverSlabDiagramSVG(geometry, opts = {}) {
 //   width=<number>               -> widthMM               (required)
 //   cover=<number>               -> coverMM               (required)
 //   support=<number>             -> supportWidthMM        (required)
-//   topmaindia=<number>          -> topMainBars.diameterMM     (required)
-//   topmainspacing=<number>      -> topMainBars.spacingMM      (required)
-//   topmaincut=<number>          -> topMainBars.cuttingLengthMM (optional)
-//   bottomdia=<number>           -> bottomBars.diameterMM      (required)
-//   bottomspacing=<number>       -> bottomBars.spacingMM       (required)
-//   bottomcut=<number>           -> bottomBars.cuttingLengthMM (optional)
+//   topdia=<number>               -> topMainBars.diameterMM     (required)
+//   topspacing=<number>           -> topMainBars.spacingMM      (required)
+//   topcut=<number>               -> topMainBars.cuttingLengthMM (optional)
+//   botdia=<number>               -> bottomBars.diameterMM      (required)
+//   botspacing=<number>           -> bottomBars.spacingMM       (required)
+//   botcut=<number>               -> bottomBars.cuttingLengthMM (optional)
 //   topextradia/topextraspacing/topextracut/topextralen
 //                                 -> topExtraBars group (optional;
 //                                    attempted only if ANY of these
@@ -318,8 +318,8 @@ export function renderCantileverSlabDiagramSVG(geometry, opts = {}) {
 //                                    attempted if EITHER key is present)
 //
 // e.g. "cantileverslab id=CS1 projection=1500 thickness=200 width=3000
-//       cover=25 support=300 topmaindia=12 topmainspacing=150
-//       bottomdia=10 bottomspacing=200"
+//       cover=25 support=300 topdia=12 topspacing=150
+//       botdia=10 botspacing=200"
 //
 // Return shape (matches tryNewElementDiagramParsers' expectations
 // exactly — see that function's own header in chat.js):
@@ -371,14 +371,14 @@ export function parseDiagramCommand(promptText) {
       coverMM: num('cover'),
       supportWidthMM: num('support'),
       topMainBars: {
-        diameterMM: num('topmaindia'),
-        spacingMM: num('topmainspacing'),
-        cuttingLengthMM: t.topmaincut !== undefined ? num('topmaincut') : null,
+        diameterMM: num('topdia'),
+        spacingMM: num('topspacing'),
+        cuttingLengthMM: t.topcut !== undefined ? num('topcut') : null,
       },
       bottomBars: {
-        diameterMM: num('bottomdia'),
-        spacingMM: num('bottomspacing'),
-        cuttingLengthMM: t.bottomcut !== undefined ? num('bottomcut') : null,
+        diameterMM: num('botdia'),
+        spacingMM: num('botspacing'),
+        cuttingLengthMM: t.botcut !== undefined ? num('botcut') : null,
       },
     };
 

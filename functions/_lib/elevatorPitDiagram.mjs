@@ -298,15 +298,16 @@ export function renderElevatorPitDiagramSVG(geometry, opts = {}) {
 //   cover=<number>                -> coverMM               (required)
 //   extdia/extspacing             -> exteriorVerticalBars  (required)
 //   intdia/intspacing             -> interiorVerticalBars  (required)
-//   horizdia/horizspacing         -> horizontalBars        (required)
+//   hdia/hspacing                 -> horizontalBars        (required)
 //   meshdia/meshspacing           -> baseSlabMesh          (required)
-//   sump=LENGTH:WIDTH:DEPTH[:OFFSETX:OFFSETY]
-//                                  -> sump (optional)
+//   sumplength/sumpwidth/sumpdepth[/sumpoffx][/sumpoffy]
+//                                  -> sump (optional; attempted if ANY
+//                                     of these five keys is present)
 //
 // e.g. "elevatorpit id=EP1 innerlength=2000 innerwidth=1800
 //       wallthickness=300 pitdepth=1500 slabthickness=400 cover=50
-//       extdia=16 extspacing=150 intdia=12 intspacing=200 horizdia=12
-//       horizspacing=200 meshdia=12 meshspacing=200"
+//       extdia=16 extspacing=150 intdia=12 intspacing=200 hdia=12
+//       hspacing=200 meshdia=12 meshspacing=200"
 //
 // Same three-shape return contract, same "never throws" discipline,
 // as cantileverSlabDiagram.mjs's own parseDiagramCommand — see that
@@ -326,14 +327,13 @@ function tokenizeDiagramCommand(text) {
   return tokens;
 }
 
-function parseSumpToken(v) {
-  const bits = v.split(':');
+function readSumpTokens(t, num) {
   return {
-    lengthMM: Number(bits[0]),
-    widthMM: Number(bits[1]),
-    depthMM: Number(bits[2]),
-    offsetXMM: bits[3] !== undefined && bits[3] !== '' ? Number(bits[3]) : undefined,
-    offsetYMM: bits[4] !== undefined && bits[4] !== '' ? Number(bits[4]) : undefined,
+    lengthMM: num('sumplength'),
+    widthMM: num('sumpwidth'),
+    depthMM: num('sumpdepth'),
+    offsetXMM: t.sumpoffx !== undefined ? num('sumpoffx') : undefined,
+    offsetYMM: t.sumpoffy !== undefined ? num('sumpoffy') : undefined,
   };
 }
 
@@ -360,10 +360,12 @@ export function parseDiagramCommand(promptText) {
       coverMM: num('cover'),
       exteriorVerticalBars: { diameterMM: num('extdia'), spacingMM: num('extspacing') },
       interiorVerticalBars: { diameterMM: num('intdia'), spacingMM: num('intspacing') },
-      horizontalBars: { diameterMM: num('horizdia'), spacingMM: num('horizspacing') },
+      horizontalBars: { diameterMM: num('hdia'), spacingMM: num('hspacing') },
       baseSlabMesh: { diameterMM: num('meshdia'), spacingMM: num('meshspacing') },
     };
-    if (t.sump !== undefined) raw.sump = parseSumpToken(t.sump);
+    if (t.sumplength !== undefined || t.sumpwidth !== undefined || t.sumpdepth !== undefined || t.sumpoffx !== undefined || t.sumpoffy !== undefined) {
+      raw.sump = readSumpTokens(t, num);
+    }
 
     const geometry = computeElevatorPitDiagramGeometry(raw);
     return { ok: true, type: TYPE, geometry };
