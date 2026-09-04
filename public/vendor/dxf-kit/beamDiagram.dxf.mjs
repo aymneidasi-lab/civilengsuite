@@ -114,6 +114,7 @@ import {
   DASHED_LTYPE_NAME,
 } from './structuralDrawingDxfKit.mjs';
 import { TextHorizontalAlignment, TextVerticalAlignment } from './tarikjabiri-dxf.esm.js';
+import { addCurtailmentLegendSimpleDXF } from './beamCurtailmentLegendSimpleDXF.mjs';
 
 // Duplicated from beamDiagram.mjs — that file does not export this (an
 // unexported module-level const used only inside its own renderElevation),
@@ -259,6 +260,28 @@ function renderElevationDXF(dxf, geometry, baseY, opts) {
 
   dimensionLineDXF(dxf, 0, lengthRowY, totalLength, lengthRowY, `L = ${(totalLength / 1000).toFixed(2)}m`, { orientation: 'h', textHeightMM: DIM_TEXT_HEIGHT_MM });
 
+  // Section-cut markers — vertical line + label at each geometry.sections
+  // x, so the elevation shows WHERE the section-cut boxes drawn below
+  // actually come from (the reference code figure's own convention —
+  // "\u25b6\u0633" markers on its elevation — neither render path drew this
+  // before). No new layer: ANNOTATION, same reasoning already applied to
+  // support-label above — a cut-location marker is an annotation/
+  // reference mark, not a measured DIMENSIONS value, not rebar, not the
+  // concrete outline. Dashed (DASHED_LTYPE_NAME, now available in this
+  // file since the support-break-symbol update defined it) rather than
+  // solid, for the same "real edge solid, reference marker dashed"
+  // distinction renderSupportBreakSymbolDXF's own centerline already
+  // draws with it — visually consistent within this one sheet, not a
+  // new convention.
+  const cutLineTopY = topY + MARGIN_MM * 0.3;
+  const cutLineBotY = baseY - MARGIN_MM * 0.3;
+  for (const sec of geometry.sections) {
+    dxf.addLine(point3d(sec.x, cutLineBotY), point3d(sec.x, cutLineTopY), { layerName: LAYERS.ANNOTATION.name, lineType: DASHED_LTYPE_NAME });
+    dxfText(dxf, sec.x, cutLineTopY + MARGIN_MM * 0.15, SUBTITLE_HEIGHT_MM * 0.75, sec.label, {
+      layerName: LAYERS.ANNOTATION.name, hAlign: TextHorizontalAlignment.Center, vAlign: TextVerticalAlignment.Bottom,
+    });
+  }
+
   // View title well clear of the highest a top-face bar's own mark tag
   // can reach (tag center at up to topY + stagger, stagger now up to
   // MARK_TAG_OFFSET_MM*1.8*(maxLayer-1) beyond the old fixed
@@ -346,6 +369,19 @@ export function renderBeamDiagramDXF(geometry, opts = {}) {
   dxfText(dxf, overallWidth / 2, captionY, CAPTION_HEIGHT_MM, CAPTION_EN, {
     layerName: LAYERS.ANNOTATION.name, hAlign: TextHorizontalAlignment.Center, vAlign: TextVerticalAlignment.Top,
   });
+
+  // Optional static legend block — opt-in only, same rationale as the SVG
+  // source's own curtailmentLegend option (see
+  // beamCurtailmentLegendSimple.mjs / beamCurtailmentLegendSimpleDXF.mjs):
+  // specific to the "simple beam, vertical loads only" scenario, not
+  // universal to every beam this module renders, so it is drawn only
+  // when the caller explicitly opts in.
+  if (opts.curtailmentLegend !== undefined && opts.curtailmentLegend !== false && opts.curtailmentLegend !== 'simple') {
+    throw new DiagramError('BAD_PARAM', `curtailmentLegend must be false or 'simple', got ${JSON.stringify(opts.curtailmentLegend)}`);
+  }
+  if (opts.curtailmentLegend === 'simple') {
+    addCurtailmentLegendSimpleDXF(dxf, { x: 0, y: captionY - CAPTION_HEIGHT_MM - MARGIN_MM * 1.5, width: overallWidth });
+  }
 
   return dxf.stringify();
 }
