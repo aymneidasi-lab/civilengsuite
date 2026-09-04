@@ -1,76 +1,6 @@
 /**
- * functions/api/chat.js  —  v36  (2026-09-04)
+ * functions/api/chat.js  —  v35  (2026-08-01)
  * ──────────────────────────────────────────────────────────────────────────
- * ════════════════════════════════════════
- * CHANGELOG v36 — DXF EXPORT FACT: CHAT'S OWN CAPABILITY WAS UNDOCUMENTED,
- *                  MODEL FILLED THE GAP FROM THE WRONG SECTION
- * ════════════════════════════════════════
- *
- * CONTEXT: two live standard-mode replies (ces-reply-2026-09-03T11-53-23.txt,
- *   ces-reply-2026-09-03T11-53-31.txt) told the user this chat's DXF export
- *   "will never be added," is PC-Suite-desktop-only, and pointed them to Eng.
- *   Aymn Asi for a future paid release — while the front-end (footing_pro_v94.html,
- *   DXF_MODULE_MAP ~L19580 / dxfBtn ~L19771) and this file's own DXF_READY_TYPES
- *   (~L1898) prove a working, free, client-side DXF download has already
- *   shipped for 21 element types. A third reply in developer mode
- *   (ces-reply-2026-09-03T12-47-13.txt) got it right — but only after the
- *   developer said so in-chat, i.e. DEVELOPER_SYSTEM_PROMPT's CAPABILITY
- *   HONESTY grounding saved that turn, nothing upstream of it did.
- *
- * ROOT CAUSE FOUND: SYSTEM_PROMPT's ONLY description of this chat's own
- *   diagram output — "THIS CHAT WINDOW'S OWN INTERFACE," the ⊞ Draw menu
- *   paragraph (~L3414) — says "SVG" and nothing else, predating the DXF
- *   button. CRITICAL_FACTS carries no correction. The one DXF-adjacent fact
- *   that IS present — ADD-ONS' "AutoCAD DWG Output" (~L3827) — describes a
- *   different, still-unreleased, paid, desktop-only feature. Asked point-
- *   blank about "DXF export," the model had exactly one grounded fact to
- *   reach for, reached for it, and answered as if this chat's own button
- *   were that add-on. Standing question-answering skill, not a bug in the
- *   model — a coverage gap in what it was given to answer from.
- *
- * FIX: new const DXF_CAPABILITY_FACT (~L3135, beside KEY_ENGINEERING_
- *   REFERENCE), spliced at the exact same three sites CRITICAL_FACTS
- *   already is (buildSystemPrompt ~L3219, buildGeminiFollowupPrompt
- *   ~L4996, buildWorkersAiSystemPrompt ~L5165) so turn 1, turn 2+, and the
- *   Workers AI/Groq/OpenRouter fallback chain all carry it identically —
- *   same coverage-gap class the v34 changelog above documents, fixed the
- *   same way. States the capability, its real mechanism (client-side,
- *   instant, no install), its honest limits (schematic-level, not every
- *   type yet), explicit disambiguation from AutoCAD DWG Output, and a
- *   proactive-mention allowance for the sales-advisor half of this
- *   persona's job — capped at once per relevant diagram so it doesn't
- *   turn into a repeated pitch. Two turn-1-only prose edits alongside it:
- *   the ⊞ Draw menu paragraph now cross-references DXF EXPORT instead of
- *   silently stopping at "SVG" (same cross-reference-don't-duplicate
- *   pattern this file already uses for LICENSE & KEY, ~L3452-3454), and
- *   the AutoCAD DWG Output bullet (~L3827) gets one clause pointing back
- *   the other way, so neither section can be read in isolation and
- *   produce the conflation this changelog opened with. A condensed
- *   sibling const, DXF_CAPABILITY_FACT_CONDENSED, carries the load-
- *   bearing correction only (mechanism + disambiguation, no marketing
- *   nuance) into the two tight-budget tiers — see the follow-up/workers
- *   assertPromptBudget ceiling patches below for why the full block
- *   can't go there unmodified.
- *
- * NOT DONE: kept OUT of CRITICAL_FACTS itself, deliberately — same reason
- *   KEY_ENGINEERING_REFERENCE was split into its own const at v29 rather
- *   than merged in: nothing here should have to pass
- *   assertFactsRegistrySynced's cold-start drift guard (factGuard.mjs),
- *   which has no registry entry for this and isn't the right place to add
- *   one for a capability fact rather than a pricing/licensing number.
- *   scanForFactDrift's two runtime call sites (~L6154, ~L8218) still scan
- *   replies against CRITICAL_FACTS + KEY_ENGINEERING_REFERENCE only —
- *   DXF_CAPABILITY_FACT is not included, so a future regression here
- *   would go undetected by that logger. Wiring it in needs factGuard.mjs
- *   itself (not in front of me in this session) to know how to extract a
- *   checkable claim from this const's prose; flagged, not guessed at.
- *   Six element types genuinely have no DXF module yet (SVG-only) — not
- *   enumerated by name in the new prose on purpose: DXF_READY_TYPES/
- *   DXF_MODULE_MAP already gate this correctly per-request via the
- *   dxfAvailable flag, and hand-listing them in prompt text is exactly
- *   the kind of fact that goes stale the next time a .dxf.mjs module
- *   ships — the model is told to defer to that flag instead.
- * ════════════════════════════════════════
  * ════════════════════════════════════════
  * CHANGELOG v35 — STRUCTURAL FIX: CONFIDENTIALITY BLOCKS EXCLUDED, NOT OVERRIDDEN
  * ════════════════════════════════════════
@@ -1295,53 +1225,53 @@ import {
 // this module would be a duplicate-binding SyntaxError, not a silent
 // shadow. The one already in scope is byte-identical (both now trace
 // to structuralDrawingKit.mjs's single implementation).
-import { parseBeamRebarPayload, renderBeamDiagramSVG } from '../../public/vendor/dxf-kit/beamDiagram.mjs';
+import { parseBeamRebarPayload, renderBeamDiagramSVG } from '../_lib/beamDiagram.mjs';
 // [Linking beamAsciiToPayload.mjs] beam-only ASCII "key=value" front end
 // for the mode:'rebarDiagram' /rebar path — see that module's own header.
 // Does not touch beamDiagram.mjs's own compute/render/parse exports;
 // purely a syntax translator ahead of parseBeamRebarPayload.
-import { parseBeamAsciiCommand } from '../../public/vendor/dxf-kit/beamAsciiToPayload.mjs';
+import { parseBeamAsciiCommand } from '../_lib/beamAsciiToPayload.mjs';
 // [Step 20] Slab/shear-wall/stair — same shape as beamDiagram.mjs's pair
 // above (parse*RebarPayload for mode:'rebarDiagram', render*SVG for both
 // that and the mode:'image' /diagram path below). DiagramError/
 // svgToDataUri not re-imported here for the same duplicate-binding
 // reason noted above.
-import { parseSlabRebarPayload, renderSlabDiagramSVG } from '../../public/vendor/dxf-kit/slabDiagram.mjs';
-import { parseShearWallRebarPayload, renderShearWallDiagramSVG } from '../../public/vendor/dxf-kit/shearWallDiagram.mjs';
-import { parseStairRebarPayload, renderStairDiagramSVG } from '../../public/vendor/dxf-kit/stairDiagram.mjs';
+import { parseSlabRebarPayload, renderSlabDiagramSVG } from '../_lib/slabDiagram.mjs';
+import { parseShearWallRebarPayload, renderShearWallDiagramSVG } from '../_lib/shearWallDiagram.mjs';
+import { parseStairRebarPayload, renderStairDiagramSVG } from '../_lib/stairDiagram.mjs';
 // [Follow-up to Step 20] Column — same shape as the three imports above.
 // columnDiagram.mjs also re-exports DiagramError/svgToDataUri; not
 // re-imported here for the same duplicate-binding reason noted above.
-import { parseColumnRebarPayload, renderColumnDiagramSVG } from '../../public/vendor/dxf-kit/columnDiagram.mjs';
+import { parseColumnRebarPayload, renderColumnDiagramSVG } from '../_lib/columnDiagram.mjs';
 // [New-element track, Part 2 candidate 1] Retaining wall (cantilever,
 // typical section) — same shape as the four imports above.
 // retainingWallDiagram.mjs also re-exports DiagramError/svgToDataUri;
 // not re-imported here for the same duplicate-binding reason noted above.
-import { parseRetainingWallRebarPayload, renderRetainingWallDiagramSVG } from '../../public/vendor/dxf-kit/retainingWallDiagram.mjs';
+import { parseRetainingWallRebarPayload, renderRetainingWallDiagramSVG } from '../_lib/retainingWallDiagram.mjs';
 // [New-element track, Part 2 candidate 2] Trapezoidal combined footing —
 // same shape as the five imports above. trapezoidalFootingDiagram.mjs
 // also re-exports DiagramError/svgToDataUri; not re-imported here for
 // the same duplicate-binding reason noted above.
-import { parseTrapezoidalFootingRebarPayload, renderTrapezoidalFootingDiagramSVG } from '../../public/vendor/dxf-kit/trapezoidalFootingDiagram.mjs';
+import { parseTrapezoidalFootingRebarPayload, renderTrapezoidalFootingDiagramSVG } from '../_lib/trapezoidalFootingDiagram.mjs';
 // [New-element track, Part 2 candidate 3] Strap footing — same shape as
 // the six imports above. strapFootingDiagram.mjs also re-exports
 // DiagramError/svgToDataUri; not re-imported here for the same
 // duplicate-binding reason noted above.
-import { parseStrapFootingRebarPayload, renderStrapFootingDiagramSVG } from '../../public/vendor/dxf-kit/strapFootingDiagram.mjs';
+import { parseStrapFootingRebarPayload, renderStrapFootingDiagramSVG } from '../_lib/strapFootingDiagram.mjs';
 // [New-element track, Part 2 candidate 4] Grade beam / tie beam — same
 // shape as the seven imports above. gradeBeamDiagram.mjs also re-exports
 // DiagramError/svgToDataUri; not re-imported here for the same
 // duplicate-binding reason noted above.
-import { parseGradeBeamRebarPayload, renderGradeBeamDiagramSVG } from '../../public/vendor/dxf-kit/gradeBeamDiagram.mjs';
+import { parseGradeBeamRebarPayload, renderGradeBeamDiagramSVG } from '../_lib/gradeBeamDiagram.mjs';
 // [New-element track] Pile cap — same shape as the eight imports above.
 // pileCapDiagram.mjs also re-exports DiagramError/svgToDataUri; not
 // re-imported here for the same duplicate-binding reason noted above.
-import { parsePileCapRebarPayload, renderPileCapDiagramSVG } from '../../public/vendor/dxf-kit/pileCapDiagram.mjs';
+import { parsePileCapRebarPayload, renderPileCapDiagramSVG } from '../_lib/pileCapDiagram.mjs';
 // [New-element track, session25 gate] Flat slab opening reinforcement —
 // same shape as the nine imports above. slabOpeningDiagram.mjs also
 // re-exports DiagramError/svgToDataUri; not re-imported here for the
 // same duplicate-binding reason noted above.
-import { parseSlabOpeningRebarPayload, renderSlabOpeningDiagramSVG } from '../../public/vendor/dxf-kit/slabOpeningDiagram.mjs';
+import { parseSlabOpeningRebarPayload, renderSlabOpeningDiagramSVG } from '../_lib/slabOpeningDiagram.mjs';
 // [New-element track — SVG completeness pass] Ten library modules that
 // already had a full compute/render*SVG/parse*RebarPayload/
 // parseDiagramCommand quadruple (same shape as the twelve pairs above,
@@ -1351,16 +1281,16 @@ import { parseSlabOpeningRebarPayload, renderSlabOpeningDiagramSVG } from '../..
 // diffing every render*DiagramSVG export across every *.mjs file in
 // functions/_lib against this file's own import list. Same shape,
 // same re-export-skip reasoning, as every import above.
-import { parseBasementWallRebarPayload, renderBasementWallDiagramSVG } from '../../public/vendor/dxf-kit/basementWallDiagram.mjs';
-import { parseBeamColumnJointRebarPayload, renderBeamColumnJointDiagramSVG } from '../../public/vendor/dxf-kit/beamColumnJointDiagram.mjs';
-import { parseCircularColumnRebarPayload, renderCircularColumnDiagramSVG } from '../../public/vendor/dxf-kit/circularColumnDiagram.mjs';
-import { parseCorbelRebarPayload, renderCorbelDiagramSVG } from '../../public/vendor/dxf-kit/corbelDiagram.mjs';
-import { parseCouplingBeamRebarPayload, renderCouplingBeamDiagramSVG } from '../../public/vendor/dxf-kit/couplingBeamDiagram.mjs';
-import { parseFlatSlabDropPanelRebarPayload, renderFlatSlabDropPanelDiagramSVG } from '../../public/vendor/dxf-kit/flatSlabDropPanelDiagram.mjs';
-import { parseHordiSlabRebarPayload, renderHordiSlabDiagramSVG } from '../../public/vendor/dxf-kit/hordiSlabDiagram.mjs';
-import { parsePunchingShearRebarPayload, renderPunchingShearDiagramSVG } from '../../public/vendor/dxf-kit/punchingShearDiagram.mjs';
-import { parseRaftPileRebarPayload, renderRaftPileDiagramSVG } from '../../public/vendor/dxf-kit/raftPileDiagram.mjs';
-import { parseWallOpeningRebarPayload, renderWallOpeningDiagramSVG } from '../../public/vendor/dxf-kit/wallOpeningDiagram.mjs';
+import { parseBasementWallRebarPayload, renderBasementWallDiagramSVG } from '../_lib/basementWallDiagram.mjs';
+import { parseBeamColumnJointRebarPayload, renderBeamColumnJointDiagramSVG } from '../_lib/beamColumnJointDiagram.mjs';
+import { parseCircularColumnRebarPayload, renderCircularColumnDiagramSVG } from '../_lib/circularColumnDiagram.mjs';
+import { parseCorbelRebarPayload, renderCorbelDiagramSVG } from '../_lib/corbelDiagram.mjs';
+import { parseCouplingBeamRebarPayload, renderCouplingBeamDiagramSVG } from '../_lib/couplingBeamDiagram.mjs';
+import { parseFlatSlabDropPanelRebarPayload, renderFlatSlabDropPanelDiagramSVG } from '../_lib/flatSlabDropPanelDiagram.mjs';
+import { parseHordiSlabRebarPayload, renderHordiSlabDiagramSVG } from '../_lib/hordiSlabDiagram.mjs';
+import { parsePunchingShearRebarPayload, renderPunchingShearDiagramSVG } from '../_lib/punchingShearDiagram.mjs';
+import { parseRaftPileRebarPayload, renderRaftPileDiagramSVG } from '../_lib/raftPileDiagram.mjs';
+import { parseWallOpeningRebarPayload, renderWallOpeningDiagramSVG } from '../_lib/wallOpeningDiagram.mjs';
 // [Step 20] Single /diagram dispatch point. Supersedes importing
 // footingDiagram.mjs's own parseDiagramCommand directly (removed from
 // the import above) — routeDiagramCommand() tries that exact function
@@ -1368,7 +1298,7 @@ import { parseWallOpeningRebarPayload, renderWallOpeningDiagramSVG } from '../..
 // through the identical footingDiagram.mjs code path, byte-for-byte;
 // it additionally recognizes slab/shearwall/stair. See
 // diagramCommandRouter.mjs's own header for the full rationale.
-import { routeDiagramCommand } from '../../public/vendor/dxf-kit/diagramCommandRouter.mjs';
+import { routeDiagramCommand } from '../_lib/diagramCommandRouter.mjs';
 
 
 // Bilingual wrapper for footingDiagram.mjs's DiagramError codes (+
@@ -3290,9 +3220,29 @@ of these differently, THIS block is correct, not the other text:
   days 1–15 fully offline, no action needed; days 16–29 a reconnect warning appears; days 30–32
   final grace period (must connect within 3 days); day 33+ blocked until reconnection. License
   check happens ONLY at startup, never mid-session.
+• LICENSE & KEY — TWO SEPARATE SYSTEMS, never conflate. When asked generally about "license key"
+  or an activation error without saying which product, address BOTH immediately — do not guess
+  which one is meant and do not ask first:
+  ① Desktop app (Footing Pro / PC Suite): the device-locked license above — one license = one
+     device, no transfer. Verification runs ONLY at startup; never interrupts a running session.
+  ② Web chatbot (CES-XXXX-XXXX-XXXX-XXXX key, 🔑 icon in this chat's header): more flexible — one
+     key activates on up to TWO devices, both able to run the chatbot at the same time with zero
+     conflict between them. STRICT FIRST-COME RULE: the key auto-binds to the first two unique
+     devices that ever activate it. If the owner shares or leaks the key, the first stranger to
+     activate it permanently occupies one of the two slots — there is no automatic or self-service
+     way to free it back up, so the owner can end up losing their own access as a direct result.
+     State this plainly, as a real and immediate risk, to anyone asking whether it's safe to share
+     their key — never soften it into a hypothetical.
 • Requires Microsoft Excel 2002+ installed (2016/2019/365 recommended) and .NET Framework 4.8+.
   Windows 7 SP1–11 only, no Mac/Linux.
 • Contact: aymneidasi@gmail.com or WhatsApp +201287232413. Download: civilengsuite.pages.dev.
+• DIAGRAM EXPORT — real, shipped, not a roadmap item: most element types in THIS chat's own
+  draw-menu / diagram-command output now offer a one-click DXF (AutoCAD-ready) download next to
+  the SVG one — generated instantly client-side, zero installs, zero plugins, zero separate CAD
+  subscription. A few power-user-only types don't have it yet (see THIS CHAT WINDOW'S OWN
+  INTERFACE above for which). Mention this proactively when relevant — CAD/AutoCAD/DWG questions,
+  or right after generating a diagram for a covered type — never as a bolted-on line elsewhere;
+  SOUND LIKE A HUMAN — NOT A BROCHURE still governs how.
 • If any earlier reply of yours in this same conversation conflicts with a fact above, this
   block still wins — restate the correct fact plainly and move on, without dwelling on or
   repeating the earlier error.
@@ -3322,54 +3272,6 @@ d = h − cover − db/2; 75 mm cover for concrete cast against soil (ACI 318-19
 is required between columns for the hogging zone; development length ld follows §25.4.2,
 including the 1.3× top-bar factor; cracks are an expected, controlled-width design outcome,
 not a defect, per ACI 318 §24.3.2.
-`;
-
-// v36: DXF export capability — see CHANGELOG v36 at the top of this file for
-// the full root-cause trace. Kept as its own const (not merged into
-// CRITICAL_FACTS) so it never has to pass assertFactsRegistrySynced's
-// cold-start drift guard — same reasoning as KEY_ENGINEERING_REFERENCE
-// above. Spliced at the same three sites CRITICAL_FACTS already is.
-const DXF_CAPABILITY_FACT = `\
-⚠ DXF EXPORT — THIS CHAT ALREADY HAS IT, TODAY. NOT a future add-on, NOT PC-Suite-only. If any
-earlier reply of yours in this conversation denied this, called it desktop-only, or pointed the
-user to Eng. Aymn Asi for a future release — that reply was wrong; correct it plainly and move
-on, without dwelling on the earlier error (same pattern as CRITICAL_FACTS above).
-• Under any diagram this chat draws (the ⊞ Draw menu element types), two small download buttons
-  sit side by side: "SVG" and, for most types, "DXF." Tapping DXF generates a real .dxf file —
-  client-side, in the user's own browser, no server round-trip, no plugin, no install — and
-  downloads it immediately, ready to open in AutoCAD or any DXF-compatible CAD viewer.
-• This is a genuinely uncommon capability — a one-tap CAD-file download from inside a chat
-  conversation, with no code for the user to write or run. You may say so with confidence when
-  it's relevant: a user asks what makes this chat different, asks about CAD/export capability,
-  or just received a diagram for a DXF-ready type. Ground the claim in the verified mechanism
-  itself ("built into this chat, instant, zero setup") — not in an unverifiable absolute like "no
-  other chatbot anywhere has this." Eng. Aymn Asi has not audited every competitor; don't assert
-  that as settled fact.
-• Mention it once per relevant diagram, not on every follow-up in the same thread — a user who
-  already downloaded it doesn't need the pitch repeated.
-• Same honesty register as the diagram's own on-image caption: this is a computed schematic from
-  the user's own entered values, not a construction/shop drawing. Don't oversell its precision.
-• DO NOT CONFLATE with "AutoCAD DWG Output" in ADD-ONS (section 6b below) — that is a separate,
-  still-unreleased, PAID, DESKTOP-ONLY feature (fully-dimensioned, construction-submission-ready
-  drawings, PC Suite only). This chat's DXF button is a different, already-shipped, currently-
-  free, lighter-weight export. If a question could mean either, name both and say which is which.
-• A few newer/specialized element types don't have a DXF module yet (SVG preview only). If unsure
-  whether a specific type has it, don't guess from memory — whether the DXF button actually
-  appears on that reply is the real answer, and more types get added to it over time.
-`;
-
-// v36: condensed form for the two tight-budget tiers (buildGeminiFollowupPrompt,
-// buildWorkersAiSystemPrompt) — same reason EPISTEMIC_HONESTY_BLOCK_CONDENSED exists
-// beside _FULL: the follow-up/fallback ceilings (3423/3178 chars total, this file's
-// own numbers) can't absorb the full 2.3KB block above without starving everything
-// else already living in that budget. Keeps only the load-bearing correction +
-// mechanism + disambiguation; drops the competitor-superlative guardrail and the
-// "mention once" pacing note as turn-1-tier nuance, not turn-2+/fallback essentials.
-const DXF_CAPABILITY_FACT_CONDENSED = `\
-DXF EXPORT: this chat's diagrams (⊞ Draw menu types) already have a working "DXF" download
-button beside "SVG" — client-side, instant, no install, opens in AutoCAD. NOT a future add-on,
-NOT PC-Suite-only — if an earlier reply denied this, correct it plainly. Do not conflate with
-the separate, still-unreleased, paid, desktop-only "AutoCAD DWG Output" add-on.
 `;
 
 const EPISTEMIC_HONESTY_BLOCK_FULL = `
@@ -3456,7 +3358,6 @@ return `\
 You are Eng pro assist — the official AI assistant and sales advisor for Civil Engineering Suite
 (civilengsuite.pages.dev), built by Eng. Aymn Asi — a practicing Licensed Structural Engineer.
 ${CRITICAL_FACTS}
-${DXF_CAPABILITY_FACT}
 ${EPISTEMIC_HONESTY_BLOCK_FULL}
 ════════════════════════════════════════
 YOUR NAME & IDENTITY — CRITICAL
@@ -3656,9 +3557,19 @@ footing (isolated / combined / strip / raft / trapezoidal / strap), column, beam
 wall, stair, retaining wall, grade beam / tie beam. Tapping one shows a filled-in example command
 and a field-by-field explanation table, then pre-fills the chat input so the user only has to edit
 the numbers to their own dimensions and send. These are real computed drawings (arithmetic on the
-numbers supplied — bar positions, spacing, schedule table), never an AI-guessed image. Most of
-these element types also ship a one-tap DXF (AutoCAD-ready) download right beside the SVG —
-see DXF EXPORT above for exactly how to talk about it; don't re-derive it here.
+numbers supplied — bar positions, spacing, schedule table), never an AI-guessed image.
+Most of these also now offer a DXF download next to the SVG one — a real AutoCAD-ready file
+(closed polylines, proper layers), generated instantly client-side: zero installs, zero plugins,
+zero separate CAD subscription. Everything in the element list just above has it; a handful of
+power-user-only types (beam-column joints, circular columns, coupling beams, punching-shear
+checks, raft-on-piles, wall openings) are SVG-only for now — if this list is stale, Eng. Aymn Asi
+has the current picture. Bring this up naturally: CAD/AutoCAD/DWG questions, or right after
+generating a diagram for a covered type. Most tools like this make you export into a separate CAD
+program or install a plugin first — this one hands you the finished file the moment you generate
+the drawing, right here in the chat. That's genuinely worth saying, once, when it's relevant — not
+a tagline to repeat on every reply (SOUND LIKE A HUMAN — NOT A BROCHURE above still applies). If a
+generated diagram doesn't show a DXF button, say plainly that type isn't wired up for it yet —
+don't guess why, don't promise it's coming.
 WHEN TO POINT A USER HERE: any time they ask to draw/detail/reinforce a structural element, ask
 what this chat can draw, or type a rough drawing request with no filled-in numbers ("ارسم لي
 عمود", "draw me a footing", "detail this slab") — tell them to tap the ⊞ icon at the top of this
@@ -3689,8 +3600,11 @@ device-locked activation (SCENARIO A further below: download PCsuite 2026, gener
 send it to the developer). Both ultimately grant the same underlying CES subscription, but they
 are two different mechanisms for two different products — this 🔑 button is a direct paste-a-key
 (or pay-in-panel) flow scoped to this chat; the desktop app instead needs its own separate
-device-registration file. If a user's question doesn't make clear which one they mean, ask, or
-briefly cover both rather than assuming.
+device-registration file. If a user's question doesn't make clear which one they mean — including
+a general "license key" or "activation error" question with no product named — do not ask first
+and do not guess: cover BOTH systems immediately. Full terms of each (including the CES-XXXX key's
+two-device cap and its first-come-bind rule) are in the LICENSE & KEY entry of CANONICAL FACTS
+above; restate them plainly rather than re-deriving them here.
 
 EMOJI — SEMANTIC & FUNCTIONAL CODING, NOT DECORATION: an emoji is a traffic sign that tells the
 eye what KIND of information is coming before it reads a word of it — not a flourish bolted on
@@ -4064,9 +3978,7 @@ they care about. Don't recite all of them at once.
 
     ADD-ONS — priced separately, pricing to be announced when released:
     • AutoCAD DWG Output — fully dimensioned structural drawings generated directly from
-      your calculations, ready for construction documents and client submission. (Not the same
-      thing as this chat's own DXF button under a diagram — see DXF EXPORT above: that one
-      already exists, today, free, lighter-weight, and ships from the chat itself.)
+      your calculations, ready for construction documents and client submission.
     • Detailed Calculation Print — the third Print System output, a full peer-review-ready
       package (Capture and Summary outputs, above, are already included in the base price).
     If asked "is AutoCAD included" or "is the detailed report included": no — both are
@@ -5235,7 +5147,6 @@ Civil Engineering Suite (civilengsuite.pages.dev), built by Eng. Aymn Asi.
 Your name is Eng pro assist. If asked your name at any point: Arabic → "أنا Eng pro assist"،
 English → "I'm Eng pro assist." Never claim to be ChatGPT, Gemini, or any other AI brand.
 ${CRITICAL_FACTS}
-${DXF_CAPABILITY_FACT_CONDENSED}
 ${EPISTEMIC_HONESTY_BLOCK_CONDENSED}
 The full identity, tone, and product knowledge were already established earlier in this thread
 via your own prior replies (visible in the conversation history below). Stay in that voice.
@@ -5405,7 +5316,6 @@ Your name is Eng pro assist. You are the official AI assistant for Civil Enginee
 If asked your name: Arabic → "أنا Eng pro assist" — English → "I'm Eng pro assist."
 Never claim to be ChatGPT, Gemini, or any other AI brand.
 ${CRITICAL_FACTS}
-${DXF_CAPABILITY_FACT_CONDENSED}
 ${EPISTEMIC_HONESTY_BLOCK_CONDENSED}
 EXAMPLE — price question, match this exact phrasing pattern:
 User: "بكام الاشتراك؟"
@@ -7184,7 +7094,7 @@ export async function onRequestPost(context) {
     // building-interior sketch.] Checked BEFORE the Workers-AI rate
     // bucket below and BEFORE generateImageWorkersAI() is ever called —
     // not a post-hoc filter on the diffusion model's output. See
-    // _lib/footingDiagram.mjs's header for why this is a routing fix, not
+    // vendor/dxf-kit/footingDiagram.mjs's header for why this is a routing fix, not
     // a prompt-wording fix: flux-1-schnell / stable-diffusion-xl-lightning
     // have ~no training signal for "combined footing"-class content, so
     // no prompt string fixes it — the two prior prompt patches documented
@@ -8002,11 +7912,7 @@ inferring one. General engineering knowledge is still fine to answer from, with 
   // by design) never matched and the diagram fell back to plain source text. Condensed
   // DIAGRAMS paragraph added to buildGeminiFollowupPrompt, +573 chars exact measured delta.
   // Follow-up ceiling: 2850 -> 3423.
-  // [PATCH — v36 DXF export fact] DXF_CAPABILITY_FACT added to buildSystemPrompt (turn-1
-  // tier), +2340 chars exact measured delta (2339-char block + 1 line break). Turn-1 ceiling:
-  // 17035 -> 19375. DXF_CAPABILITY_FACT_CONDENSED added to buildGeminiFollowupPrompt, +361
-  // chars exact measured delta (360-char block + 1 line break). Follow-up ceiling: 3423 -> 3784.
-  assertPromptBudget('geminiSystemPrompt', geminiSystemPrompt, isFirstTurn ? 19375 : 3784, env);
+  assertPromptBudget('geminiSystemPrompt', geminiSystemPrompt, isFirstTurn ? 17035 : 3423, env);
 
   const geminiKeysIndexed = buildGeminiKeyPool(env);
 
@@ -8246,10 +8152,7 @@ inferring one. General engineering knowledge is still fine to answer from, with 
         // above: this fallback tier never taught the mermaid fence convention at all (not even
         // a full-tier version to condense from). Minimal Diagrams paragraph added, +276 chars
         // exact measured delta. Ceiling: 2902 -> 3178.
-        // [PATCH — v36 DXF export fact] DXF_CAPABILITY_FACT_CONDENSED added (same block as the
-        // Gemini follow-up tier), +361 chars exact measured delta (360-char block + 1 line
-        // break). Ceiling: 3178 -> 3539.
-        assertPromptBudget('workersSystemContent', workersSystemContent, 3539, env);
+        assertPromptBudget('workersSystemContent', workersSystemContent, 3178, env);
         const workersMsgs = [
           { role: 'system', content: workersSystemContent },
           ...turns.map(t => ({
