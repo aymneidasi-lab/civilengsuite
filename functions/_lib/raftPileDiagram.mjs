@@ -152,7 +152,11 @@ const MAX_PILES = 60; // higher than pileCapDiagram.mjs's own 16 — a raft
 // Schematic-drawability guards ONLY — see SCOPE note above. Not a code
 // check substitute. Values copied verbatim from pileCapDiagram.mjs — same
 // physical clearance logic, same reasoning.
-const MIN_EDGE_FACTOR = 0.5;   // min pile-center-to-raft-edge >= 0.5 x pileDia + cover
+const MIN_EDGE_FACTOR = 0.5;   // min pile-center-to-raft-edge >= 0.5 x pileDia
+  // (cover deliberately excluded from this margin — see the "Edge margin"
+  // comment ~40 lines below computeRaftPileDiagramGeometry's pile loop for
+  // why; this constant's own comment previously said "+ cover" and
+  // contradicted that documented decision).
 const MIN_CLEAR_FACTOR = 0.25; // min pile-to-pile / pile-to-column CLEAR spacing >= 0.25 x pileDia
 
 // ── Compute ──────────────────────────────────────────────────────────
@@ -378,7 +382,13 @@ export function renderRaftPileDiagramSVG(geometry, opts = {}) {
   const { B, L: raftL, D, columns, piles, pileDia, pileEmbed } = geometry.plan;
 
   const planScale = fitScale([{ contentW: raftL, contentH: B, boxW: PLAN_BOX.w - 80, boxH: PLAN_BOX.h - 70 }]);
-  const sectionScale = fitScale([{ contentW: raftL, contentH: D + pileDia, boxW: SECTION_BOX.w - 80, boxH: SECTION_BOX.h - 70 }]);
+  // contentH is D alone: nothing drawn in renderSection() extends past D
+  // vertically (pile embedment rects are capped at pileEmbed < D; column
+  // stubs are sized off c.b via a fixed fraction, not pileDia; the pile
+  // shaft below the raft is explicitly out of scope, see this file's own
+  // header). Padding with pileDia here only shrank the scale for no
+  // corresponding drawn content.
+  const sectionScale = fitScale([{ contentW: raftL, contentH: D, boxW: SECTION_BOX.w - 80, boxH: SECTION_BOX.h - 70 }]);
 
   const tableRows = buildScheduleRows(geometry, l);
   const tableColW = Math.floor((CANVAS_W - 120) / 4);
