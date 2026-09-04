@@ -7077,7 +7077,38 @@ export async function onRequestPost(context) {
     const imageLang = (body.lang === 'ar' || body.lang === 'en') ? body.lang : (likelyArabic ? 'ar' : 'en');
     const imageIsArabic = imageLang === 'ar';
 
-    const promptCheck = validateImagePrompt(body.prompt);
+    // [FIX] Diagram commands ("type key=value key=value ...") share this
+    // mode:'image' endpoint with free-text diffusion-model prompts, but
+    // need a structurally different length ceiling: validateImagePrompt's
+    // cap (500 chars, tuned for an /image diffusion prompt) sits far
+    // below what a real multi-column/multi-pile /diagram command
+    // legitimately needs — raftPileDiagram.mjs's own MAX_COLUMNS comment
+    // documents the actual design ceiling for these as "a single ASCII
+    // command string with a 2000-char server-side limit, not a CAD
+    // system". Detect the same syntactic shape parseDiagramCommand /
+    // routeDiagramCommand themselves use to recognize an attempted
+    // command (ASCII leading token + at least one key=value pair) BEFORE
+    // the free-text gate, and apply the diagram-specific ceiling instead
+    // of validateImagePrompt's — bypassing validateImagePrompt entirely
+    // on this path is safe because every /diagram parser downstream only
+    // ever reads key=value tokens via its own regex tokenizer (see e.g.
+    // cantileverSlabDiagram.mjs's tokenizeDiagramCommand), so none of
+    // validateImagePrompt's diffusion-prompt-specific handling is needed
+    // here — "pure ASCII by design", per this same block's own comment
+    // a few lines above. Free-text prompts (this regex doesn't match)
+    // fall through to validateImagePrompt completely unchanged, so
+    // /image behavior is untouched. An unrecognized leading token still
+    // reaches BAD_SYNTAX / UNSUPPORTED_TYPE further down exactly as
+    // before — this only changes which length ceiling applies, never
+    // which prompts are accepted as valid diagram syntax.
+    const MAX_DIAGRAM_COMMAND_CHARS = 2000;
+    const diagramCommandShape = /^\s*\/?[A-Za-z][A-Za-z0-9_]*\s+\S+=\S+/;
+    const looksLikeDiagramCommand = typeof body.prompt === 'string' && diagramCommandShape.test(body.prompt);
+    const promptCheck = looksLikeDiagramCommand
+      ? (body.prompt.trim().length > 0 && body.prompt.length <= MAX_DIAGRAM_COMMAND_CHARS
+          ? { ok: true, prompt: body.prompt.trim() }
+          : { ok: false, code: 'PROMPT_TOO_LONG', maxChars: MAX_DIAGRAM_COMMAND_CHARS })
+      : validateImagePrompt(body.prompt);
     if (!promptCheck.ok) {
       const msg = promptCheck.code === 'PROMPT_TOO_LONG'
         ? (imageIsArabic
