@@ -7120,102 +7120,44 @@ export async function onRequestPost(context) {
       return json({ ok: false, error: msg, code: promptCheck.code }, 400, undefined, request);
     }
 
-    // Deterministic-diagram short-circuit. [NEW — fixes the live bug
-    // report: "draw combined footing" returning an unrelated
-    // building-interior sketch.] Checked BEFORE the Workers-AI rate
-    // bucket below and BEFORE generateImageWorkersAI() is ever called —
-    // not a post-hoc filter on the diffusion model's output. See
-    // vendor/dxf-kit/footingDiagram.mjs's header for why this is a routing fix, not
-    // a prompt-wording fix: flux-1-schnell / stable-diffusion-xl-lightning
-    // have ~no training signal for "combined footing"-class content, so
-    // no prompt string fixes it — the two prior prompt patches documented
-    // in imageGen.mjs each fixed a different symptom of the same
-    // underlying gap without closing it. For the closed set of structural
-    // elements this product actually ships, skip the model entirely and
-    // return a hand-authored SVG instead: free (no Workers AI neurons
-    // spent, so it does not touch the :image rate bucket below — only
-    // the general per-IP limiter already applied earlier in this handler
-    // covers it), instant, and correct by construction every time instead
-    // of on a per-request roll of a 4-step diffusion model. Any prompt
-    // that does NOT match a known type — imageGen.mjs's own "golden
-    // retriever wearing sunglasses" example — falls through unchanged to
-    // the exact diffusion path that existed before this patch.
-    const diagramType = classifyFootingDiagram(promptCheck.prompt);
-
-    // strip and raft ARE real, fully-supported /diagram types (see
-    // computeStripFootingGeometry / computeRaftFootingGeometry in
-    // footingDiagram.mjs) but their column count and layout vary too much
-    // between real projects for a fixed "generic" picture to be honestly
-    // representative the way the other four types' generic templates are
-    // — a combined footing is always exactly 2 columns on one centerline;
-    // a strip or raft could be 2 columns or 8, in a row or a grid.
-    // Guessing a layout here would be exactly the "confident but wrong"
-    // failure imageGen.mjs's PROMPT ITERATION 2 comment already documents
-    // fixing once, just relocated from a diffusion model's pixels to this
-    // module's arithmetic. classifyFootingDiagram still recognizes both
-    // (so the request doesn't silently fall through to the diffusion
-    // model for a term the glossary below already disambiguates
-    // correctly) but points at the tool that actually needs from the user
-    // instead of drawing something that might not match what they meant.
-    if (diagramType === 'strip' || diagramType === 'raft') {
-      const example = diagramType === 'strip'
-        ? '/diagram strip B=900 L=7500 D=450 cols=3 col1b=350 col1l=350 col1off=750 col2b=350 col2l=350 col2off=3750 col3b=350 col3l=350 col3off=6750 cover=50 dia=14 spacing=150'
-        : '/diagram raft B=6000 L=9000 D=500 cols=4 col1b=400 col1l=400 col1offx=1000 col1offy=1000 col2b=400 col2l=400 col2offx=1000 col2offy=5000 col3b=400 col3l=400 col3offx=5000 col3offy=1000 col4b=400 col4l=400 col4offx=5000 col4offy=5000 cover=75 dia=16 spacing=200';
-      const arType = diagramType === 'strip' ? 'القاعدة الشريطية تحت الحائط' : 'قاعدة اللبشة';
-      return json(
-        {
-          ok   : false,
-          code : 'USE_DIAGRAM_COMMAND',
-          error: imageIsArabic
-            ? `${arType} بتختلف كتير في عدد وترتيب الأعمدة من مشروع لمشروع، فمينفعش نرسملها شكل عام. استخدم أمر /diagram بأبعادك الفعلية، مثلاً:\n${example}`
-            : `${diagramType === 'strip' ? 'Strip' : 'Raft'} footings vary too much in column count/layout for a generic drawing. Use the /diagram command with your actual dimensions, for example:\n${example}`,
-        },
-        400, undefined, request,
-      );
-    }
-    if (diagramType) {
-      const svg = buildFootingDiagramSvg(diagramType, imageLang);
-      return json(
-        {
-          ok      : true,
-          dataUri : svgToDataUri(svg),
-          mimeType: 'image/svg+xml',
-          source  : 'deterministic-template:' + diagramType,
-        },
-        200, undefined, request,
-      );
-    }
-
-    // Computed-diagram short-circuit. Same rationale as the
-    // deterministic-template block just above — answer directly instead
-    // of asking a diffusion model to draw something it has no reliable
-    // training signal for — but for isolated/combined/strip/raft footings
-    // built from the exact numbers a user supplies (B=/L=/D=/cover=/dia=/
-    // spacing=/...), not a fixed catalog of generic types. Both this
-    // block and classifyFootingDiagram above now import from the single
-    // footingDiagram.mjs (see that import at the top of this file) — they
-    // used to resolve to two different files that both claimed the same
-    // import path, which silently broke this endpoint's module load
-    // entirely (an ES import of a name the target module doesn't export
-    // is a load-time failure, not a runtime null) until the export names
-    // and the import path were reconciled into one file.
+    // Computed-diagram parse. [BUGFIX — was previously ordered AFTER the
+    // classifyFootingDiagram short-circuit below; moved ahead of it. Root
+    // cause of the live bug: classifyFootingDiagram does a coarse keyword
+    // match, not a "does this even look like a command" check, so a
+    // fully-specified command containing the substring "raft" — including
+    // a real "/diagram raftpile pile1x=... pile1y=... ... pile9y=..."
+    // command, which is its OWN distinct, always-fully-parameterized type
+    // (see raftPileDiagram.mjs / the `raftpile` entries in
+    // DIAGRAM_TYPE_RENDERERS / DIAGRAM_TYPE_ERROR_MESSAGE near this file's
+    // imports), not raft-on-columns — got classified 'raft' and intercepted
+    // by the strip/raft rejection below before routeDiagramCommand ever
+    // ran. The user got the canned "too much variation, use /diagram"
+    // message quoting an unrelated column-based example, even though they
+    // had already sent a valid, fully-parameterized command. The isolated/
+    // combined generic-template branch below has the identical latent
+    // bug — a full "/diagram isolated B=... L=... D=..." command is also
+    // classified 'isolated' and would get a generic picture instead of its
+    // own computed one. Reordering fixes both by construction: the actual
+    // command parser now always gets first refusal, and only prompts it
+    // rejects as BAD_SYNTAX (i.e. not shaped like a command attempt at
+    // all) ever reach classifyFootingDiagram's loose-text handling.
     //
     // Strict ASCII `type key=value key=value ...` syntax only
     // (parseDiagramCommand's own rationale: no NLP ambiguity on the
     // numbers that matter). BAD_SYNTAX means the prompt wasn't an
-    // attempt at this syntax at all — falls through unchanged to
-    // classifyFootingDiagram above / the diffusion model below, exactly
-    // like every other prompt. Any OTHER failure code means the user
-    // clearly attempted the command syntax and got a parameter wrong;
-    // that is answered directly, not handed to the diffusion model as a
-    // raw "isolated b=... l=..." art prompt (which would both burn a
-    // rate-limited image slot and produce nothing useful).
+    // attempt at this syntax at all — falls through to
+    // classifyFootingDiagram below / the diffusion model further below,
+    // exactly like every other prompt. Any OTHER failure code means the
+    // user clearly attempted the command syntax and got a parameter
+    // wrong; that is answered directly, not handed to the diffusion
+    // model as a raw "isolated b=... l=..." art prompt (which would both
+    // burn a rate-limited image slot and produce nothing useful).
     //
     // [Step 20] parseDiagramCommand -> routeDiagramCommand. Tries
     // footingDiagram.mjs's own parseDiagramCommand first (unchanged
     // behavior, verified byte-identical by diagramCommandRouter.mjs's own
     // test suite), then slab/shearwall/stair. Render + error-message
-    // dispatch below is now keyed off diagramCmd.type via the two lookup
+    // dispatch below is keyed off diagramCmd.type via the two lookup
     // tables defined near this file's imports, instead of a single
     // hardcoded renderFootingDiagramSVG/computedDiagramErrorMessage call.
     // [ADDED — new-element integration] Tried first; returns null (not an
@@ -7273,6 +7215,79 @@ export async function onRequestPost(context) {
           code : diagramCmd.code,
         },
         400, undefined, request,
+      );
+    }
+
+    // Deterministic-diagram / loose-text fallback. Reached only on
+    // BAD_SYNTAX above, i.e. the prompt was never an attempt at
+    // `type key=value ...` syntax — classifyFootingDiagram is now safe to
+    // run here since anything it matches is genuine free text ("draw
+    // combined footing", "raft footing please"), not a real command (a
+    // real command already had first refusal above; see this block's own
+    // header comment for why the two were swapped). Checked BEFORE the
+    // Workers-AI rate bucket below and BEFORE generateImageWorkersAI() is
+    // ever called — not a post-hoc filter on the diffusion model's
+    // output. See vendor/dxf-kit/footingDiagram.mjs's header for why this
+    // is a routing fix, not a prompt-wording fix: flux-1-schnell /
+    // stable-diffusion-xl-lightning have ~no training signal for
+    // "combined footing"-class content, so no prompt string fixes it —
+    // the two prior prompt patches documented in imageGen.mjs each fixed
+    // a different symptom of the same underlying gap without closing it.
+    // For the closed set of structural elements this product actually
+    // ships, skip the model entirely and return a hand-authored SVG
+    // instead: free (no Workers AI neurons spent, so it does not touch
+    // the :image rate bucket below — only the general per-IP limiter
+    // already applied earlier in this handler covers it), instant, and
+    // correct by construction every time instead of on a per-request
+    // roll of a 4-step diffusion model. Any prompt that does NOT match a
+    // known type — imageGen.mjs's own "golden retriever wearing
+    // sunglasses" example — falls through unchanged to the exact
+    // diffusion path that existed before this patch.
+    const diagramType = classifyFootingDiagram(promptCheck.prompt);
+
+    // strip and raft ARE real, fully-supported /diagram types (see
+    // computeStripFootingGeometry / computeRaftFootingGeometry in
+    // footingDiagram.mjs) but their column count and layout vary too much
+    // between real projects for a fixed "generic" picture to be honestly
+    // representative the way the other four types' generic templates are
+    // — a combined footing is always exactly 2 columns on one centerline;
+    // a strip or raft could be 2 columns or 8, in a row or a grid.
+    // Guessing a layout here would be exactly the "confident but wrong"
+    // failure imageGen.mjs's PROMPT ITERATION 2 comment already documents
+    // fixing once, just relocated from a diffusion model's pixels to this
+    // module's arithmetic. classifyFootingDiagram still recognizes both
+    // (so the request doesn't silently fall through to the diffusion
+    // model for a term the glossary below already disambiguates
+    // correctly) but points at the tool that actually needs from the user
+    // instead of drawing something that might not match what they meant.
+    // Only reachable now for loose text with no key=value pairs at all —
+    // any prompt shaped like a real command was already routed above.
+    if (diagramType === 'strip' || diagramType === 'raft') {
+      const example = diagramType === 'strip'
+        ? '/diagram strip B=900 L=7500 D=450 cols=3 col1b=350 col1l=350 col1off=750 col2b=350 col2l=350 col2off=3750 col3b=350 col3l=350 col3off=6750 cover=50 dia=14 spacing=150'
+        : '/diagram raft B=6000 L=9000 D=500 cols=4 col1b=400 col1l=400 col1offx=1000 col1offy=1000 col2b=400 col2l=400 col2offx=1000 col2offy=5000 col3b=400 col3l=400 col3offx=5000 col3offy=1000 col4b=400 col4l=400 col4offx=5000 col4offy=5000 cover=75 dia=16 spacing=200';
+      const arType = diagramType === 'strip' ? 'القاعدة الشريطية تحت الحائط' : 'قاعدة اللبشة';
+      return json(
+        {
+          ok   : false,
+          code : 'USE_DIAGRAM_COMMAND',
+          error: imageIsArabic
+            ? `${arType} بتختلف كتير في عدد وترتيب الأعمدة من مشروع لمشروع، فمينفعش نرسملها شكل عام. استخدم أمر /diagram بأبعادك الفعلية، مثلاً:\n${example}`
+            : `${diagramType === 'strip' ? 'Strip' : 'Raft'} footings vary too much in column count/layout for a generic drawing. Use the /diagram command with your actual dimensions, for example:\n${example}`,
+        },
+        400, undefined, request,
+      );
+    }
+    if (diagramType) {
+      const svg = buildFootingDiagramSvg(diagramType, imageLang);
+      return json(
+        {
+          ok      : true,
+          dataUri : svgToDataUri(svg),
+          mimeType: 'image/svg+xml',
+          source  : 'deterministic-template:' + diagramType,
+        },
+        200, undefined, request,
       );
     }
 
