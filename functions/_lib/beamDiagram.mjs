@@ -834,6 +834,22 @@ function renderElevation(geometry, scale, beamX, beamY, beamW, beamH, l) {
   // Overall length dimension
   svg += dimensionLine(beamX, zoneRowY + 68, beamX + beamW, zoneRowY + 68, `L = ${(totalLength / 1000).toFixed(2)}m`, { orientation: 'h' });
 
+  // Section-cut markers — dashed vertical line + label at each x
+  // geometry.sections lists, so the elevation shows WHERE each cross-
+  // section drawn below is actually taken from (reference code figure's
+  // own convention). Reuses the identical cut-line/section-cut-label
+  // pattern already implemented in renderWorkshopElevation below and in
+  // this module's own DXF counterpart (renderElevationDXF) — this exact
+  // block was present here before, then lost during a later merge with
+  // an updated base file that didn't carry it forward; restoring it now
+  // because a real render (not a test fixture) showed a single custom-
+  // labelled section with no marker on the elevation at all.
+  for (const sec of geometry.sections) {
+    const sx = beamX + sec.x * scale;
+    svg += `<line x1="${sx}" y1="${beamY - 20}" x2="${sx}" y2="${beamY + beamH + 20}" class="cut-line"/>`;
+    svg += `<text x="${sx}" y="${beamY - 24}" text-anchor="middle" class="section-cut-label">${esc(sec.label)}</text>`;
+  }
+
   svg += `</g>`;
   return svg;
 }
@@ -1072,18 +1088,22 @@ function renderWorkshopElevation(geometry, extras, workshopSections, scale, beam
     svg += `<text x="${(zx1 + zx2) / 2}" y="${zoneRowY + 50}" text-anchor="middle" class="lap-label" dir="${l.dirAttr}">${esc(l.lapZoneWord)}</text>`;
   }
 
-  // Extra-section cut markers — dashed vertical line + numeric-only tag
-  // (Latin+digits, defaultFontStack, no translation involved) at each x
-  // computeWorkshopSections() added beyond the base rebarDiagram
-  // sections, so the reader can see WHERE on the beam each extra
-  // cross-section drawn below corresponds to.
+  // Section cut markers — dashed vertical line + numeric-only tag
+  // (Latin+digits, defaultFontStack, no translation involved) at every x
+  // in workshopSections: both the base rebarDiagram cuts AND whatever
+  // computeWorkshopSections() added beyond them, so the reader can see
+  // WHERE on the beam every cross-section drawn below corresponds to —
+  // not just the extra ones. (This filtered to `kind !== 'base'` only at
+  // one point — reverted here again, second time this exact regression
+  // has happened across merges; see the audit note in this file's
+  // header / the base renderElevation fix above for the other instance.)
   // Known limit, not fixed this session (documented, same spirit as this
   // file's own MAX_DRAWN_TIES_PER_ZONE/barMarkTag-width notes elsewhere):
-  // if an extra-section cut point's x coincides closely with a bar tag's
-  // own midpoint x, the cut-line label and the tag circle can sit close
+  // if a section cut point's x coincides closely with a bar tag's own
+  // midpoint x, the cut-line label and the tag circle can sit close
   // enough to touch at small beam-height scales. Narrow, cosmetic, and
   // only occurs when those two x's coincide — not addressed here.
-  for (const sec of workshopSections.filter((s) => s.kind !== 'base')) {
+  for (const sec of workshopSections) {
     const sx = beamX + sec.x * scale;
     svg += `<line x1="${sx}" y1="${beamY - 20}" x2="${sx}" y2="${beamY + beamH + 20}" class="cut-line"/>`;
     svg += `<text x="${sx}" y="${beamY - 24}" text-anchor="middle" class="section-cut-label">${esc(sec.label)}</text>`;
