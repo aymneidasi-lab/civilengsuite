@@ -374,4 +374,133 @@ export function renderDeepBeamDiagramSVG(geometry, opts = {}) {
 </svg>`;
 }
 
+// ── parseDiagramCommand ──────────────────────────────────────────────
+// [RESTORED — new-element integration regression] Same gap, same fix,
+// as cantileverSlabDiagram.mjs's own parseDiagramCommand header
+// comment describes in full — see that file for the build-failure
+// root cause and the tryNewElementDiagramParsers contract this
+// satisfies. This module's raw shape has two variable-length arrays
+// (supports, mainBars) and a two-key nested group (webReinforcement),
+// so its flat-ASCII encoding uses colon/comma-packed sub-tokens
+// (each still a single whitespace-free key=value pair) rather than
+// cantileverSlabDiagram.mjs's flatter one-field-per-key scheme:
+//
+//   id=<string>                  default DB1
+//   unit=mm|cm|m                 default mm
+//   span=<number>                -> spanClearMM   (required)
+//   depth=<number>                -> depthMM        (required)
+//   width=<number>                -> widthMM        (required)
+//   cover=<number>                -> coverMM        (required)
+//   supports=W1[:LABEL1],W2[:LABEL2]
+//                                  -> supports[]    (required, exactly
+//                                     2 groups; LABEL defaults to
+//                                     C1/C2 inside compute*Geometry)
+//   mainbars=FACE:DIA:COUNT[:EXTRA...],...
+//                                  -> mainBars[]    (required, 1-12
+//                                     comma-separated groups). FACE is
+//                                     top|bottom. Each EXTRA segment
+//                                     after COUNT is order-independent:
+//                                     a numeric one is cuttingLengthMM,
+//                                     a non-numeric one is markId — so
+//                                     both "bottom:20:6:5800" and
+//                                     "bottom:20:6:M1" and
+//                                     "bottom:20:6:5800:M1" are valid.
+//   webh=DIA:SPACING[:CUTLEN]      -> webReinforcement.horizontal
+//                                     (required)
+//   webv=DIA:SPACING[:CUTLEN]      -> webReinforcement.vertical
+//                                     (required)
+//
+// e.g. "deepbeam id=DB1 span=4000 depth=1200 width=300 cover=40
+//       supports=400:C1,400:C2 mainbars=bottom:20:6,top:16:4
+//       webh=10:200 webv=10:200"
+//
+// Same three-shape return contract, same "never throws" discipline,
+// as cantileverSlabDiagram.mjs's own parseDiagramCommand — see that
+// file's header for the full rationale (tryNewElementDiagramParsers
+// calls this with no surrounding try/catch).
+function tokenizeDiagramCommand(text) {
+  const tokens = Object.create(null);
+  const re = /([A-Za-z][A-Za-z0-9_]*)\s*=\s*("[^"]*"|'[^']*'|[^\s]+)/g;
+  let m;
+  while ((m = re.exec(text))) {
+    let v = m[2];
+    if (v.length >= 2 && ((v[0] === '"' && v[v.length - 1] === '"') || (v[0] === "'" && v[v.length - 1] === "'"))) {
+      v = v.slice(1, -1);
+    }
+    tokens[m[1].toLowerCase()] = v;
+  }
+  return tokens;
+}
+
+function parseSupportsToken(v) {
+  return v.split(',').map((part) => {
+    const bits = part.split(':');
+    return { widthMM: Number(bits[0]), label: bits[1] };
+  });
+}
+
+function parseMainBarsToken(v) {
+  return v.split(',').map((part) => {
+    const bits = part.split(':');
+    const group = {
+      face: (bits[0] || '').toLowerCase(),
+      diameterMM: Number(bits[1]),
+      count: Number(bits[2]),
+    };
+    for (const extra of bits.slice(3)) {
+      if (extra === undefined || extra === '') continue;
+      const n = Number(extra);
+      if (Number.isFinite(n)) group.cuttingLengthMM = n;
+      else group.markId = extra;
+    }
+    return group;
+  });
+}
+
+function parseWebToken(v) {
+  const bits = v.split(':');
+  return {
+    diameterMM: Number(bits[0]),
+    spacingMM: Number(bits[1]),
+    cuttingLengthMM: bits[2] !== undefined && bits[2] !== '' ? Number(bits[2]) : null,
+  };
+}
+
+export function parseDiagramCommand(promptText) {
+  const TYPE = 'deepbeam';
+  if (typeof promptText !== 'string') return { ok: false, code: 'BAD_SYNTAX' };
+  const trimmed = promptText.trim();
+  const spaceIdx = trimmed.search(/\s/);
+  const leading = (spaceIdx === -1 ? trimmed : trimmed.slice(0, spaceIdx)).toLowerCase();
+  if (leading !== TYPE) return { ok: false, code: 'BAD_SYNTAX' };
+
+  try {
+    const t = tokenizeDiagramCommand(trimmed);
+    const num = (k) => (t[k] === undefined ? NaN : Number(t[k]));
+
+    const raw = {
+      unit: t.unit ? t.unit.toLowerCase() : undefined,
+      beamId: t.id,
+      spanClearMM: num('span'),
+      depthMM: num('depth'),
+      widthMM: num('width'),
+      coverMM: num('cover'),
+      supports: t.supports !== undefined ? parseSupportsToken(t.supports) : undefined,
+      mainBars: t.mainbars !== undefined ? parseMainBarsToken(t.mainbars) : undefined,
+      webReinforcement: {
+        horizontal: t.webh !== undefined ? parseWebToken(t.webh) : undefined,
+        vertical: t.webv !== undefined ? parseWebToken(t.webv) : undefined,
+      },
+    };
+
+    const geometry = computeDeepBeamDiagramGeometry(raw);
+    return { ok: true, type: TYPE, geometry };
+  } catch (err) {
+    if (err instanceof DiagramError) {
+      return { ok: false, code: err.code, type: TYPE, message: err.message };
+    }
+    return { ok: false, code: 'BAD_PARAM', type: TYPE, message: err && err.message ? err.message : 'Could not parse deepbeam command.' };
+  }
+}
+
 export { DiagramError, svgToDataUri };

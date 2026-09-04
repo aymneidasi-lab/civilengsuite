@@ -277,4 +277,138 @@ export function renderCantileverSlabDiagramSVG(geometry, opts = {}) {
 </svg>`;
 }
 
+// ── parseDiagramCommand ──────────────────────────────────────────────
+// [RESTORED — new-element integration regression] api/chat.js imports
+// `parseDiagramCommand as parseCantileverSlabDiagramCommand` from this
+// module (see chat.js's NEW_ELEMENT_PARSERS/tryNewElementDiagramParsers
+// header for the full temporary-bypass rationale, pending this module
+// joining the shared diagramCommandRouter.mjs). This file had no such
+// export at all — a genuine gap, not a rename — which is why the
+// Cloudflare Pages build failed with "No matching export ... for
+// import parseDiagramCommand" while footingDiagram.mjs (never a source
+// of this import name) built fine.
+//
+// Strict ASCII `cantileverslab key=value key=value ...` syntax, same
+// "no NLP ambiguity on the numbers that matter" rationale
+// tryNewElementDiagramParsers' own comment gives. Recognized keys map
+// straight onto computeCantileverSlabDiagramGeometry's own raw shape;
+// this function performs zero range/required-field validation itself
+// — it assembles the raw object and relays whatever DiagramError that
+// function throws (BAD_PARAM/OUT_OF_RANGE, per this module's own throw
+// sites), so there is exactly one source of truth for valid ranges.
+//
+//   id=<string>                  default CS1
+//   unit=mm|cm|m                 default mm
+//   projection=<number>          -> projectionMM          (required)
+//   thickness=<number>           -> thicknessMM           (required)
+//   width=<number>               -> widthMM               (required)
+//   cover=<number>               -> coverMM               (required)
+//   support=<number>             -> supportWidthMM        (required)
+//   topmaindia=<number>          -> topMainBars.diameterMM     (required)
+//   topmainspacing=<number>      -> topMainBars.spacingMM      (required)
+//   topmaincut=<number>          -> topMainBars.cuttingLengthMM (optional)
+//   bottomdia=<number>           -> bottomBars.diameterMM      (required)
+//   bottomspacing=<number>       -> bottomBars.spacingMM       (required)
+//   bottomcut=<number>           -> bottomBars.cuttingLengthMM (optional)
+//   topextradia/topextraspacing/topextracut/topextralen
+//                                 -> topExtraBars group (optional;
+//                                    attempted only if ANY of these
+//                                    four keys is present)
+//   edgedia/edgespacing           -> edgeUBar group (optional;
+//                                    attempted if EITHER key is present)
+//
+// e.g. "cantileverslab id=CS1 projection=1500 thickness=200 width=3000
+//       cover=25 support=300 topmaindia=12 topmainspacing=150
+//       bottomdia=10 bottomspacing=200"
+//
+// Return shape (matches tryNewElementDiagramParsers' expectations
+// exactly — see that function's own header in chat.js):
+//   { ok:false, code:'BAD_SYNTAX' }                leading token isn't
+//                                                   "cantileverslab" —
+//                                                   caller falls through
+//                                                   to the next parser.
+//   { ok:false, code, type:'cantileverslab', message }
+//                                                   leading token
+//                                                   matched, compute*
+//                                                   Geometry threw.
+//   { ok:true, type:'cantileverslab', geometry }    success.
+// This function never throws: tryNewElementDiagramParsers calls it
+// with no surrounding try/catch (unlike the routeDiagramCommand branch
+// beside it in chat.js), so a leaked exception here would 500 the
+// whole /diagram request instead of falling through cleanly.
+function tokenizeDiagramCommand(text) {
+  const tokens = Object.create(null);
+  const re = /([A-Za-z][A-Za-z0-9_]*)\s*=\s*("[^"]*"|'[^']*'|[^\s]+)/g;
+  let m;
+  while ((m = re.exec(text))) {
+    let v = m[2];
+    if (v.length >= 2 && ((v[0] === '"' && v[v.length - 1] === '"') || (v[0] === "'" && v[v.length - 1] === "'"))) {
+      v = v.slice(1, -1);
+    }
+    tokens[m[1].toLowerCase()] = v;
+  }
+  return tokens;
+}
+
+export function parseDiagramCommand(promptText) {
+  const TYPE = 'cantileverslab';
+  if (typeof promptText !== 'string') return { ok: false, code: 'BAD_SYNTAX' };
+  const trimmed = promptText.trim();
+  const spaceIdx = trimmed.search(/\s/);
+  const leading = (spaceIdx === -1 ? trimmed : trimmed.slice(0, spaceIdx)).toLowerCase();
+  if (leading !== TYPE) return { ok: false, code: 'BAD_SYNTAX' };
+
+  try {
+    const t = tokenizeDiagramCommand(trimmed);
+    const num = (k) => (t[k] === undefined ? NaN : Number(t[k]));
+
+    const raw = {
+      unit: t.unit ? t.unit.toLowerCase() : undefined,
+      slabId: t.id,
+      projectionMM: num('projection'),
+      thicknessMM: num('thickness'),
+      widthMM: num('width'),
+      coverMM: num('cover'),
+      supportWidthMM: num('support'),
+      topMainBars: {
+        diameterMM: num('topmaindia'),
+        spacingMM: num('topmainspacing'),
+        cuttingLengthMM: t.topmaincut !== undefined ? num('topmaincut') : null,
+      },
+      bottomBars: {
+        diameterMM: num('bottomdia'),
+        spacingMM: num('bottomspacing'),
+        cuttingLengthMM: t.bottomcut !== undefined ? num('bottomcut') : null,
+      },
+    };
+
+    if (t.topextradia !== undefined || t.topextraspacing !== undefined || t.topextracut !== undefined || t.topextralen !== undefined) {
+      raw.topExtraBars = {
+        diameterMM: num('topextradia'),
+        spacingMM: num('topextraspacing'),
+        cuttingLengthMM: t.topextracut !== undefined ? num('topextracut') : null,
+        extraLengthMM: num('topextralen'),
+      };
+    }
+    if (t.edgedia !== undefined || t.edgespacing !== undefined) {
+      raw.edgeUBar = { diameterMM: num('edgedia'), spacingMM: num('edgespacing') };
+    }
+
+    const geometry = computeCantileverSlabDiagramGeometry(raw);
+    return { ok: true, type: TYPE, geometry };
+  } catch (err) {
+    if (err instanceof DiagramError) {
+      return { ok: false, code: err.code, type: TYPE, message: err.message };
+    }
+    // Programmer-error path (malformed token stream, unexpected
+    // exception shape) — never surfaced as BAD_SYNTAX (that would
+    // incorrectly send a genuine "cantileverslab ..." command down to
+    // routeDiagramCommand / the diffusion model instead of reporting
+    // the real failure) and never rethrown (see this function's own
+    // header on why tryNewElementDiagramParsers has no try/catch
+    // around it).
+    return { ok: false, code: 'BAD_PARAM', type: TYPE, message: err && err.message ? err.message : 'Could not parse cantileverslab command.' };
+  }
+}
+
 export { DiagramError, svgToDataUri };

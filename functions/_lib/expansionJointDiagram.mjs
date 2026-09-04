@@ -241,4 +241,85 @@ export function renderExpansionJointDiagramSVG(geometry, opts = {}) {
 </svg>`;
 }
 
+// ── parseDiagramCommand ──────────────────────────────────────────────
+// [RESTORED — new-element integration regression] Same gap, same fix,
+// as cantileverSlabDiagram.mjs's own parseDiagramCommand header
+// comment describes in full — see that file for the build-failure
+// root cause and the tryNewElementDiagramParsers contract this
+// satisfies.
+//
+//   id=<string>                  default EJ1
+//   unit=mm|cm|m                 default mm
+//   run=<number>                  -> runLengthMM     (required)
+//   gap=<number>                  -> gapWidthMM      (required)
+//   depth=<number>                -> memberDepthMM   (required)
+//   dowels=DIA:SPACING:TOTALLEN:SLEEVELEN:SIDE
+//                                  -> dowels (optional; omit entirely
+//                                     for a true movement-only joint
+//                                     with no load transfer). SIDE is
+//                                     left|right.
+//
+// e.g. "expansionjoint id=EJ1 run=6000 gap=25 depth=250
+//       dowels=20:300:600:150:left"
+//
+// Same three-shape return contract, same "never throws" discipline,
+// as cantileverSlabDiagram.mjs's own parseDiagramCommand — see that
+// file's header for the full rationale (tryNewElementDiagramParsers
+// calls this with no surrounding try/catch).
+function tokenizeDiagramCommand(text) {
+  const tokens = Object.create(null);
+  const re = /([A-Za-z][A-Za-z0-9_]*)\s*=\s*("[^"]*"|'[^']*'|[^\s]+)/g;
+  let m;
+  while ((m = re.exec(text))) {
+    let v = m[2];
+    if (v.length >= 2 && ((v[0] === '"' && v[v.length - 1] === '"') || (v[0] === "'" && v[v.length - 1] === "'"))) {
+      v = v.slice(1, -1);
+    }
+    tokens[m[1].toLowerCase()] = v;
+  }
+  return tokens;
+}
+
+function parseDowelsToken(v) {
+  const bits = v.split(':');
+  return {
+    diameterMM: Number(bits[0]),
+    spacingMM: Number(bits[1]),
+    totalLengthMM: Number(bits[2]),
+    sleeveLengthMM: Number(bits[3]),
+    sleeveSide: (bits[4] || '').toLowerCase(),
+  };
+}
+
+export function parseDiagramCommand(promptText) {
+  const TYPE = 'expansionjoint';
+  if (typeof promptText !== 'string') return { ok: false, code: 'BAD_SYNTAX' };
+  const trimmed = promptText.trim();
+  const spaceIdx = trimmed.search(/\s/);
+  const leading = (spaceIdx === -1 ? trimmed : trimmed.slice(0, spaceIdx)).toLowerCase();
+  if (leading !== TYPE) return { ok: false, code: 'BAD_SYNTAX' };
+
+  try {
+    const t = tokenizeDiagramCommand(trimmed);
+    const num = (k) => (t[k] === undefined ? NaN : Number(t[k]));
+
+    const raw = {
+      unit: t.unit ? t.unit.toLowerCase() : undefined,
+      jointId: t.id,
+      runLengthMM: num('run'),
+      gapWidthMM: num('gap'),
+      memberDepthMM: num('depth'),
+    };
+    if (t.dowels !== undefined) raw.dowels = parseDowelsToken(t.dowels);
+
+    const geometry = computeExpansionJointDiagramGeometry(raw);
+    return { ok: true, type: TYPE, geometry };
+  } catch (err) {
+    if (err instanceof DiagramError) {
+      return { ok: false, code: err.code, type: TYPE, message: err.message };
+    }
+    return { ok: false, code: 'BAD_PARAM', type: TYPE, message: err && err.message ? err.message : 'Could not parse expansionjoint command.' };
+  }
+}
+
 export { DiagramError, svgToDataUri };

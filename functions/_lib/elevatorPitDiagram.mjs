@@ -281,4 +281,98 @@ export function renderElevatorPitDiagramSVG(geometry, opts = {}) {
 </svg>`;
 }
 
+// ── parseDiagramCommand ──────────────────────────────────────────────
+// [RESTORED — new-element integration regression] Same gap, same fix,
+// as cantileverSlabDiagram.mjs's own parseDiagramCommand header
+// comment describes in full — see that file for the build-failure
+// root cause and the tryNewElementDiagramParsers contract this
+// satisfies.
+//
+//   id=<string>                  default EP1
+//   unit=mm|cm|m                 default mm
+//   innerlength=<number>          -> innerLengthMM         (required)
+//   innerwidth=<number>           -> innerWidthMM          (required)
+//   wallthickness=<number>        -> wallThicknessMM       (required)
+//   pitdepth=<number>             -> pitDepthMM            (required)
+//   slabthickness=<number>        -> baseSlabThicknessMM   (required)
+//   cover=<number>                -> coverMM               (required)
+//   extdia/extspacing             -> exteriorVerticalBars  (required)
+//   intdia/intspacing             -> interiorVerticalBars  (required)
+//   horizdia/horizspacing         -> horizontalBars        (required)
+//   meshdia/meshspacing           -> baseSlabMesh          (required)
+//   sump=LENGTH:WIDTH:DEPTH[:OFFSETX:OFFSETY]
+//                                  -> sump (optional)
+//
+// e.g. "elevatorpit id=EP1 innerlength=2000 innerwidth=1800
+//       wallthickness=300 pitdepth=1500 slabthickness=400 cover=50
+//       extdia=16 extspacing=150 intdia=12 intspacing=200 horizdia=12
+//       horizspacing=200 meshdia=12 meshspacing=200"
+//
+// Same three-shape return contract, same "never throws" discipline,
+// as cantileverSlabDiagram.mjs's own parseDiagramCommand — see that
+// file's header for the full rationale (tryNewElementDiagramParsers
+// calls this with no surrounding try/catch).
+function tokenizeDiagramCommand(text) {
+  const tokens = Object.create(null);
+  const re = /([A-Za-z][A-Za-z0-9_]*)\s*=\s*("[^"]*"|'[^']*'|[^\s]+)/g;
+  let m;
+  while ((m = re.exec(text))) {
+    let v = m[2];
+    if (v.length >= 2 && ((v[0] === '"' && v[v.length - 1] === '"') || (v[0] === "'" && v[v.length - 1] === "'"))) {
+      v = v.slice(1, -1);
+    }
+    tokens[m[1].toLowerCase()] = v;
+  }
+  return tokens;
+}
+
+function parseSumpToken(v) {
+  const bits = v.split(':');
+  return {
+    lengthMM: Number(bits[0]),
+    widthMM: Number(bits[1]),
+    depthMM: Number(bits[2]),
+    offsetXMM: bits[3] !== undefined && bits[3] !== '' ? Number(bits[3]) : undefined,
+    offsetYMM: bits[4] !== undefined && bits[4] !== '' ? Number(bits[4]) : undefined,
+  };
+}
+
+export function parseDiagramCommand(promptText) {
+  const TYPE = 'elevatorpit';
+  if (typeof promptText !== 'string') return { ok: false, code: 'BAD_SYNTAX' };
+  const trimmed = promptText.trim();
+  const spaceIdx = trimmed.search(/\s/);
+  const leading = (spaceIdx === -1 ? trimmed : trimmed.slice(0, spaceIdx)).toLowerCase();
+  if (leading !== TYPE) return { ok: false, code: 'BAD_SYNTAX' };
+
+  try {
+    const t = tokenizeDiagramCommand(trimmed);
+    const num = (k) => (t[k] === undefined ? NaN : Number(t[k]));
+
+    const raw = {
+      unit: t.unit ? t.unit.toLowerCase() : undefined,
+      pitId: t.id,
+      innerLengthMM: num('innerlength'),
+      innerWidthMM: num('innerwidth'),
+      wallThicknessMM: num('wallthickness'),
+      pitDepthMM: num('pitdepth'),
+      baseSlabThicknessMM: num('slabthickness'),
+      coverMM: num('cover'),
+      exteriorVerticalBars: { diameterMM: num('extdia'), spacingMM: num('extspacing') },
+      interiorVerticalBars: { diameterMM: num('intdia'), spacingMM: num('intspacing') },
+      horizontalBars: { diameterMM: num('horizdia'), spacingMM: num('horizspacing') },
+      baseSlabMesh: { diameterMM: num('meshdia'), spacingMM: num('meshspacing') },
+    };
+    if (t.sump !== undefined) raw.sump = parseSumpToken(t.sump);
+
+    const geometry = computeElevatorPitDiagramGeometry(raw);
+    return { ok: true, type: TYPE, geometry };
+  } catch (err) {
+    if (err instanceof DiagramError) {
+      return { ok: false, code: err.code, type: TYPE, message: err.message };
+    }
+    return { ok: false, code: 'BAD_PARAM', type: TYPE, message: err && err.message ? err.message : 'Could not parse elevatorpit command.' };
+  }
+}
+
 export { DiagramError, svgToDataUri };
