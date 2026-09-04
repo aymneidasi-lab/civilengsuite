@@ -254,13 +254,19 @@ export function renderExpansionJointDiagramSVG(geometry, opts = {}) {
 //   gap=<number>                  -> gapWidthMM      (required)
 //   depth=<number>                -> memberDepthMM   (required)
 //   dowels=DIA:SPACING:TOTALLEN:SLEEVELEN:SIDE
+//     -or- doweldia=<n> dowelspacing=<n> dowellen=<n> sleevelen=<n>
+//          sleeveside=left|right      (flat form; footing_pro_v94.html's
+//                                      QR_EXPANSIONJOINT_EXAMPLE sends this)
 //                                  -> dowels (optional; omit entirely
 //                                     for a true movement-only joint
 //                                     with no load transfer). SIDE is
-//                                     left|right.
+//                                     left|right. If both forms are given,
+//                                     dowels= wins.
 //
 // e.g. "expansionjoint id=EJ1 run=6000 gap=25 depth=250
 //       dowels=20:300:600:150:left"
+//  -or- "expansionjoint id=EJ1 run=6000 gap=25 depth=300 doweldia=16
+//       dowelspacing=300 dowellen=500 sleevelen=150 sleeveside=left"
 //
 // Same three-shape return contract, same "never throws" discipline,
 // as cantileverSlabDiagram.mjs's own parseDiagramCommand — see that
@@ -291,6 +297,31 @@ function parseDowelsToken(v) {
   };
 }
 
+// [BUGFIX] Flat dowel tokens never reached raw.dowels, so every joint
+// silently rendered as a free-movement joint. footing_pro_v94.html's
+// QR_EXPANSIONJOINT_EXAMPLE/QR_EXPANSIONJOINT_FIELDS document and send
+// doweldia=/dowelspacing=/dowellen=/sleevelen=/sleeveside= as five
+// separate flat tokens — the same flat-token style id=/unit=/run=/gap=/
+// depth= already use — but only the t.dowels branch below (a single
+// combined dowels=DIA:SPACING:TOTALLEN:SLEEVELEN:SIDE token no shipped
+// caller sends) ever populated raw.dowels. That QR entry shipped marked
+// [UNVERIFIED]; confirmed by direct execution in Node that it produced
+// geometry.dowels === null for the exact documented example command.
+// Maps onto the identical raw.dowels shape computeExpansionJointDiagramGeometry
+// already validates (diameterMM/spacingMM/totalLengthMM/sleeveLengthMM/
+// sleeveSide) — that function is unmodified. dowels= (compact form)
+// still works unchanged for any existing caller already using it;
+// dowels= wins if both are present.
+function parseFlatDowelTokens(t) {
+  return {
+    diameterMM: Number(t.doweldia),
+    spacingMM: Number(t.dowelspacing),
+    totalLengthMM: Number(t.dowellen),
+    sleeveLengthMM: Number(t.sleevelen),
+    sleeveSide: (t.sleeveside || '').toLowerCase(),
+  };
+}
+
 export function parseDiagramCommand(promptText) {
   const TYPE = 'expansionjoint';
   if (typeof promptText !== 'string') return { ok: false, code: 'BAD_SYNTAX' };
@@ -310,7 +341,13 @@ export function parseDiagramCommand(promptText) {
       gapWidthMM: num('gap'),
       memberDepthMM: num('depth'),
     };
-    if (t.dowels !== undefined) raw.dowels = parseDowelsToken(t.dowels);
+    const hasFlatDowelTokens = t.doweldia !== undefined || t.dowelspacing !== undefined ||
+      t.dowellen !== undefined || t.sleevelen !== undefined || t.sleeveside !== undefined;
+    if (t.dowels !== undefined) {
+      raw.dowels = parseDowelsToken(t.dowels);
+    } else if (hasFlatDowelTokens) {
+      raw.dowels = parseFlatDowelTokens(t);
+    }
 
     const geometry = computeExpansionJointDiagramGeometry(raw);
     return { ok: true, type: TYPE, geometry };
