@@ -1839,22 +1839,42 @@ function stripAl(text) {
 // identical call on the identical evidence — this is the second of two
 // places that decision had to be made consistently, not a one-off (see
 // that file's own comment on this same point).
+// [Bugfix, this session] The three (?!\s+\w+=) / \b additions below
+// (trapezoidal, raft, strap) close two gaps in the same family Step 2
+// only partly closed:
+//   1. trapezoidal/strap had NO (?!\s+\w+=) guard at all — a full,
+//      valid "/diagram trapezoidal B=6000 L=9000 D=500 col1off=1000 ..."
+//      or "/diagram strap B=... col1off=..." command matched this
+//      loose-text pattern and (pre this session's chat.js dispatch-order
+//      fix) got misrouted to the "generic template" response before
+//      trapezoidalFootingDiagram.mjs's / strapFootingDiagram.mjs's own
+//      parseDiagramCommand ever ran. Same root cause Step 2 fixed for
+//      raft, never carried over to these two.
+//   2. raft's existing Step 2 guard stops at the first whitespace, so it
+//      only ever excluded "raft" followed by a SPACE then a param
+//      ("raft B=..."). It does nothing against a DIFFERENT command
+//      token that happens to start with the same four letters and no
+//      space in between — "raftpile ...". Adding \b right after the
+//      literal "raft" (before the lookahead) makes the match stop
+//      dead at "raftpile"'s embedded "raft" (no word boundary between
+//      "t" and "p"), while every previously-passing case (bare "raft",
+//      "raft foundation", "raft B=...") is unaffected — verified
+//      against both sets in test_classify_fix.mjs, not assumed from
+//      reading the regex.
+// This closes the same class of bug diagramCommandRouter.mjs's own
+// UNSUPPORTED_TYPE-fallthrough design already prevents for the STRICT
+// command path — routeDiagramCommand always gets first refusal on a
+// real command now (see chat.js's own dispatch-order fix note) — but
+// classifyFootingDiagram is fixed at its own source too, since other
+// call sites may invoke it directly without that ordering guarantee.
 const GENERIC_PATTERNS = [
-  { type: 'trapezoidal', re: /trapezoidal|trapezoid/i },
+  { type: 'trapezoidal', re: /\b(?:trapezoidal|trapezoid)\b(?!\s+\w+=)/i },
   { type: 'trapezoidal', re: /شبه\s*منحرف/ },
   { type: 'strip', re: /strip\s*footing/i },
   { type: 'strip', re: /قاعدة\s*شريطية\s*تحت\s*حائط/ },
-  // [Step 2 fix] (?!\s+\w+=) excludes strict /diagram command syntax
-  // ("raft B=6000 L=9000 cols=4 ...") from this natural-language
-  // pattern — unlike strip's re (footing required, so "strip B=900..."
-  // never matched it to begin with), this one's suffix was optional,
-  // so bare "raft" alone used to match and swallow every /diagram raft
-  // command before parseDiagramCommand ever got a chance to parse it.
-  // Confirmed via test_step2_classify.mjs: "raft foundation" and bare
-  // "raft" still classify (unchanged); "raft B=..." no longer does.
-  { type: 'raft', re: /raft(?!\s+\w+=)\s*(foundation|footing)?|mat\s*foundation/i },
+  { type: 'raft', re: /raft\b(?!\s+\w+=)\s*(foundation|footing)?|mat\s*foundation/i },
   { type: 'raft', re: /قاعدة\s*(لبشة|حصيرة)/ },
-  { type: 'strap', re: /\bstrap\s*(footing|beam)?\b/i },
+  { type: 'strap', re: /\bstrap(?!\s+\w+=)\s*(footing|beam)?\b/i },
   { type: 'strap', re: /قاعدة\s*رباط|قاعدة\s*شريطية|كمرة\s*رباط/ },
   { type: 'isolated', re: /isolated\s*(column)?\s*footing|spread\s*footing/i },
   { type: 'isolated', re: /قاعدة\s*(منفردة|منفصلة)/ },
