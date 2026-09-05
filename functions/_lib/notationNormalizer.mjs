@@ -771,6 +771,70 @@ function adjustCutForSqrtBraceLookahead(buf, cut) {
   return m ? m.index : cut;
 }
 
+// [FIX — surrogate-pair-unsafe cut] Universal final guard, run AFTER every
+// adjuster above INCLUDING the MAX_HOLDBACK clamp in push() (that clamp
+// picks tail.length - MAX_HOLDBACK unconditionally and has no token
+// awareness at all, so it's exactly as capable of landing mid-pair as the
+// naive findSafeCutIndex scan is).
+//
+// Root cause: findSafeCutIndex (and every adjuster's own `scan`/`m.index`
+// arithmetic) walks `buf` by UTF-16 CODE UNIT, via buf[i]/charCodeAt --
+// never by code point. NOT_TOKEN_CHAR_RE tests one code unit at a time
+// against `[^A-Za-z<greek>\\$_{^]`; a lone high or low surrogate matches
+// that negated class (it's none of those characters), so the scan happily
+// reports "safe to cut" at a position sitting BETWEEN the two code units
+// of one astral character. Every SOUND_TRIGGER_MAP entry the client
+// matches on (👏🔨🔧🛠️😂🤣😢😭) is astral -- 2 UTF-16 code units each --
+// so this is not a hypothetical edge case for this product's actual
+// alphabet of trigger characters, it is the primary shape they take.
+//
+// Why this matters despite plain concatenation usually self-healing a
+// split pair: ES2019 well-formed JSON.stringify escapes a lone surrogate
+// as a literal `\uD83D`-style 6-char sequence rather than embedding the
+// raw code unit, so two independently JSON-framed/UTF-8-encoded SSE
+// deltas that split a pair still reassemble correctly THROUGH AN
+// UNINTERRUPTED STREAM via simple in-order string concatenation on the
+// client (verified empirically against this exact push()/relay() shape --
+// see repro_before.mjs). The failure mode this guard actually closes is
+// the app's own resumable-stream path (resumableSse.mjs's chunkIndex /
+// RESUME_BACKOFF_MS / the client's `truncated:true` continuation fold): if
+// the connection drops in the gap between the push() that emits the
+// orphaned high surrogate and the push() that would have supplied its low
+// surrogate, no second half is ever coming -- the resume flow re-prompts
+// the model for a CONTINUATION, it does not resume mid-character. That
+// orphan then renders as-is (or gets replaced with U+FFFD further
+// downstream), permanently and silently breaking scanForSoundTriggers's
+// exact-codepoint match for that message -- since a lone surrogate isn't
+// any SOUND_TRIGGER_MAP key, hits.length is just 0, so appendBubble's
+// fireSoundTriggersForChunk() call fires zero sounds with no error
+// anywhere in the pipeline. That is the "sounds don't play" report with
+// no exception, no console warning, and no clue at the call site itself.
+//
+// Checks ONLY the code unit immediately before `idx` -- not "is there a
+// low surrogate sitting right at idx" (that formulation misses the
+// end-of-buffer case, where idx === str.length and there IS no str[idx]
+// to inspect, yet the cut is just as unsafe: str[idx-1] is an orphaned
+// high surrogate with nothing after it in THIS buffer at all, which is
+// exactly the shape of the app's own resumable-stream interruption case
+// two paragraphs up). A code unit in the high-surrogate range (0xD800-
+// 0xDBFF) is -- in any well-formed string, which is all `str` ever is,
+// since it is built solely from prior valid pushes -- NEVER a legal place
+// to end a safe cut: it is either mid-pair (its low half sits at str[idx]
+// and would be excluded) or, at the tail end, a character still waiting
+// on a low half that hasn't arrived yet. Either way, pulling back one
+// code unit moves the whole high surrogate into the withheld remainder,
+// where the next push() (or finish(), if none ever comes) picks it back
+// up. Single conditional pullback, no loop needed: two high surrogates
+// can never sit directly adjacent in well-formed input without a low
+// surrogate between them, so this can only ever land on a real character
+// boundary, never on a second split.
+function avoidSurrogateSplit(str, idx) {
+  if (idx <= 0) return idx;
+  const before = str.charCodeAt(idx - 1);
+  const isHighSurrogate = before >= 0xD800 && before <= 0xDBFF;
+  return isHighSurrogate ? idx - 1 : idx;
+}
+
 // ── Math-span-aware layer ───────────────────────────────────────────────
 // Streaming shape mirrors the rest of this file: holdback-margin /
 // detect-and-retract, just with a different notion of "safe cut point".
@@ -975,10 +1039,18 @@ export class NotationNormalizer {
       tailCut = adjustCutForSubscriptBaseLookahead(tail, tailCut);
       tailCut = adjustCutForSqrtBraceLookahead(tail, tailCut);
       if (tail.length - tailCut > MAX_HOLDBACK) tailCut = tail.length - MAX_HOLDBACK;
+      // [FIX — surrogate-pair-unsafe cut] Must run LAST: it has to see (and
+      // can override) the MAX_HOLDBACK clamp above, which is itself blind
+      // to token/pair boundaries. See avoidSurrogateSplit's own comment.
+      tailCut = avoidSurrogateSplit(tail, tailCut);
       cut = spanEnd + tailCut;
     } else {
       cut = openAt;
       if (this._buf.length - openAt > MATH_MAX_HOLDBACK) cut = this._buf.length; // safety valve, see MATH_MAX_HOLDBACK
+      // openAt/buf.length both always land on single-code-unit ASCII
+      // delimiter/boundary positions (see findOpenMathDelimiter /
+      // findOpenFenceDelimiter), so neither can ever bisect a surrogate
+      // pair -- no avoidSurrogateSplit call needed on this branch.
     }
     if (cut <= 0) return { emit: '' };
     const safePart = this._buf.slice(0, cut);
@@ -987,7 +1059,22 @@ export class NotationNormalizer {
   }
 
   finish() {
-    const rest = this._buf;
+    // [FIX — surrogate-pair-unsafe cut, end-of-stream case] finish() means
+    // no further deltaText is ever coming -- if this._buf ends in an
+    // orphaned high surrogate (the upstream provider's own stream ended
+    // mid-character, independent of anything push() decided), there is no
+    // possible low surrogate left to pair it with, ever. Rendering it
+    // as-is only guarantees a downstream UTF-8 encode (TextEncoder, or any
+    // later byte-level re-encode) silently turns it into U+FFFD. Dropping
+    // it here is strictly better: a truncated final character disappearing
+    // is a smaller, quieter degradation than a visible replacement-
+    // character glyph, and it can never have been a SOUND_TRIGGER_MAP hit
+    // on its own (every entry is a complete surrogate PAIR).
+    let rest = this._buf;
+    if (rest.length > 0) {
+      const lastCode = rest.charCodeAt(rest.length - 1);
+      if (lastCode >= 0xD800 && lastCode <= 0xDBFF) rest = rest.slice(0, -1);
+    }
     this._buf = '';
     return { emit: this._render(rest) };
   }
