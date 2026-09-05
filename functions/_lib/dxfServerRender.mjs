@@ -52,6 +52,9 @@ import { renderCircularColumnDiagramDXF } from './circularColumnDiagram.dxf.mjs'
 import { renderDeepBeamDiagramDXF } from './deepBeamDiagram.dxf.mjs';
 import { renderElevatorPitDiagramDXF } from './elevatorPitDiagram.dxf.mjs';
 import { renderBeamColumnJointDiagramDXF } from './beamColumnJointDiagram.dxf.mjs';
+import { renderCantileverSlabDiagramDXF } from './cantileverSlabDiagram.dxf.mjs';
+import { renderRaftPileDiagramDXF } from './raftPileDiagram.dxf.mjs';
+
 
 // elementType -> render function. Keys mirror chat.js's own
 // DIAGRAM_TYPE_RENDERERS / REBAR_ELEMENT_DISPATCH vocabulary exactly
@@ -93,6 +96,8 @@ export const DXF_RENDERERS = {
   deepbeam: renderDeepBeamDiagramDXF,
   elevatorpit: renderElevatorPitDiagramDXF,
   beamcolumnjoint: renderBeamColumnJointDiagramDXF,
+  cantileverslab: renderCantileverSlabDiagramDXF,
+  raftpile: renderRaftPileDiagramDXF,
 };
 
 export function isDxfReady(elementType) {
