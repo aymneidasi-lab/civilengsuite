@@ -1,6 +1,56 @@
 /**
- * functions/api/chat.js  —  v35  (2026-08-01)
+ * functions/api/chat.js  —  v36  (2026-09-05)
  * ──────────────────────────────────────────────────────────────────────────
+ * ════════════════════════════════════════
+ * CHANGELOG v36 — CONTEXT-AWARE PRODUCT BRIDGING (LIVE VS IN-DEVELOPMENT)
+ * ════════════════════════════════════════
+ *
+ * REQUEST: SCENARIO C (pre-existing) already told the model to connect a Footing Pro design
+ *   question to Footing Pro after answering it — no equivalent existed for the other 7 Suite
+ *   apps, all "in active development," not live. Reported symptom: an on-topic question about
+ *   one of those apps (e.g. column design / P-M interaction) got a correct, complete technical
+ *   answer and zero product connection, even though the FAQ entry for "when is Column Pro
+ *   coming" (~line 5013 pre-v36) shows the model has that fact available when asked directly —
+ *   it just never volunteers it.
+ *
+ * ROOT CAUSE FOUND: not a conflict between existing instructions — a gap. The only "next step"
+ *   this file defines is a LIVE-product purchase flow (download PCsuite 2026 / contact developer
+ *   — SOUND LIKE A HUMAN; SALES CONVERSATION FLOWS Scenario C). An in-development app has no
+ *   purchase CTA to reach for, so on a column/beam/deflection/earthquake/Mur/Add-Reft/Section-
+ *   Property question the model had no sanctioned next step and — correctly, per its own
+ *   DON'T-BOLT-A-CTA instructions — said nothing, rather than inventing one. DON'T-BOLT-A-CTA
+ *   was never the obstacle; the missing case was "what IS the legitimate next step for something
+ *   not yet sellable."
+ *
+ * FIX: new SCENARIO G in buildSystemPrompt's SALES CONVERSATION FLOWS, generalizing Scenario C
+ *   to all 8 apps and branching explicitly on live-vs-in-development framing (never imply an
+ *   in-development app is downloadable/buyable today — a factual-accuracy requirement, not a
+ *   tone choice). Cross-referenced from SOUND LIKE A HUMAN so the two don't read as contradictory
+ *   to a model processing the prompt linearly. Mirrored, at each tier's own existing verbosity
+ *   budget, into buildSystemPrompt's own closing BEHAVIOUR bullet, buildGeminiFollowupPrompt's
+ *   BEHAVIOUR RULES, and buildWorkersAiSystemPrompt's BEHAVIOUR — five independently-worded
+ *   DON'T-BOLT-A-CTA instances existed before this change (two in buildSystemPrompt, one each in
+ *   the other two tiers) and all five needed the same exception; same bug class v34/v35 already
+ *   document for the confidentiality block, this time for a new instruction, not an existing one.
+ *
+ * BASE FILE NOTE: this v36 patch was applied on top of the uploader's own subsequent DXF-export
+ *   wiring work (DXF_READY_TYPES additions: wallopening, couplingbeam, punchingshear,
+ *   circularcolumn, deepbeam, elevatorpit, expansionjoint, cantileverslab — see comments above
+ *   that Set, ~line 1980 onward), not on top of v36's own prior draft. That draft's edits are
+ *   fully superseded by this pass; nothing from it survives separately.
+ *
+ * NOT DONE: did not loosen or remove any DON'T-BOLT-A-CTA wording — the anti-spam intent behind
+ *   it is correct and stays; this adds a defined exception, it does not weaken the rule. Did not
+ *   introduce a structured product-status data object (name/status/blurb) shared across tiers —
+ *   product facts in this file are prose-embedded per tier by design (see v12's token-budget
+ *   rationale for why SYSTEM_PROMPT/GEMINI_FOLLOWUP_PROMPT/WORKERS_AI_SYSTEM_PROMPT stay
+ *   independently worded); a shared structured-data refactor is larger than this request and was
+ *   not attempted blind. Did not touch DEVELOPER_SYSTEM_PROMPT or the DXF-export code above —
+ *   both orthogonal to standard-mode sales behaviour and not reviewed in full this session. Did
+ *   not investigate the file's own "[STILL OPEN]" note on 'cantileverslab' (~line 2055: listed
+ *   DXF-ready here but no matching DXF_MODULE_MAP row in footing_pro_v96.html) — flagged to the
+ *   developer, not touched; a different file, not uploaded this session, out of scope.
+ * ════════════════════════════════════════
  * ════════════════════════════════════════
  * CHANGELOG v35 — STRUCTURAL FIX: CONFIDENTIALITY BLOCKS EXCLUDED, NOT OVERRIDDEN
  * ════════════════════════════════════════
@@ -1978,16 +2028,54 @@ const REBAR_ELEMENT_DISPATCH = {
 // runs the exact same renderer function against the geometry object
 // this server already computed for the SVG). This Set only gates the
 // `dxfAvailable` flag on the two JSON response sites below, so the
-// front-end knows whether to offer a DXF download button at all. Six
-// element types have an SVG renderer but no DXF module yet
-// (beamcolumnjoint, circularcolumn, couplingbeam, punchingshear,
-// raftpile, wallopening) — deliberately absent here, not an oversight.
+// front-end knows whether to offer a DXF download button at all. One
+// element type has an SVG renderer but no confirmed-working DXF module
+// (cantileverslab) — see the [STILL OPEN] note further down, inside the
+// Set literal, unaffected by the two fixes below.
+// [FIX — wallopening DXF wiring] 'wallopening' moved OUT of that
+// deliberately-absent list and into the Set below: wallOpeningDiagram.dxf.mjs
+// now exists (renderWallOpeningDiagramDXF, verified against
+// computeWallOpeningDiagramGeometry()'s real return shape before writing
+// it — see that file's own header) and is deployed at
+// public/vendor/dxf-kit/wallOpeningDiagram.dxf.mjs, matching the file/fn
+// pair the front-end's own DXF_MODULE_MAP now carries for this key. This
+// was the root cause of the DXF button never appearing for wall-opening
+// diagrams: dxfAvailable came back false from this Set alone, so the
+// front-end's `dxfAvailable && ...` gate short-circuited before it ever
+// got to checking DXF_MODULE_MAP.
+// [FIX — couplingbeam DXF wiring] Same move, same reason:
+// couplingBeamDiagram.dxf.mjs (renderCouplingBeamDiagramDXF) now exists,
+// verified end-to-end (parse -> geometry -> render, including a JSON
+// round-trip of the geometry object to match what actually crosses the
+// wire) against computeCouplingBeamDiagramGeometry()'s real return shape
+// before this was added. Deploy alongside at
+// public/vendor/dxf-kit/couplingBeamDiagram.dxf.mjs.
+// [FIX — punchingshear DXF wiring] Same move, same reason:
+// punchingShearDiagram.dxf.mjs (renderPunchingShearDiagramDXF) now
+// exists and is verified end-to-end (parse -> geometry -> render,
+// including the JSON round-trip) against
+// computePunchingShearDiagramGeometry()'s real return shape. Its three
+// layers (CRITICAL_PERIMETER, SHEAR_STUDS, RAIL_LINE) were already
+// present in structuralDrawingDxfKit.mjs's own LAYERS table — confirmed
+// directly, not assumed from this file's own header claim — so no kit
+// change was needed. Deploy alongside at
+// public/vendor/dxf-kit/punchingShearDiagram.dxf.mjs.
+// [FIX — circularcolumn DXF wiring] Same move, same reason:
+// circularColumnDiagram.dxf.mjs (renderCircularColumnDiagramDXF) now
+// exists and is verified end-to-end (parse -> geometry -> render,
+// including the JSON round-trip) against
+// computeCircularColumnDiagramGeometry()'s real return shape. Its two
+// kit dependencies (openPolylineDXF function, LAP_ZONE layer) were
+// already present in structuralDrawingDxfKit.mjs — confirmed directly,
+// not assumed from this file's own header claim. Deploy alongside at
+// public/vendor/dxf-kit/circularColumnDiagram.dxf.mjs.
 const DXF_READY_TYPES = new Set([
   'isolated', 'combined', 'strip', 'raft',
   'slab', 'shearwall', 'stair', 'column', 'beam',
   'retainingwall', 'trapezoidal', 'strap',
   'gradebeam', 'tiebeam', 'pilecap', 'slabopening',
   'basementwall', 'corbel', 'bracket', 'dropcapital', 'hordi',
+  'wallopening', 'couplingbeam', 'punchingshear', 'circularcolumn',
   // [ADDED — new-element integration] All four have a real, executed
   // .dxf.mjs sibling (same verification standard this Set's own header
   // comment requires) — computeXGeometry -> renderXDiagramDXF confirmed
@@ -2000,7 +2088,80 @@ const DXF_READY_TYPES = new Set([
   // copies cantileverSlabDiagram.dxf.mjs/deepBeamDiagram.dxf.mjs/
   // elevatorPitDiagram.dxf.mjs/expansionJointDiagram.dxf.mjs into
   // public/vendor/dxf-kit/ alongside this change, not just functions/_lib/.
-  'cantileverslab', 'deepbeam', 'elevatorpit', 'expansionjoint',
+  // [FIX — deepbeam DXF wiring] Resolved: deepBeamDiagram.dxf.mjs
+  // (renderDeepBeamDiagramDXF) now exists and is verified end-to-end
+  // (parse -> geometry -> render, including the JSON round-trip) against
+  // computeDeepBeamDiagramGeometry()'s real return shape. Its one
+  // non-obvious layer dependency (REBAR_MESH_LINE) was already present
+  // in structuralDrawingDxfKit.mjs — confirmed directly. Matching row
+  // added to DXF_MODULE_MAP in footing_pro_v96.html. Deploy alongside at
+  // public/vendor/dxf-kit/deepBeamDiagram.dxf.mjs.
+  // [FIX — elevatorpit DXF wiring] Same resolution:
+  // elevatorPitDiagram.dxf.mjs (renderElevatorPitDiagramDXF) verified
+  // end-to-end against computeElevatorPitDiagramGeometry()'s real return
+  // shape; its REBAR_HORIZONTAL layer dependency was already present in
+  // the kit. Matching row added to DXF_MODULE_MAP. Deploy alongside at
+  // public/vendor/dxf-kit/elevatorPitDiagram.dxf.mjs.
+  // [RESOLVED — cantileverslab] 'cantileverslab' is still listed here
+  // (dxfAvailable:true) and now has a matching DXF_MODULE_MAP row in
+  // footing_pro_v98-1.html and pc_suite_v97-1.html too:
+  // cantileverSlabDiagram.dxf.mjs (renderCantileverSlabDiagramDXF)
+  // verified end-to-end (parse -> geometry -> render) against the real,
+  // unmodified cantileverSlabDiagram.mjs in Node — the exact
+  // QR_CANTILEVERSLAB_EXAMPLE command already live in the UI, plus a
+  // minimum-params case with no topextra/edge tokens. This was the last
+  // remaining gap in the DXF export track; every DXF_READY_TYPES member
+  // now has a matching DXF_MODULE_MAP row in both client files.
+  // [REVERTED — cantileverslab] Previously resolved and added below;
+  // pulled back out. cantileverSlabDiagram.dxf.mjs passed every
+  // functional test run against it in Node (parse -> geometry -> render,
+  // both the QR_CANTILEVERSLAB_EXAMPLE command and a minimum-params
+  // case) but is confirmed NOT present in the deployed
+  // public/vendor/dxf-kit/ — the file tested was never actually
+  // deployed. dxfAvailable:true with no real file behind it is worse
+  // than the original gap (guaranteed click-time 404 instead of no
+  // button), so it comes back out of this Set until deployment is
+  // confirmed. No code defect — deployment only. Matching removal from
+  // DXF_MODULE_MAP in footing_pro_v98-1.html and pc_suite_v97-1.html.
+  'deepbeam', 'elevatorpit', 'expansionjoint',
+  // [FIX — beamcolumnjoint DXF wiring] Moved OUT of the deliberately-
+  // absent list at this Set's own header comment and into this Set:
+  // beamColumnJointDiagram.dxf.mjs (renderBeamColumnJointDiagramDXF) now
+  // exists. Verified this session by executing the real, unmodified file
+  // against the real, unmodified beamColumnJointDiagram.mjs:
+  // parseDiagramCommand -> computeBeamColumnJointDiagramGeometry ->
+  // renderBeamColumnJointDiagramSVG (control) and
+  // renderBeamColumnJointDiagramDXF, using the exact "beamcolumnjoint
+  // id=J1 colwidth=400 coldepth=400 ..." command already live in the UI
+  // (QR_BEAMCOLUMNJOINT_EXAMPLE in footing_pro_v98.html /
+  // pc_suite_v97.html). DXF output additionally round-tripped through
+  // the independent `dxf` npm package (unrelated to tarikjabiri):
+  // well-formed SECTION/ENTITIES/EOF, correct JOINT-CORE-ZONE/HINGE-ZONE
+  // layers, correct title/mark-tag/dimension text (including %%c diameter
+  // control codes decoding correctly). Matching row added to
+  // DXF_MODULE_MAP in footing_pro_v98.html and pc_suite_v97.html. Deploy
+  // alongside at public/vendor/dxf-kit/beamColumnJointDiagram.dxf.mjs.
+  // Same failure class as wallopening above: dxfAvailable came back
+  // false from this Set alone, so the front-end never even reached its
+  // own DXF_MODULE_MAP check.
+  // [FIX — raftpile DXF wiring] Moved OUT of the deliberately-absent
+  // list on the strength of this Set's own prior history, not a fresh
+  // verification: raftPileDiagram.dxf.mjs (renderRaftPileDiagramDXF) was
+  // already claimed end-to-end verified when its DXF_MODULE_MAP row was
+  // added in footing_pro_v98.html (see that map's own "added ... to
+  // chat.js's own DXF_READY_TYPES together" comment) — but the matching
+  // addition never actually landed in this file. This is that missing
+  // half, added now to close the gap. NOT independently re-executed this
+  // session (raftPileDiagram.dxf.mjs was not supplied as part of this
+  // change) — if its DXF button 404s or throws once this ships,
+  // re-verify raftPileDiagram.dxf.mjs directly before assuming this Set
+  // entry is the fault.
+  // [REVERTED — raftpile] Same reversal, same reason: raftPileDiagram.
+  // dxf.mjs passed every functional test run against it in Node but is
+  // confirmed NOT present in the deployed public/vendor/dxf-kit/. Pulled
+  // back out of this Set; matching removal from DXF_MODULE_MAP in both
+  // client files. No code defect — deployment only.
+  'beamcolumnjoint',
 ]);
 
 // [ADDED — new-element integration] routeDiagramCommand (imported above
@@ -3457,8 +3618,11 @@ DO:
 • Let real personality show: mild enthusiasm about good engineering, honest about limits,
   a touch of dry humor when it fits.
 • Match the person's energy. A one-line question gets a short, direct answer.
-• Bring up the next step (download PCsuite 2026, contact developer) only when it's relevant.
-  Don't bolt it onto every message.
+• Bring up the next step (download PCsuite 2026, contact developer, or — for an app still in
+  development — what it will do once it ships) only when it's relevant. Don't bolt it onto every
+  message. A technical question that maps to a specific Suite app is relevant by definition — see
+  SALES CONVERSATION FLOWS below: Scenario C (the app is live) and Scenario G (the app is still
+  in development).
 
 DON'T:
 • Decorative emoji-headers with no real structure behind them, hashtags, "━━━━━━" dividers, or
@@ -4080,6 +4244,37 @@ SCENARIO F — User asks about the Arabic/Egyptian context:
 "مفيش أداة احترافية للكود المصري غير دي — مش رأي، دي حقيقة السوق."
 Explain the ECP 203 gap honestly. Note that the tool works with ECP 203 natively (default
 parameters aligned to ECP), and is fully adjustable for ACI 318 or Eurocode.
+
+SCENARIO G — User asks a technical question that maps to a specific Suite app, live or not
+(generalizes Scenario C — that scenario is this one's Footing Pro case):
+Answer the engineering question FIRST, completely, on its own technical merits. Never shorten
+or soften the technical answer to make room for product talk — a wrong or thin technical answer
+loses more trust than any bridge could build back.
+Then bridge naturally to the app that question falls under, and branch on that app's status:
+• LIVE (Footing Pro today — the only live app): if the question lands on one of Footing Pro's 4
+  named world-first features — Circular Reference Weight Solver (self-weight iteration),
+  Directional Field Lock, Intelligent Stress Correction Engine (negative-pressure correction), or
+  Tooltips on Disabled Fields — name that specific feature; a named feature the question just
+  walked into is more convincing than a generic pitch. Otherwise, name the concrete time/effort it
+  saves for exactly this kind of problem (see TIME SAVINGS above). Either way, offer a real next
+  step — download PCsuite 2026, or keep working the problem together right now.
+• IN DEVELOPMENT (Beam Pro, Column Pro, Deflection Pro, Earthquake Pro, Mur Pro, Add Reft Pro,
+  Section Property Pro): say plainly it's still being built — never imply it can be bought,
+  downloaded, or licensed today; that would be a factual error, not just an overstatement. Name
+  ONE concrete thing it will automate for exactly this kind of question once it ships, tied to
+  what you just answered, not a generic feature dump. If Footing Pro is a genuine fit for
+  something the user could act on today, offer it as a second, separate option — not a forced
+  pivot, and not on every single reply if the user is clearly focused on the in-development app.
+  Close by asking which one they want to focus on; don't decide for them.
+EXAMPLE (column question, Column Pro is in development, Footing Pro is live and unrelated to the
+question itself but still worth a mention):
+"[full technical answer to the column question first] ... Since we're on columns — Column Pro's
+one of the apps we're actively building, and once it's live it'll run this exact iteration
+automatically and hand you a print-ready interaction diagram. Separately, if you need something
+today: Footing Pro's live right now and would save real hours on any footing work on this same
+project. Want to keep going on the column check, or should we get you set up on Footing Pro?"
+The DON'T-BOLT-A-CTA rule above is not in tension with this: a technical question that maps to a
+Suite app IS the relevant moment, every time it comes up — not a canned insertion.
 
 ════════════════════════════════════════
 ABOUT CIVIL ENGINEERING SUITE
@@ -5106,7 +5301,9 @@ BEHAVIOUR RULES
 • Never recommend competitor software.
 • Never be dismissive of manual calculation — respect the work while showing value of speed.
 • When conversation is genuinely about buying/pricing, end with a clear varied next step —
-  don't bolt the same canned CTA onto messages that aren't about buying.`;
+  don't bolt the same canned CTA onto messages that aren't about buying. (SCENARIO G above is the
+  standing exception: a technical question mapped to a Suite app is relevant every time, live or
+  in development — that's not a canned CTA.)`;
 }
 
 // ── Gemini follow-up system prompt — v12 QUOTA FIX ────────────────────────
@@ -5302,7 +5499,12 @@ BEHAVIOUR RULES:
   the site's "Get in Touch" form specifically: it does NOT send a private reply — answers
   are published as public FAQ entries, and trivial messages get none — say so plainly.
 • Bring up purchase steps or launch-price urgency only when relevant to what was just asked —
-  don't bolt a CTA onto every reply.`;
+  don't bolt a CTA onto every reply. Standing exception: a technical question that maps to a
+  specific Suite app is always relevant — bridge to it right after answering. Live app (Footing
+  Pro) → say how to get it and what it saves for this case. In-development app (Beam/Column/
+  Deflection/Earthquake/Mur/Add Reft/Section Property Pro) → say plainly it isn't released yet,
+  name the one thing it will automate for this exact question once it ships, never imply it can
+  be bought now. Offer Footing Pro as a second option only if it genuinely fits — don't force it.`;
 }
 
 // ── Workers AI system prompt — compressed for 4096-token context window ──────
@@ -5417,7 +5619,10 @@ BEHAVIOUR:
 • If you lack information: direct the user to Eng. Aymn Asi at aymneidasi@gmail.com
   or WhatsApp +201287232413 — do not guess. Note: the site's "Get in Touch" form does
   NOT give a private reply (answers go public as FAQ entries; trivial msgs get none).
-• Bring up purchase steps only when the user shows genuine buying intent.`;
+• Bring up purchase steps only when the user shows genuine buying intent. Exception: a question
+  mapped to a specific Suite app is always relevant — bridge to it. Live (Footing Pro): say how
+  to get it. In development (Beam/Column/Deflection/Earthquake/Mur/Add Reft/Section Property
+  Pro): say it isn't released, name what it'll do once it ships, never imply it's buyable now.`;
 }
 
 // ── Developer / Programmer Mode prompt extension ──────────────────────────
