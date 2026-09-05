@@ -612,7 +612,16 @@ import {
 } from '../_lib/rotation.mjs';
 
 // ── CORS — same-origin restriction (production + localhost dev) ───────────
-const ALLOWED_ORIGINS = new Set(['https://civilengsuite.pages.dev']);
+// [FIX, v13] Was 'https://civilengsuite.pages.dev' -- stale. The deployed
+// site's actual origin (confirmed directly from a screenshot of its own
+// address bar) is gsuite.pages.dev. Harmless for the common case (a plain
+// same-origin `new Audio(src)` load doesn't send an Origin header and isn't
+// subject to CORS at all), but it means Access-Control-Allow-Origin never
+// matched the real deployment, so any code path that DOES fetch() this
+// endpoint in CORS mode (credentialed reads, future admin/debug tooling,
+// etc.) would silently fail. If there are multiple real origins (custom
+// domain + the *.pages.dev preview URL), list all of them here.
+const ALLOWED_ORIGINS = new Set(['https://gsuite.pages.dev']);
 
 function getCorsHeaders(request) {
   const origin  = request?.headers?.get('Origin') || '';
@@ -2665,11 +2674,21 @@ async function runTtsCascade({ text, lang, genderKey, speed, emotion, env, conte
   const elevenSimilarityBoost = floatFromEnv(env, 'ELEVEN_SIMILARITY_BOOST', ELEVEN_SIMILARITY_BOOST_DEFAULT);
   const speechmaticsEnabled = (env?.ENABLE_SPEECHMATICS_TTS || '').trim().toLowerCase() === 'true';
   const speechmatics = speechmaticsEnabled ? buildKeyRing(env, SPEECHMATICS_BASE_NAME) : { keys: [] };
-  // v11 point 4: default flipped true -> opt OUT with EDGE_TTS_ENABLED=false.
-  // Same idiom as isDeepgramExpired's DEEPGRAM_CREDIT_EXPIRES a few dozen
-  // lines up -- ?? 'true' so an unset env var defaults on, explicit 'false'
-  // (any case) is the only way to turn it back off.
-  const edgeEnabled = (env?.EDGE_TTS_ENABLED ?? 'true').trim().toLowerCase() !== 'false';
+  // [FIX, v13] v11 point 4 flipped this to opt-out (default 'true') while
+  // this file's own top-of-file changelog (v8 point 1) still says, in the
+  // same breath, that Edge TTS "could not be verified from this sandbox --
+  // an actual network round trip to speech.platform.bing.com" and that
+  // EDGE_TTS_ENABLED "still defaults to false for exactly that reason."
+  // Those two statements cannot both be true; the code, not the comment,
+  // was the one that silently changed. An unverified provider defaulting
+  // to ON means every request pays its full timeout (timeouts.tier0) on a
+  // tier nobody has confirmed actually works, before the cascade can reach
+  // a tier that does -- which reads to an end user as "TTS is completely
+  // broken" even when Tier 2/4 downstream are fine. Restored to opt-in:
+  // unset or anything other than exactly 'true' stays OFF. Flip it on
+  // (EDGE_TTS_ENABLED=true) only after confirming one real request
+  // succeeds in a preview deployment, per the file's own original guidance.
+  const edgeEnabled = (env?.EDGE_TTS_ENABLED ?? 'false').trim().toLowerCase() === 'true';
 
   // v12: computed once per request, reused by both Group 0 and Tier 1 below
   // -- the SAME classification should not silently differ between a Tier-0
