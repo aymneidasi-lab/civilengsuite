@@ -2019,150 +2019,29 @@ const REBAR_ELEMENT_DISPATCH = {
   wallopening: { parse: parseWallOpeningRebarPayload, render: renderWallOpeningDiagramSVG, errorMessage: wallOpeningDiagramErrorMessage },
 };
 
-// [DXF export track] Element-type keys that have a real, working
-// functions/_lib/<Element>.dxf.mjs sibling (verified by actually
-// executing each one against the shared kit — not assumed from filename
-// existence). chat.js itself never imports @tarikjabiri/dxf or any
-// .dxf.mjs module: DXF generation happens client-side (browser
-// dynamic-imports the matching vendor/dxf-kit/<Element>.dxf.mjs and
-// runs the exact same renderer function against the geometry object
-// this server already computed for the SVG). This Set only gates the
-// `dxfAvailable` flag on the two JSON response sites below, so the
-// front-end knows whether to offer a DXF download button at all. One
-// element type has an SVG renderer but no confirmed-working DXF module
-// (cantileverslab) — see the [STILL OPEN] note further down, inside the
-// Set literal, unaffected by the two fixes below.
-// [FIX — wallopening DXF wiring] 'wallopening' moved OUT of that
-// deliberately-absent list and into the Set below: wallOpeningDiagram.dxf.mjs
-// now exists (renderWallOpeningDiagramDXF, verified against
-// computeWallOpeningDiagramGeometry()'s real return shape before writing
-// it — see that file's own header) and is deployed at
-// public/vendor/dxf-kit/wallOpeningDiagram.dxf.mjs, matching the file/fn
-// pair the front-end's own DXF_MODULE_MAP now carries for this key. This
-// was the root cause of the DXF button never appearing for wall-opening
-// diagrams: dxfAvailable came back false from this Set alone, so the
-// front-end's `dxfAvailable && ...` gate short-circuited before it ever
-// got to checking DXF_MODULE_MAP.
-// [FIX — couplingbeam DXF wiring] Same move, same reason:
-// couplingBeamDiagram.dxf.mjs (renderCouplingBeamDiagramDXF) now exists,
-// verified end-to-end (parse -> geometry -> render, including a JSON
-// round-trip of the geometry object to match what actually crosses the
-// wire) against computeCouplingBeamDiagramGeometry()'s real return shape
-// before this was added. Deploy alongside at
-// public/vendor/dxf-kit/couplingBeamDiagram.dxf.mjs.
-// [FIX — punchingshear DXF wiring] Same move, same reason:
-// punchingShearDiagram.dxf.mjs (renderPunchingShearDiagramDXF) now
-// exists and is verified end-to-end (parse -> geometry -> render,
-// including the JSON round-trip) against
-// computePunchingShearDiagramGeometry()'s real return shape. Its three
-// layers (CRITICAL_PERIMETER, SHEAR_STUDS, RAIL_LINE) were already
-// present in structuralDrawingDxfKit.mjs's own LAYERS table — confirmed
-// directly, not assumed from this file's own header claim — so no kit
-// change was needed. Deploy alongside at
-// public/vendor/dxf-kit/punchingShearDiagram.dxf.mjs.
-// [FIX — circularcolumn DXF wiring] Same move, same reason:
-// circularColumnDiagram.dxf.mjs (renderCircularColumnDiagramDXF) now
-// exists and is verified end-to-end (parse -> geometry -> render,
-// including the JSON round-trip) against
-// computeCircularColumnDiagramGeometry()'s real return shape. Its two
-// kit dependencies (openPolylineDXF function, LAP_ZONE layer) were
-// already present in structuralDrawingDxfKit.mjs — confirmed directly,
-// not assumed from this file's own header claim. Deploy alongside at
-// public/vendor/dxf-kit/circularColumnDiagram.dxf.mjs.
-const DXF_READY_TYPES = new Set([
-  'isolated', 'combined', 'strip', 'raft',
-  'slab', 'shearwall', 'stair', 'column', 'beam',
-  'retainingwall', 'trapezoidal', 'strap',
-  'gradebeam', 'tiebeam', 'pilecap', 'slabopening',
-  'basementwall', 'corbel', 'bracket', 'dropcapital', 'hordi',
-  'wallopening', 'couplingbeam', 'punchingshear', 'circularcolumn',
-  // [ADDED — new-element integration] All four have a real, executed
-  // .dxf.mjs sibling (same verification standard this Set's own header
-  // comment requires) — computeXGeometry -> renderXDiagramDXF confirmed
-  // to run without throwing against the same example values this file's
-  // own new parseDiagramCommand functions accept. Per this Set's own
-  // header: chat.js never imports these directly — the browser dynamic-
-  // imports vendor/dxf-kit/<Element>.dxf.mjs at click time, so setting
-  // this flag without that file physically present at that path would
-  // make the client show a DXF button that 404s. Confirm the deploy step
-  // copies cantileverSlabDiagram.dxf.mjs/deepBeamDiagram.dxf.mjs/
-  // elevatorPitDiagram.dxf.mjs/expansionJointDiagram.dxf.mjs into
-  // public/vendor/dxf-kit/ alongside this change, not just functions/_lib/.
-  // [FIX — deepbeam DXF wiring] Resolved: deepBeamDiagram.dxf.mjs
-  // (renderDeepBeamDiagramDXF) now exists and is verified end-to-end
-  // (parse -> geometry -> render, including the JSON round-trip) against
-  // computeDeepBeamDiagramGeometry()'s real return shape. Its one
-  // non-obvious layer dependency (REBAR_MESH_LINE) was already present
-  // in structuralDrawingDxfKit.mjs — confirmed directly. Matching row
-  // added to DXF_MODULE_MAP in footing_pro_v96.html. Deploy alongside at
-  // public/vendor/dxf-kit/deepBeamDiagram.dxf.mjs.
-  // [FIX — elevatorpit DXF wiring] Same resolution:
-  // elevatorPitDiagram.dxf.mjs (renderElevatorPitDiagramDXF) verified
-  // end-to-end against computeElevatorPitDiagramGeometry()'s real return
-  // shape; its REBAR_HORIZONTAL layer dependency was already present in
-  // the kit. Matching row added to DXF_MODULE_MAP. Deploy alongside at
-  // public/vendor/dxf-kit/elevatorPitDiagram.dxf.mjs.
-  // [RESOLVED — cantileverslab] 'cantileverslab' is still listed here
-  // (dxfAvailable:true) and now has a matching DXF_MODULE_MAP row in
-  // footing_pro_v98-1.html and pc_suite_v97-1.html too:
-  // cantileverSlabDiagram.dxf.mjs (renderCantileverSlabDiagramDXF)
-  // verified end-to-end (parse -> geometry -> render) against the real,
-  // unmodified cantileverSlabDiagram.mjs in Node — the exact
-  // QR_CANTILEVERSLAB_EXAMPLE command already live in the UI, plus a
-  // minimum-params case with no topextra/edge tokens. This was the last
-  // remaining gap in the DXF export track; every DXF_READY_TYPES member
-  // now has a matching DXF_MODULE_MAP row in both client files.
-  // [REVERTED — cantileverslab] Previously resolved and added below;
-  // pulled back out. cantileverSlabDiagram.dxf.mjs passed every
-  // functional test run against it in Node (parse -> geometry -> render,
-  // both the QR_CANTILEVERSLAB_EXAMPLE command and a minimum-params
-  // case) but is confirmed NOT present in the deployed
-  // public/vendor/dxf-kit/ — the file tested was never actually
-  // deployed. dxfAvailable:true with no real file behind it is worse
-  // than the original gap (guaranteed click-time 404 instead of no
-  // button), so it comes back out of this Set until deployment is
-  // confirmed. No code defect — deployment only. Matching removal from
-  // DXF_MODULE_MAP in footing_pro_v98-1.html and pc_suite_v97-1.html.
-  'deepbeam', 'elevatorpit', 'expansionjoint',
-  // [FIX — beamcolumnjoint DXF wiring] Moved OUT of the deliberately-
-  // absent list at this Set's own header comment and into this Set:
-  // beamColumnJointDiagram.dxf.mjs (renderBeamColumnJointDiagramDXF) now
-  // exists. Verified this session by executing the real, unmodified file
-  // against the real, unmodified beamColumnJointDiagram.mjs:
-  // parseDiagramCommand -> computeBeamColumnJointDiagramGeometry ->
-  // renderBeamColumnJointDiagramSVG (control) and
-  // renderBeamColumnJointDiagramDXF, using the exact "beamcolumnjoint
-  // id=J1 colwidth=400 coldepth=400 ..." command already live in the UI
-  // (QR_BEAMCOLUMNJOINT_EXAMPLE in footing_pro_v98.html /
-  // pc_suite_v97.html). DXF output additionally round-tripped through
-  // the independent `dxf` npm package (unrelated to tarikjabiri):
-  // well-formed SECTION/ENTITIES/EOF, correct JOINT-CORE-ZONE/HINGE-ZONE
-  // layers, correct title/mark-tag/dimension text (including %%c diameter
-  // control codes decoding correctly). Matching row added to
-  // DXF_MODULE_MAP in footing_pro_v98.html and pc_suite_v97.html. Deploy
-  // alongside at public/vendor/dxf-kit/beamColumnJointDiagram.dxf.mjs.
-  // Same failure class as wallopening above: dxfAvailable came back
-  // false from this Set alone, so the front-end never even reached its
-  // own DXF_MODULE_MAP check.
-  // [FIX — raftpile DXF wiring] Moved OUT of the deliberately-absent
-  // list on the strength of this Set's own prior history, not a fresh
-  // verification: raftPileDiagram.dxf.mjs (renderRaftPileDiagramDXF) was
-  // already claimed end-to-end verified when its DXF_MODULE_MAP row was
-  // added in footing_pro_v98.html (see that map's own "added ... to
-  // chat.js's own DXF_READY_TYPES together" comment) — but the matching
-  // addition never actually landed in this file. This is that missing
-  // half, added now to close the gap. NOT independently re-executed this
-  // session (raftPileDiagram.dxf.mjs was not supplied as part of this
-  // change) — if its DXF button 404s or throws once this ships,
-  // re-verify raftPileDiagram.dxf.mjs directly before assuming this Set
-  // entry is the fault.
-  // [REVERTED — raftpile] Same reversal, same reason: raftPileDiagram.
-  // dxf.mjs passed every functional test run against it in Node but is
-  // confirmed NOT present in the deployed public/vendor/dxf-kit/. Pulled
-  // back out of this Set; matching removal from DXF_MODULE_MAP in both
-  // client files. No code defect — deployment only.
-  'beamcolumnjoint',
-]);
+import { DXF_RENDERERS, renderDxfServerSide } from '../_lib/dxfServerRender.mjs';
+
+// [DXF export track — moved server-side] chat.js now generates the DXF
+// text itself (see dxfServerRender.mjs, imported above) instead of only
+// flagging availability for the browser to act on. The old design had the
+// browser dynamic-import() the matching vendor/dxf-kit/<Element>.dxf.mjs
+// and re-run the renderer client-side against the geometry object below;
+// that depended on those files being deployed as public static assets.
+// They now live only in functions/_lib, so generation happens right here,
+// in the same request that already builds the SVG, using the same
+// geometry object. DXF_READY_TYPES is derived directly from
+// dxfServerRender.mjs's own DXF_RENDERERS map — one list instead of two,
+// which closes an entire class of bug this file's history is full of:
+// wallopening/couplingbeam/punchingshear/circularcolumn/deepbeam/
+// elevatorpit/expansionjoint/beamcolumnjoint each drifted in or out of
+// sync with the front-end's DXF_MODULE_MAP at some point because the two
+// lists had to be updated together by hand and weren't. raftpile and
+// cantileverslab remain unsupported here for the same reason they were
+// last pulled from this Set: their .dxf.mjs files were verified in Node
+// but never confirmed deployed alongside the others — add them to
+// dxfServerRender.mjs's own DXF_RENDERERS map once they are, and this Set
+// (and every response that gates on it) picks them up automatically.
+const DXF_READY_TYPES = new Set(Object.keys(DXF_RENDERERS));
 
 // [ADDED — new-element integration] routeDiagramCommand (imported above
 // from public/vendor/dxf-kit/diagramCommandRouter.mjs) is the real
@@ -3772,37 +3651,22 @@ above; restate them plainly rather than re-deriving them here.
 
 EMOJI — SEMANTIC & FUNCTIONAL CODING, NOT DECORATION: an emoji is a traffic sign that tells the
 eye what KIND of information is coming before it reads a word of it — not a flourish bolted on
-for personality. Every emoji comes from exactly one of five meaning-families, chosen by what the
+for personality. Every emoji comes from exactly one of four meaning-families, chosen by what the
 surrounding content actually IS, never picked for variety and never repeated at random:
 
   📋 🔍 📍  ORGANIZATIONAL (calm blue/grey) — structure, a heading, "here's what's coming."
   ⚠️ 🚨 💡  WARNING / IMPORTANT (warm) — a limit exceeded, a mistake to avoid, a catch worth flagging.
   🚀 🛠️ ✅  EXECUTION (vibrant) — a fix, a feature, a completed or working result, momentum.
   ⚖️ 📏 🏗️  ANALYTICAL (measurement) — weighing options, tying a number to what gets built on site.
-  👏 😂 😢  REACTION (personal, warm) — the reply ITSELF is a social moment, not technical content:
-            congratulating the user, a light/funny beat, or acknowledging frustration/bad news
-            that isn't a technical warning. Narrowest family, and the only one with a hard content
-            gate below — see the paragraph right after this table before ever reaching for it.
 
 Let the reply's dominant subject pick the family, then draw every emoji in that reply from it: an
 ACI 318-19 violation or an exceeded design limit stays in WARNING throughout; a Civil Engineering
 Suite feature or "here's what this does" answer stays in EXECUTION; a numbers-vs-reality or
 option-A-vs-option-B comparison stays in ANALYTICAL; a reply that's purely structural signposting
-stays in ORGANIZATIONAL; a reply whose ENTIRE content is a social reaction — congratulating the
-user, a thank-you exchange, a light aside, sympathizing with a frustration — with no engineering
-substance anywhere in it stays in REACTION. HARD GATE on that last one: the instant a reply
-carries any actual technical content — a calculation, a code/standard reference, a design
-recommendation, a product fact, even one sentence of it — it uses whichever of the other four
-families matches that content instead, even if the reply opens or closes on a friendly note.
-REACTION is for messages that ARE the reaction, never a friendly wrapper around a technical
-answer; a technical reply stays warm in its prose tone without needing 👏/😂/😢 to prove it. One
-dominant theme, one family, per reply — don't mix families in the same message, and don't reuse a
-family's icons interchangeably for the same recurring meaning (if ⚠️ marks "limit exceeded" once,
-it marks it every time — not 🚨 one reply and ⚠️ the next for the identical thing).
-
-Egyptian-Arabic REACTION example — pure social reaction, zero engineering content, the only
-context where these three icons are allowed to appear at all:
-"يا هندسة، ولا يهمك خالص، دي حاجة بسيطة والحمد لله اتحلت 👏"
+stays in ORGANIZATIONAL. One dominant theme, one family, per reply — don't mix families in the
+same message, and don't reuse a family's three icons interchangeably for the same recurring
+meaning (if ⚠️ marks "limit exceeded" once, it marks it every time — not 🚨 one reply and ⚠️ the
+next for the identical thing).
 
 WHERE EMOJI ARE ALLOWED — three checkpoints, nowhere else:
 1. OPENING HOOK: one emoji, the very first thing in the reply, setting the tone before the first
@@ -5411,9 +5275,7 @@ replies. Prose over bullets unless content is genuinely list-shaped. Egyptian Ar
 default "حضرتك", mirror "إنت" if they use it; favour دلوقتي، يعني، بصراحة، خالص، طب/طيب، مفيش،
 بقى، علشان، كمان، برضو over فصحى equivalents. Bold codes/terms/values in **double asterisks**
 (renders highlighted, 2–4 per reply). Emoji are semantic, one family per reply matching its
-theme — 📋🔍📍 organizational, ⚠️🚨💡 warning, 🚀🛠️✅ execution, ⚖️📏🏗️ analytical, 👏😂😢 reaction
-(only when the WHOLE reply is a pure social moment with zero engineering content — any technical
-substance at all uses one of the other four instead, even in a friendly-toned reply). Short reply:
+theme — 📋🔍📍 organizational, ⚠️🚨💡 warning, 🚀🛠️✅ execution, ⚖️📏🏗️ analytical. Short reply:
 ONE emoji, at the end. Reply with "## Title" section headers: one matching emoji per header,
 plus a matching opener+closer — same family throughout, never mixed, never forced when nothing
 fits.
@@ -5630,9 +5492,7 @@ BEHAVIOUR:
 • Answer like a knowledgeable engineer texting a colleague — direct, warm, not scripted.
 • Match message length: short question → short answer. Technical depth → go longer.
 • Bold codes/terms/values with **double asterisks**; one emoji at the end, picked by theme —
-  📋🔍📍 structure, ⚠️🚨💡 warning, 🚀🛠️✅ fix/feature, ⚖️📏🏗️ comparison, 👏😂😢 pure social reaction
-  (zero engineering content in that reply, otherwise use one of the other four) — only if it
-  genuinely fits.
+  📋🔍📍 structure, ⚠️🚨💡 warning, 🚀🛠️✅ fix/feature, ⚖️📏🏗️ comparison — only if it genuinely fits.
 • Never invent pricing, dates, or features not listed above.
 • Never recommend competitor software.
 • If you lack information: direct the user to Eng. Aymn Asi at aymneidasi@gmail.com
@@ -7404,22 +7264,24 @@ export async function onRequestPost(context) {
     if (diagramCmd.ok) {
       const renderFn = DIAGRAM_TYPE_RENDERERS[diagramCmd.type];
       const svg = renderFn(diagramCmd.geometry, { lang: imageLang });
+      // [DXF export track — moved server-side] dxfText is the actual
+      // rendered DXF string when renderDxfServerSide() succeeded for this
+      // element type, otherwise null. Its presence alone tells the client
+      // whether to show a DXF download button — no file path, no module
+      // name, no geometry re-send: the browser never touches a dxf-kit
+      // module directly any more (see appendBotImageBubble in the
+      // front-end files). A DXF render failure here never blocks the SVG
+      // response that already succeeded above — worst case the button
+      // just doesn't appear.
+      const dxfResult = renderDxfServerSide(diagramCmd.type, diagramCmd.geometry);
       return json(
         {
           ok      : true,
           dataUri : svgToDataUri(svg),
           mimeType: 'image/svg+xml',
           source  : 'computed-template:' + diagramCmd.type,
-          // [DXF export track] Additive fields only — no existing field
-          // renamed/removed, so any older client ignoring these three
-          // still works exactly as before. elementType/geometry let the
-          // browser re-run the SAME geometry through the matching
-          // vendor/dxf-kit/<Element>.dxf.mjs renderer client-side;
-          // dxfAvailable tells it whether that module actually exists
-          // (see DXF_READY_TYPES's own header comment).
           elementType : diagramCmd.type,
-          geometry    : diagramCmd.geometry,
-          dxfAvailable: DXF_READY_TYPES.has(diagramCmd.type),
+          dxfText     : dxfResult.ok ? dxfResult.dxfText : null,
         },
         200, undefined, request,
       );
@@ -7706,6 +7568,11 @@ export async function onRequestPost(context) {
     // being the only one of the two that had it right.
     const rebarLang = (body.lang === 'ar' || body.lang === 'en') ? body.lang : (likelyArabic ? 'ar' : 'en');
     const svg = dispatch.render(result.geometry, { lang: rebarLang });
+    // [DXF export track — moved server-side] Same mechanism as the
+    // /diagram branch above — see that site's comment. elementKey is
+    // already the lower-cased dispatch-table key (beam/slab/hordi/...),
+    // the same vocabulary dxfServerRender.mjs's DXF_RENDERERS map uses.
+    const dxfResult = renderDxfServerSide(elementKey, result.geometry);
     return json(
       {
         ok      : true,
@@ -7713,14 +7580,8 @@ export async function onRequestPost(context) {
         mimeType: 'image/svg+xml',
         lang    : rebarLang, // client uses this instead of re-guessing RTL from a nonexistent "prompt"
         source  : 'computed-rebar:' + elementKey,
-        // [DXF export track] Same three additive fields as the /diagram
-        // branch above — see that site's comment and DXF_READY_TYPES's
-        // own header for the full rationale. elementKey is already the
-        // lower-cased dispatch-table key (beam/slab/hordi/...), the same
-        // vocabulary the front-end's own DXF_MODULE_MAP is keyed on.
         elementType : elementKey,
-        geometry    : result.geometry,
-        dxfAvailable: DXF_READY_TYPES.has(elementKey),
+        dxfText     : dxfResult.ok ? dxfResult.dxfText : null,
       },
       200, undefined, request,
     );
