@@ -635,6 +635,47 @@ function findSafeCutIndex(buf) {
   return 0; // buffer is one unbroken run of letters/backslash/$/_/{  so far
 }
 
+// [FIX] findSafeCutIndex above (and, in turn, every adjustCutFor*
+// lookahead layered on top of it) is a careful, character-boundary-aware
+// scan -- but push() below has TWO separate hard numeric overrides that
+// bypass all of that: MAX_HOLDBACK force-cuts at a fixed trailing offset
+// once the tail exceeds 64 chars, and MATH_MAX_HOLDBACK force-flushes the
+// ENTIRE buffer once an unresolved '$' has waited 2000 chars. Neither
+// override has any idea where character boundaries are, only byte counts
+// -- so either one can independently land its cut point between a UTF-16
+// surrogate pair, same failure as findSafeCutIndex would have without a
+// guard: every emoji this pipeline carries (👏😂🤣😢😭🔨🔧🛠, or any other
+// astral character) is a high surrogate (0xD800-0xDBFF) followed by a low
+// surrogate (0xDC00-0xDFFF), and a cut landing between them emits the
+// high half alone as this push()'s `emit`. That string is JSON/UTF-8-
+// encoded independently as its own SSE chunk in chat.js's relay(); a lone
+// surrogate has no valid UTF-8 encoding, so the encoder substitutes
+// U+FFFD for it right there, before the low half (arriving whole and
+// harmless in the *next* push()) can ever be reunited with it. The emoji
+// is gone by the time the client sees it -- indistinguishable from "the
+// sound never fires for this emoji," intermittently, no matter how
+// correct the client-side trigger-scan code is, because the codepoint it
+// scans for was never delivered intact.
+// Rather than patch MAX_HOLDBACK's and MATH_MAX_HOLDBACK's clamps
+// separately (two call sites, easy for a future change to add a third and
+// miss it), this is applied ONCE, in push(), to the final `cut` however
+// it was derived -- the one place all three paths (ordinary
+// findSafeCutIndex scan, MAX_HOLDBACK clamp, MATH_MAX_HOLDBACK clamp)
+// converge before slicing. If `cut` sits between a surrogate pair (the
+// character right before it is a high surrogate, and either nothing
+// follows yet or what follows is that high surrogate's low-surrogate
+// match), back it off by exactly one code unit so the pair travels out
+// whole on the next push() instead of being torn in half on this one.
+function clampBeforeSurrogatePair(buf, cut) {
+  if (cut <= 0 || cut > buf.length) return cut;
+  const before = buf.charCodeAt(cut - 1);
+  if (before < 0xD800 || before > 0xDBFF) return cut; // not a high surrogate -- nothing to guard
+  if (cut === buf.length) return cut - 1; // lone high surrogate at the true end: hold it back
+  const at = buf.charCodeAt(cut);
+  if (at >= 0xDC00 && at <= 0xDFFF) return cut - 1; // cut falls inside a real pair: back off before it
+  return cut; // high surrogate already followed by something that isn't its low half (malformed input) -- leave as-is, not this guard's problem
+}
+
 // 'As' needs up to 2 characters of trailing context to resolve its prose
 // guard (an optional space plus one letter). findSafeCutIndex alone only
 // guarantees the token itself is complete, not that enough *following*
@@ -769,70 +810,6 @@ function adjustCutForSqrtBraceLookahead(buf, cut) {
   const scan = buf.slice(0, cut);
   const m = SQRT_BRACE_TAIL_RE.exec(scan);
   return m ? m.index : cut;
-}
-
-// [FIX — surrogate-pair-unsafe cut] Universal final guard, run AFTER every
-// adjuster above INCLUDING the MAX_HOLDBACK clamp in push() (that clamp
-// picks tail.length - MAX_HOLDBACK unconditionally and has no token
-// awareness at all, so it's exactly as capable of landing mid-pair as the
-// naive findSafeCutIndex scan is).
-//
-// Root cause: findSafeCutIndex (and every adjuster's own `scan`/`m.index`
-// arithmetic) walks `buf` by UTF-16 CODE UNIT, via buf[i]/charCodeAt --
-// never by code point. NOT_TOKEN_CHAR_RE tests one code unit at a time
-// against `[^A-Za-z<greek>\\$_{^]`; a lone high or low surrogate matches
-// that negated class (it's none of those characters), so the scan happily
-// reports "safe to cut" at a position sitting BETWEEN the two code units
-// of one astral character. Every SOUND_TRIGGER_MAP entry the client
-// matches on (👏🔨🔧🛠️😂🤣😢😭) is astral -- 2 UTF-16 code units each --
-// so this is not a hypothetical edge case for this product's actual
-// alphabet of trigger characters, it is the primary shape they take.
-//
-// Why this matters despite plain concatenation usually self-healing a
-// split pair: ES2019 well-formed JSON.stringify escapes a lone surrogate
-// as a literal `\uD83D`-style 6-char sequence rather than embedding the
-// raw code unit, so two independently JSON-framed/UTF-8-encoded SSE
-// deltas that split a pair still reassemble correctly THROUGH AN
-// UNINTERRUPTED STREAM via simple in-order string concatenation on the
-// client (verified empirically against this exact push()/relay() shape --
-// see repro_before.mjs). The failure mode this guard actually closes is
-// the app's own resumable-stream path (resumableSse.mjs's chunkIndex /
-// RESUME_BACKOFF_MS / the client's `truncated:true` continuation fold): if
-// the connection drops in the gap between the push() that emits the
-// orphaned high surrogate and the push() that would have supplied its low
-// surrogate, no second half is ever coming -- the resume flow re-prompts
-// the model for a CONTINUATION, it does not resume mid-character. That
-// orphan then renders as-is (or gets replaced with U+FFFD further
-// downstream), permanently and silently breaking scanForSoundTriggers's
-// exact-codepoint match for that message -- since a lone surrogate isn't
-// any SOUND_TRIGGER_MAP key, hits.length is just 0, so appendBubble's
-// fireSoundTriggersForChunk() call fires zero sounds with no error
-// anywhere in the pipeline. That is the "sounds don't play" report with
-// no exception, no console warning, and no clue at the call site itself.
-//
-// Checks ONLY the code unit immediately before `idx` -- not "is there a
-// low surrogate sitting right at idx" (that formulation misses the
-// end-of-buffer case, where idx === str.length and there IS no str[idx]
-// to inspect, yet the cut is just as unsafe: str[idx-1] is an orphaned
-// high surrogate with nothing after it in THIS buffer at all, which is
-// exactly the shape of the app's own resumable-stream interruption case
-// two paragraphs up). A code unit in the high-surrogate range (0xD800-
-// 0xDBFF) is -- in any well-formed string, which is all `str` ever is,
-// since it is built solely from prior valid pushes -- NEVER a legal place
-// to end a safe cut: it is either mid-pair (its low half sits at str[idx]
-// and would be excluded) or, at the tail end, a character still waiting
-// on a low half that hasn't arrived yet. Either way, pulling back one
-// code unit moves the whole high surrogate into the withheld remainder,
-// where the next push() (or finish(), if none ever comes) picks it back
-// up. Single conditional pullback, no loop needed: two high surrogates
-// can never sit directly adjacent in well-formed input without a low
-// surrogate between them, so this can only ever land on a real character
-// boundary, never on a second split.
-function avoidSurrogateSplit(str, idx) {
-  if (idx <= 0) return idx;
-  const before = str.charCodeAt(idx - 1);
-  const isHighSurrogate = before >= 0xD800 && before <= 0xDBFF;
-  return isHighSurrogate ? idx - 1 : idx;
 }
 
 // ── Math-span-aware layer ───────────────────────────────────────────────
@@ -1039,19 +1016,13 @@ export class NotationNormalizer {
       tailCut = adjustCutForSubscriptBaseLookahead(tail, tailCut);
       tailCut = adjustCutForSqrtBraceLookahead(tail, tailCut);
       if (tail.length - tailCut > MAX_HOLDBACK) tailCut = tail.length - MAX_HOLDBACK;
-      // [FIX — surrogate-pair-unsafe cut] Must run LAST: it has to see (and
-      // can override) the MAX_HOLDBACK clamp above, which is itself blind
-      // to token/pair boundaries. See avoidSurrogateSplit's own comment.
-      tailCut = avoidSurrogateSplit(tail, tailCut);
       cut = spanEnd + tailCut;
     } else {
       cut = openAt;
       if (this._buf.length - openAt > MATH_MAX_HOLDBACK) cut = this._buf.length; // safety valve, see MATH_MAX_HOLDBACK
-      // openAt/buf.length both always land on single-code-unit ASCII
-      // delimiter/boundary positions (see findOpenMathDelimiter /
-      // findOpenFenceDelimiter), so neither can ever bisect a surrogate
-      // pair -- no avoidSurrogateSplit call needed on this branch.
     }
+    if (cut <= 0) return { emit: '' };
+    cut = clampBeforeSurrogatePair(this._buf, cut);
     if (cut <= 0) return { emit: '' };
     const safePart = this._buf.slice(0, cut);
     this._buf = this._buf.slice(cut);
@@ -1059,22 +1030,7 @@ export class NotationNormalizer {
   }
 
   finish() {
-    // [FIX — surrogate-pair-unsafe cut, end-of-stream case] finish() means
-    // no further deltaText is ever coming -- if this._buf ends in an
-    // orphaned high surrogate (the upstream provider's own stream ended
-    // mid-character, independent of anything push() decided), there is no
-    // possible low surrogate left to pair it with, ever. Rendering it
-    // as-is only guarantees a downstream UTF-8 encode (TextEncoder, or any
-    // later byte-level re-encode) silently turns it into U+FFFD. Dropping
-    // it here is strictly better: a truncated final character disappearing
-    // is a smaller, quieter degradation than a visible replacement-
-    // character glyph, and it can never have been a SOUND_TRIGGER_MAP hit
-    // on its own (every entry is a complete surrogate PAIR).
-    let rest = this._buf;
-    if (rest.length > 0) {
-      const lastCode = rest.charCodeAt(rest.length - 1);
-      if (lastCode >= 0xD800 && lastCode <= 0xDBFF) rest = rest.slice(0, -1);
-    }
+    const rest = this._buf;
     this._buf = '';
     return { emit: this._render(rest) };
   }
