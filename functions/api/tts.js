@@ -1501,8 +1501,30 @@ function flattenLatexForSpeech(text) {
     .replace(/[ \t]{2,}/g, ' ');       // collapse the doubled spacing the word substitutions above introduce
 }
 
+const EMOJI_STRIP_RE = (function () {
+  try {
+    return new RegExp(
+      '\\p{Extended_Pictographic}[\\u{FE0E}\\u{FE0F}]?(?:\\u200D\\p{Extended_Pictographic}[\\u{FE0E}\\u{FE0F}]?)*' +
+      '|[0-9#*][\\uFE0F]?\\u20E3' +
+      '|\\p{Regional_Indicator}{2}',
+      'gu'
+    );
+  } catch (_) {
+    return null; // Workers runtime is modern V8 and should always support this; fail-open anyway for symmetry with the client and in case that ever changes
+  }
+})();
+
+function stripEmojiMarkers(text) {
+  if (!EMOJI_STRIP_RE) return text;
+  try {
+    return text.replace(EMOJI_STRIP_RE, ' ');
+  } catch (_) {
+    return text;
+  }
+}
+
 function preprocessText(text) {
-  return stripSuperSubMarkers(flattenLatexForSpeech(stripCodeMarkers(text)))
+  return stripEmojiMarkers(stripSuperSubMarkers(flattenLatexForSpeech(stripCodeMarkers(text))))
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, ' ')
     .replace(/[٠١٢٣٤٥٦٧٨٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d).toString())
     .replace(/[۰۱۲۳۴۵۶۷۸۹]/g, d => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d).toString())
