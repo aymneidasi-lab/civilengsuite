@@ -117,6 +117,51 @@ import { parseDiagramCommand as parsePunchingShearDiagramCommand } from './punch
 import { parseDiagramCommand as parseRaftPileDiagramCommand } from './raftPileDiagram.mjs';
 import { parseDiagramCommand as parseWallOpeningDiagramCommand } from './wallOpeningDiagram.mjs';
 
+// [Router gap fix] These four modules have the identical full
+// compute/render/parseDiagramCommand triple every sibling module here
+// has — verified by reading each one's own parseDiagramCommand export —
+// but, like the ten above, were never added to PARSERS/ALL_SUPPORTED_TYPES.
+// Found the same way: diffing this router's own PARSERS array against
+// every *.mjs file in this directory.
+//
+// One real behavioral difference from every already-wired parser above:
+// on a non-matching leading token these four return {code:'BAD_SYNTAX'},
+// not {code:'UNSUPPORTED_TYPE'} — confirmed by reading each file's own
+// parseDiagramCommand, where BAD_SYNTAX is returned in exactly two
+// places (non-string input; leading token !== this module's own TYPE
+// constant) and every other failure path returns the real DiagramError
+// code instead. routeDiagramCommand()'s loop below only falls through
+// to the next parser on UNSUPPORTED_TYPE, so wiring these in unchanged
+// would make whichever one runs first swallow every command meant for
+// the other three (and, if placed before the existing twenty-two,
+// isolated/combined/strip/raft/etc. too) with a wrong BAD_SYNTAX
+// instead of ever reaching the parser that actually owns that command.
+// adaptStrictParser() below re-derives the leading token itself and
+// only remaps BAD_SYNTAX -> UNSUPPORTED_TYPE when that token doesn't
+// belong to this parser, so a *real* syntax error on a command that DID
+// match still surfaces as BAD_SYNTAX to the caller, unchanged.
+import { parseDiagramCommand as parseCantileverSlabDiagramCommandRaw } from './cantileverSlabDiagram.mjs';
+import { parseDiagramCommand as parseElevatorPitDiagramCommandRaw } from './elevatorPitDiagram.mjs';
+import { parseDiagramCommand as parseExpansionJointDiagramCommandRaw } from './expansionJointDiagram.mjs';
+import { parseDiagramCommand as parseDeepBeamDiagramCommandRaw } from './deepBeamDiagram.mjs';
+
+function adaptStrictParser(parseFn, expectedType) {
+  return function (text) {
+    const result = parseFn(text);
+    if (result.code === 'BAD_SYNTAX') {
+      const m = (text || '').trim().match(/^(\S+)/);
+      const leading = m ? m[1].toLowerCase() : '';
+      if (leading !== expectedType) return { ok: false, code: 'UNSUPPORTED_TYPE' };
+    }
+    return result;
+  };
+}
+
+const parseCantileverSlabDiagramCommand = adaptStrictParser(parseCantileverSlabDiagramCommandRaw, 'cantileverslab');
+const parseElevatorPitDiagramCommand = adaptStrictParser(parseElevatorPitDiagramCommandRaw, 'elevatorpit');
+const parseExpansionJointDiagramCommand = adaptStrictParser(parseExpansionJointDiagramCommandRaw, 'expansionjoint');
+const parseDeepBeamDiagramCommand = adaptStrictParser(parseDeepBeamDiagramCommandRaw, 'deepbeam');
+
 // Order is arbitrary among these twenty-two — each parser claims only its
 // own leading token(s) (footing: isolated|combined|strip|raft; slab:
 // slab; shearwall: shearwall; stair: stair; column: column; beam: beam;
@@ -151,6 +196,10 @@ const PARSERS = [
   parsePunchingShearDiagramCommand,
   parseRaftPileDiagramCommand,
   parseWallOpeningDiagramCommand,
+  parseCantileverSlabDiagramCommand,
+  parseElevatorPitDiagramCommand,
+  parseExpansionJointDiagramCommand,
+  parseDeepBeamDiagramCommand,
 ];
 
 // Types recognized ACROSS all wired parsers — used only to build one
@@ -161,7 +210,7 @@ const PARSERS = [
 // basementwall/beamcolumnjoint/circularcolumn/corbel/bracket/
 // couplingbeam/dropcapital/hordi/punchingshear/raftpile/wallopening are
 // also valid).
-const ALL_SUPPORTED_TYPES = ['isolated', 'combined', 'strip', 'raft', 'slab', 'shearwall', 'stair', 'column', 'beam', 'retainingwall', 'trapezoidal', 'strap', 'gradebeam', 'tiebeam', 'pilecap', 'slabopening', 'basementwall', 'beamcolumnjoint', 'circularcolumn', 'corbel', 'bracket', 'couplingbeam', 'dropcapital', 'hordi', 'punchingshear', 'raftpile', 'wallopening'];
+const ALL_SUPPORTED_TYPES = ['isolated', 'combined', 'strip', 'raft', 'slab', 'shearwall', 'stair', 'column', 'beam', 'retainingwall', 'trapezoidal', 'strap', 'gradebeam', 'tiebeam', 'pilecap', 'slabopening', 'basementwall', 'beamcolumnjoint', 'circularcolumn', 'corbel', 'bracket', 'couplingbeam', 'dropcapital', 'hordi', 'punchingshear', 'raftpile', 'wallopening', 'cantileverslab', 'elevatorpit', 'expansionjoint', 'deepbeam'];
 
 // Tries each wired module's parseDiagramCommand in turn. UNSUPPORTED_TYPE
 // is the ONLY code that causes fallthrough to the next parser; any other

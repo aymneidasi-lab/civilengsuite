@@ -1,10 +1,12 @@
 // functions/_lib/licenses.mjs
 // ============================================================================
 // Three-tier access control: developer / subscriber / regular.
-// Single source of truth for license issuance, device-slot binding, and the
-// regular-tier one-file lifetime quota. Imported by chat.js and
-// dev-upload.js. NOT wired into vision.js in this pass — that file was not
-// provided for review; see integration notes in the accompanying patch.
+// Single source of truth for license issuance, device-slot binding, the
+// regular-tier daily file/message quotas, and — [NEW] — the subscriber-
+// tier daily fair-share message quota (checkAndConsumeSubscriberMessage
+// Quota, below). Imported by chat.js and dev-upload.js. NOT wired into
+// vision.js in this pass — that file was not provided for review; see
+// integration notes in the accompanying patch.
 //
 // DELIBERATELY NOT MERGED WITH isDeveloperMode:
 // This module answers "does this caller get elevated FILE/QUOTA limits."
@@ -55,6 +57,26 @@
 //     heaviest write source in this module by far — see its own header
 //     for the account-wide ceiling this implies and the recommended
 //     off-ramp once you approach it.
+//   checkAndConsumeSubscriberMessageQuota — [NEW] up to SUBSCRIBER_
+//     MESSAGES_PER_WINDOW (40) writes per LICENSE (not per identity/IP) per
+//     rolling 24h window. Same atomic check-and-consume shape as
+//     checkAndConsumeFreeMessageQuota directly above — see its own header
+//     for the fairness rationale, why it's keyed by license instead of
+//     device/IP, and where the default number came from.
+//   peekSubscriberMessageQuota — READ only, same shape as
+//     checkFreeFileQuota above.
+//   checkAndConsumeFreeTierGlobalCapacity — [NEW] up to
+//     FREE_TIER_GLOBAL_DAILY_CAP (250) writes per DAY TOTAL (one global
+//     key, not per identity) — adds a second write to every free-tier
+//     message on top of checkAndConsumeFreeMessageQuota's own write. See
+//     its own header for the full reserved-floor math this was sized
+//     against.
+//   checkAndConsumeFreeTtsQuota / checkAndConsumeSubscriberTtsQuota —
+//     [NEW] one write per /api/tts call that reaches this check (not per
+//     character — the character count is the write's payload/amount, not
+//     its frequency), same shape as every other counter here. A new write
+//     source this ledger did not previously account for at all, since
+//     tts.js drew on none of this file's functions before.
 // Before deploying, check actual current daily write volume (Cloudflare
 // dashboard -> Workers KV -> Metrics) — this module's math assumes it isn't
 // already close to the account-wide 1,000/day ceiling from existing
@@ -459,6 +481,23 @@ async function _readDailyCounter(env, key, maxPerWindow) {
   const raw = await env.CES_LICENSES.get(key);
   if (!raw) return { count: 0, remaining: maxPerWindow, resetsAt: null };
   const state = JSON.parse(raw);
+  // [FIX — found while adding the subscriber quota below, applies equally
+  // to the pre-existing free-tier callers] Cloudflare KV's TTL expiry is
+  // documented as eventually consistent, not instantaneous — get() can
+  // still return a record for a short time after its embedded resetsAt
+  // has passed, before Cloudflare physically purges the key. Without this
+  // check, that stale record's count (already at/over the cap, or it
+  // wouldn't still be sitting at the old value) reads as `exceeded: true`
+  // for a window that has already ended. Both callers of this function
+  // return immediately on `exceeded` WITHOUT ever reaching
+  // _touchDailyCounter below — the only place that actually starts a
+  // fresh window — so that false "exceeded" could not self-correct until
+  // the purge caught up. Treating an elapsed resetsAt as a fresh window
+  // here keeps this function's answer consistent with what
+  // _touchDailyCounter would do with the same stale state.
+  if (state.resetsAt && new Date(state.resetsAt).getTime() <= Date.now()) {
+    return { count: 0, remaining: maxPerWindow, resetsAt: null };
+  }
   const count = Number(state.count) || 0;
   if (count >= maxPerWindow) {
     return { count, remaining: 0, resetsAt: state.resetsAt, exceeded: true };
@@ -594,6 +633,179 @@ export async function consumeFreeFileQuota(env, identity, count = 1) {
 //    33x increase — not a redesign of this function. Check Cloudflare
 //    dashboard -> Workers KV -> Metrics periodically rather than guessing
 //    at real traffic. ───────────────────────────────────────────────────
+// ── [NEW] Global free-tier capacity reservation — subscriber priority.
+//
+//    PROBLEM THIS CLOSES: checkAndConsumeFreeMessageQuota right below and
+//    checkAndConsumeSubscriberMessageQuota (further down) are BOTH keyed
+//    per-identity (per-IP, per-license) — each protects fairness WITHIN
+//    its own tier, but nothing protects fairness BETWEEN tiers. Both
+//    still draw on the exact same account-wide, finite resources: the
+//    1,000-writes/day Cloudflare KV budget (see file header) and the
+//    shared Gemini/Groq/OpenRouter/Workers AI provider pool. A flood of
+//    free-tier traffic — many different IPs, each individually well
+//    under their own 15/day cap — can still collectively exhaust either
+//    resource before a single paying subscriber gets a turn. Per-identity
+//    fairness does not imply fairness between the free and subscriber
+//    populations as a whole; this closes that specific gap.
+//
+//    MECHANISM: a SINGLE global daily counter (not per-IP, not per-
+//    license) caps how many free-tier messages the system will serve in
+//    total, across every free user combined, each day. Subscriber checks
+//    never consult this counter and are never gated by it — the whole
+//    point is that subscriber capacity is untouched no matter how heavy
+//    free-tier demand gets. Once the global cap is hit, NEW free-tier
+//    messages are turned away (429, temporary) even from an IP that has
+//    never sent a message today — that is the intended trade-off, not a
+//    bug: some free-tier users on a heavy day lose access specifically so
+//    that headroom is guaranteed to still be there for subscribers.
+//
+//    WHY THIS IS A REAL WRITE-COST TRADE-OFF, NOT A FREE FIX: this adds a
+//    SECOND KV write to every free-tier message that reaches it (this
+//    counter, on top of checkAndConsumeFreeMessageQuota's own write just
+//    below) — free-tier's write cost roughly DOUBLES. FREE_TIER_GLOBAL_
+//    DAILY_CAP is sized with that doubling already accounted for, not a
+//    naive reuse of FREE_MESSAGES_PER_WINDOW's own math:
+//      1,000/day total budget
+//      −  400/day reserved floor for subscribers (≈10 licenses maxing
+//         their own 40/day cap, comfortably more at lighter real usage)
+//      −   50/day buffer (license-validation writes, rate-limiter KV
+//         fallback if bound that way, admin/session actions)
+//      = 550/day left for free tier's writes, ÷ 2 (this counter's write
+//        + checkAndConsumeFreeMessageQuota's own write) ≈ 275 messages/
+//        day globally, rounded down to 250 for extra margin.
+//    This number is deliberately conservative FOR THE CURRENT CLOUDFLARE
+//    FREE PLAN specifically. After the $5/month Workers Paid upgrade
+//    (see checkAndConsumeFreeMessageQuota's own header below), the same
+//    1,000,000/month budget makes this whole reservation nearly free to
+//    make generous — recompute both constants against the larger pool
+//    rather than leaving this at 250 indefinitely.
+//
+//    WHAT THIS DOES NOT DO: it cannot reorder in-flight requests or make
+//    a subscriber's call jump ahead of a free user's call inside the
+//    actual Gemini/Groq/OpenRouter fallback cascade — that selection
+//    logic lives in rotation.mjs, not this file, and wasn't provided for
+//    review. This is a DEMAND-SIDE reservation (cap how much of the pool
+//    free tier can ever draw down) rather than a SUPPLY-SIDE priority
+//    queue — it achieves "subscribers are guaranteed headroom" without
+//    needing to touch request-level provider selection at all.
+//
+//    WINDOW CHOICE: daily (86400s), matching the KV budget's own daily
+//    reset and every other quota in this file, so a bad hour doesn't
+//    read differently from a bad day. A shorter rolling window (e.g.
+//    3,600s) would recover faster after a spike at the cost of a smaller,
+//    more fiddly cap number — reasonable alternative, not implemented
+//    here since daily keeps this consistent with everything else. ──────
+const FREE_TIER_GLOBAL_DAILY_CAP = 250;
+const FREE_TIER_GLOBAL_WINDOW_SECONDS = 86400; // 24h — see window-choice note above
+
+export async function checkAndConsumeFreeTierGlobalCapacity(env) {
+  if (!env.CES_LICENSES) {
+    return { ok: true, remaining: FREE_TIER_GLOBAL_DAILY_CAP };
+  }
+  try {
+    const peek = await _readDailyCounter(env, 'globalfreecap', FREE_TIER_GLOBAL_DAILY_CAP);
+    if (peek.exceeded) {
+      return { ok: false, reason: 'FREE_TIER_AT_CAPACITY', remaining: 0, resetsAt: peek.resetsAt };
+    }
+    const r = await _touchDailyCounter(env, 'globalfreecap', FREE_TIER_GLOBAL_WINDOW_SECONDS);
+    return { ok: true, remaining: Math.max(FREE_TIER_GLOBAL_DAILY_CAP - r.count, 0), resetsAt: r.resetsAt };
+  } catch (err) {
+    console.error('[licenses.mjs] checkAndConsumeFreeTierGlobalCapacity failed (failing open):', err.message);
+    return { ok: true, remaining: FREE_TIER_GLOBAL_DAILY_CAP };
+  }
+}
+
+// ── [NEW] TTS quota — a SEPARATE resource pool from chat/vision message
+//    quota, found missing entirely while auditing ces_source_complete.zip:
+//    functions/api/tts.js had only the generic per-IP checkRateLimit(env,
+//    'tts:'+clientIp, ...) burst guard — the same class of "abuse
+//    protection, not fairness between tiers" gap chat.js/vision.js had
+//    before this file's other quota functions above. No import from this
+//    module at all, no hasElevatedAccess, no license validation, no
+//    FREE_TIER_DISABLED support.
+//
+//    KEPT SEPARATE FROM FREE_MESSAGES_PER_WINDOW/SUBSCRIBER_MESSAGES_PER_
+//    WINDOW ABOVE, DELIBERATELY: TTS draws on an entirely different
+//    provider set (Edge TTS/ElevenLabs/Deepgram/Speechmatics/gTTS — see
+//    tts.js's own header), not the Gemini/Groq/OpenRouter pool chat/vision
+//    share, so there is no shared-resource reason to merge the counters
+//    the way chat.js and vision.js's message quotas are deliberately
+//    merged (see checkAndConsumeSubscriberMessageQuota's own header). A
+//    real, independent quota dimension for a real, independent resource.
+//
+//    CHARGED IN CHARACTERS, NOT CALLS: tts.js's own header notes a single
+//    "read this reply aloud" user action can legitimately span several
+//    sequential /api/tts calls (MAX_TEXT_LENGTH forces pre-chunking).
+//    Charging per call the way chat/vision charge per message would make
+//    quota consumption depend on how a reply happened to be chunked, not
+//    on how much was actually spoken — a long reply could burn many units
+//    for one user action. _touchDailyCounter's existing `amount` parameter
+//    (already used by consumeFreeFileQuota above for its own count
+//    argument) lets a single call charge the real character count in one
+//    write, so the quota tracks actual provider load regardless of
+//    chunking.
+//
+//    DEFAULTS ARE A FIRST-PASS ESTIMATE, NOT A MEASURED NUMBER — same
+//    caveat every other default in this file states. FREE_TTS_CHARS_PER_
+//    WINDOW (6,000) is roughly 4-10 typical spoken replies/day; SUBSCRIBER_
+//    TTS_CHARS_PER_WINDOW (30,000) keeps the same ~2.7x ratio already
+//    established between FREE_MESSAGES_PER_WINDOW and SUBSCRIBER_MESSAGES_
+//    PER_WINDOW above, for consistency, not because 2.7x was independently
+//    derived for TTS specifically. Tune against real Cloudflare KV /
+//    provider-dashboard usage once real traffic exists.
+//
+//    SCOPE, STATED PLAINLY: this brings TTS up to the SAME baseline
+//    per-identity fairness chat.js/vision.js had before this session's
+//    later refinements (global free-tier capacity reservation, subscriber
+//    key-pool reservation) — those two refinements are NOT duplicated here.
+//    TTS's provider mix (a keyless free tier, credit-metered tiers with
+//    their own existing circuit breakers, per tts.js's own header) is
+//    different enough from Gemini/Groq/OpenRouter's shared-key-pool shape
+//    that porting those two mechanisms over unchanged would need its own
+//    design pass, not a mechanical copy — flagged as a real next step, not
+//    silently done here.
+const FREE_TTS_CHARS_PER_WINDOW = 6000;
+const SUBSCRIBER_TTS_CHARS_PER_WINDOW = 30000;
+const TTS_WINDOW_SECONDS = 86400; // 24h — same fixed-origin semantics as every other counter in this file
+
+export async function checkAndConsumeFreeTtsQuota(env, identity, charCount) {
+  const id = typeof identity === 'string' ? identity.trim() : '';
+  const chars = Math.max(0, Number(charCount) || 0);
+  if (!id || id === 'unknown' || !env.CES_LICENSES) {
+    return { ok: true, remaining: FREE_TTS_CHARS_PER_WINDOW };
+  }
+  try {
+    const peek = await _readDailyCounter(env, `freetts:${id}`, FREE_TTS_CHARS_PER_WINDOW);
+    if (peek.exceeded || peek.count + chars > FREE_TTS_CHARS_PER_WINDOW) {
+      return { ok: false, reason: 'FREE_TTS_QUOTA_USED', remaining: Math.max(FREE_TTS_CHARS_PER_WINDOW - peek.count, 0), resetsAt: peek.resetsAt };
+    }
+    const r = await _touchDailyCounter(env, `freetts:${id}`, TTS_WINDOW_SECONDS, chars);
+    return { ok: true, remaining: Math.max(FREE_TTS_CHARS_PER_WINDOW - r.count, 0), resetsAt: r.resetsAt };
+  } catch (err) {
+    console.error('[licenses.mjs] checkAndConsumeFreeTtsQuota failed (failing open):', err.message);
+    return { ok: true, remaining: FREE_TTS_CHARS_PER_WINDOW };
+  }
+}
+
+export async function checkAndConsumeSubscriberTtsQuota(env, licenseKeyRaw, charCount) {
+  const licenseKey = normalizeKey(licenseKeyRaw);
+  const chars = Math.max(0, Number(charCount) || 0);
+  if (!licenseKey || !env.CES_LICENSES) {
+    return { ok: true, remaining: SUBSCRIBER_TTS_CHARS_PER_WINDOW };
+  }
+  try {
+    const peek = await _readDailyCounter(env, `subtts:${licenseKey}`, SUBSCRIBER_TTS_CHARS_PER_WINDOW);
+    if (peek.exceeded || peek.count + chars > SUBSCRIBER_TTS_CHARS_PER_WINDOW) {
+      return { ok: false, reason: 'SUBSCRIBER_TTS_QUOTA_USED', remaining: Math.max(SUBSCRIBER_TTS_CHARS_PER_WINDOW - peek.count, 0), resetsAt: peek.resetsAt };
+    }
+    const r = await _touchDailyCounter(env, `subtts:${licenseKey}`, TTS_WINDOW_SECONDS, chars);
+    return { ok: true, remaining: Math.max(SUBSCRIBER_TTS_CHARS_PER_WINDOW - r.count, 0), resetsAt: r.resetsAt };
+  } catch (err) {
+    console.error('[licenses.mjs] checkAndConsumeSubscriberTtsQuota failed (failing open):', err.message);
+    return { ok: true, remaining: SUBSCRIBER_TTS_CHARS_PER_WINDOW };
+  }
+}
+
 const FREE_MESSAGES_PER_WINDOW = 15;
 const FREE_MESSAGE_WINDOW_SECONDS = 86400; // 24h
 
@@ -612,6 +824,107 @@ export async function checkAndConsumeFreeMessageQuota(env, identity) {
   } catch (err) {
     console.error('[licenses.mjs] checkAndConsumeFreeMessageQuota failed (failing open):', err.message);
     return { ok: true, remaining: FREE_MESSAGES_PER_WINDOW };
+  }
+}
+
+// ── [NEW] Subscriber-tier daily MESSAGE quota — fair-share cap.
+//
+//    PROBLEM THIS CLOSES: hasElevatedAccess (chat.js step 3a-ii) makes a
+//    validated subscriber skip checkAndConsumeFreeMessageQuota entirely
+//    (see chat.js step 3c-ii — that block only runs `if (!hasElevatedAccess)`).
+//    Today that means a subscriber has NO per-license daily ceiling at
+//    all on chat messages — the only thing standing between one license
+//    and the ENTIRE shared Gemini/Groq/OpenRouter/Workers AI free-tier
+//    pool (the same finite pool every other subscriber, and the free
+//    tier, also draws from) is the step-1 checkRateLimit(env, clientIp)
+//    burst guard, which this file's own chat.js documents as
+//    "abuse/overload protection, not fairness between individual users."
+//    One heavy subscriber can legally, slowly, drain that shared pool for
+//    everyone else — exactly the reported symptom.
+//
+//    KEYED BY LICENSE KEY, NOT DEVICE TOKEN OR CLIENT IP: a license may be
+//    bound to up to MAX_DEVICES_PER_LICENSE (2) devices, plausibly on two
+//    different IPs. The fairness unit here is "one paying subscription,"
+//    not "one device" or "one IP" — both device slots on a license are
+//    meant to SHARE one fair-share allotment, the same way they already
+//    share one device-slot pool. Keying by clientIp would double-count a
+//    subscriber legitimately using a laptop and a phone; keying by
+//    deviceToken would let a two-device subscriber draw 2x the intended
+//    allotment, which defeats the purpose of a per-subscriber cap.
+//
+//    SUBSCRIBER_MESSAGES_PER_WINDOW = 40/day is this reviewer's suggested
+//    number, not a measured one — same caveat FREE_MESSAGES_PER_WINDOW's
+//    own header states, and for the same reason (no traffic data existed
+//    to tune against). Reasoning: ~2.7x the free tier's 15/day (a
+//    subscription should clearly beat the free tier), generous enough for
+//    a full day of genuine back-and-forth structural-design conversation,
+//    while staying well under the shared pool's actual current ceiling —
+//    which is TIGHTER than this file's provider-tier comments elsewhere
+//    assumed when last verified (June 2026). Checked against Gemini's own
+//    current docs (ai.google.dev/gemini-api/docs/rate-limits, Sept 2026):
+//    free-tier RPD is PER PROJECT at just 100 (2.5 Pro), 250 (2.5 Flash),
+//    1,000 (2.5 Flash-Lite) — Google has cut these more than once in 2026,
+//    so re-check that page before trusting this comment over the live
+//    numbers. OpenRouter's 50/day (no purchased credit) and this file's
+//    existing Groq RPD assumption both still checked out as of Sept 2026.
+//    Tune the constant below directly against real Cloudflare KV /
+//    provider-dashboard usage once actual subscriber traffic exists,
+//    exactly as FREE_MESSAGES_PER_WINDOW's header already recommends.
+//
+//    WRITE COST: identical shape to checkAndConsumeFreeMessageQuota above
+//    — up to SUBSCRIBER_MESSAGES_PER_WINDOW (40) writes per LICENSE per
+//    rolling 24h window, on the SAME account-wide KV budget this file's
+//    header already tracks. 25 active licenses each maxing their daily
+//    allotment is another ~1,000 writes/day on top of everything else
+//    already drawing from that pool — recheck the Cloudflare dashboard
+//    once real subscriber volume exists.
+//
+//    NOTE ON CONCURRENCY: like every counter in this file, this is a KV
+//    read-then-write, not an atomic increment. Two devices on the same
+//    license sending a message in the same instant can rarely both read
+//    the same pre-increment count and both persist count+1, losing one
+//    increment (net +1 instead of +2). Same accepted trade-off this file
+//    already ships for the free-tier counters above — a soft fairness
+//    throttle, not a security boundary. A true fix needs a Durable
+//    Object-backed atomic counter, which is a real infrastructure change,
+//    not a drop-in edit to this KV-only module — flagged, not attempted
+//    here. ─────────────────────────────────────────────────────────────
+const SUBSCRIBER_MESSAGES_PER_WINDOW = 40;
+const SUBSCRIBER_MESSAGE_WINDOW_SECONDS = 86400; // 24h — same fixed-origin semantics as _touchDailyCounter above
+
+export async function checkAndConsumeSubscriberMessageQuota(env, licenseKeyRaw) {
+  const licenseKey = normalizeKey(licenseKeyRaw);
+  if (!licenseKey || !env.CES_LICENSES) {
+    return { ok: true, remaining: SUBSCRIBER_MESSAGES_PER_WINDOW };
+  }
+  try {
+    const peek = await _readDailyCounter(env, `submsgs:${licenseKey}`, SUBSCRIBER_MESSAGES_PER_WINDOW);
+    if (peek.exceeded) {
+      return { ok: false, reason: 'SUBSCRIBER_MESSAGE_QUOTA_USED', remaining: 0, resetsAt: peek.resetsAt };
+    }
+    const r = await _touchDailyCounter(env, `submsgs:${licenseKey}`, SUBSCRIBER_MESSAGE_WINDOW_SECONDS);
+    return { ok: true, remaining: Math.max(SUBSCRIBER_MESSAGES_PER_WINDOW - r.count, 0), resetsAt: r.resetsAt };
+  } catch (err) {
+    console.error('[licenses.mjs] checkAndConsumeSubscriberMessageQuota failed (failing open):', err.message);
+    return { ok: true, remaining: SUBSCRIBER_MESSAGES_PER_WINDOW };
+  }
+}
+
+// Read-only peek — no write, no consumption of the daily allotment. Lets a
+// caller (chat.js's checkLicense short-circuit) show "N left today" the
+// instant a key is saved/validated, without waiting for, or charging, a
+// real chat message. Mirrors checkFreeFileQuota's read-only shape above.
+export async function peekSubscriberMessageQuota(env, licenseKeyRaw) {
+  const licenseKey = normalizeKey(licenseKeyRaw);
+  if (!licenseKey || !env.CES_LICENSES) {
+    return { remaining: SUBSCRIBER_MESSAGES_PER_WINDOW, resetsAt: null };
+  }
+  try {
+    const r = await _readDailyCounter(env, `submsgs:${licenseKey}`, SUBSCRIBER_MESSAGES_PER_WINDOW);
+    return { remaining: r.remaining, resetsAt: r.resetsAt };
+  } catch (err) {
+    console.error('[licenses.mjs] peekSubscriberMessageQuota read failed (failing open):', err.message);
+    return { remaining: SUBSCRIBER_MESSAGES_PER_WINDOW, resetsAt: null };
   }
 }
 

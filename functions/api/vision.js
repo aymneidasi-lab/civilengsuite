@@ -359,6 +359,8 @@ import {
   checkFreeFileQuota,
   consumeFreeFileQuota,
   checkAndConsumeFreeMessageQuota,
+  checkAndConsumeSubscriberMessageQuota,
+  checkAndConsumeFreeTierGlobalCapacity,
 } from '../_lib/licenses.mjs';
 
 // [PATCH, 3-tier] Duplicated from chat.js/dev-upload.js — same double-HMAC
@@ -394,6 +396,24 @@ const GEMINI_MAX_OUTPUT_TOKENS = 1536; // vision replies run longer than chat's 
 // shared _lib export since it's a single primitive value, not worth a
 // module just to avoid one line of duplication.
 const RACE_CONCURRENCY = 3;
+
+// [NEW] Same supply-side subscriber-priority reservation as chat.js's
+// identical constant/function — see that file's own header comment for
+// the full rationale (why proportional not fixed, why before rotateStart
+// not after, why concurrency is deliberately left untouched). Local copy
+// for the same reason RACE_CONCURRENCY above is: one small primitive,
+// not worth a shared module. Gated on the same hasElevatedAccess this
+// file's own message-quota block already uses — no new tier concept.
+const SUBSCRIBER_RESERVED_POOL_FRACTION = 0.15; // ~2 of 13 at current pool sizes
+
+function reserveForSubscribers(fullPool, hasElevatedAccess) {
+  if (hasElevatedAccess || fullPool.length <= 1) return fullPool;
+  const reserveCount = Math.min(
+    Math.floor(fullPool.length / 2),
+    Math.max(1, Math.ceil(fullPool.length * SUBSCRIBER_RESERVED_POOL_FRACTION)),
+  );
+  return fullPool.slice(0, fullPool.length - reserveCount);
+}
 
 // ── Size / MIME guards ──────────────────────────────────────────────────
 // ~1.8MB JSON-body ceiling (base64 image(s) + small text fields), TOTAL —
@@ -1603,6 +1623,25 @@ export async function onRequestPost(context) {
     }
   }
 
+  // [NEW] Free-tier kill switch — same FREE_TIER_DISABLED env var chat.js's
+  // identical check reads, so one dashboard toggle closes free access on
+  // BOTH endpoints at once, not just text chat. See chat.js's own comment
+  // (step 3a-iii) for the full rationale. Placed right after tier
+  // resolution — this file has no checkLicense-style status ping to skip
+  // past, so there's nothing that needs to run before it.
+  if (!hasElevatedAccess && env.FREE_TIER_DISABLED === '1') {
+    console.warn('[vision.js] Free tier closed (FREE_TIER_DISABLED=1), rejecting request from', clientIp);
+    return json(
+      {
+        error: likelyArabic
+          ? 'التسجيل المجاني مقفول مؤقتًا. اشترك للمتابعة.'
+          : 'Free access is temporarily closed. Subscribe to continue.',
+        code: 'FREE_TIER_DISABLED',
+      },
+      403, undefined, request,
+    );
+  }
+
   // NEW — declared here so it's in scope at both writeDone() call sites
   // below. null until the free-tier quota check just below runs and
   // succeeds; stays null for a hasElevatedAccess request.
@@ -1620,6 +1659,26 @@ export async function onRequestPost(context) {
   //   trivial (the default placeholder text above already guarantees
   //   that), before any image/text/document validation work.
   if (!hasElevatedAccess) {
+    // [NEW] Same global reservation chat.js's identical block calls —
+    // literally the same counter (see checkAndConsumeFreeTierGlobalCapacity
+    // in licenses.mjs), not a second independent one. Has to be: a
+    // separate per-endpoint reservation would reopen exactly the
+    // route-around-the-cap hole the comment above this block already
+    // warns about, just one layer up.
+    const globalCap = await checkAndConsumeFreeTierGlobalCapacity(env);
+    if (!globalCap.ok) {
+      console.warn('[vision.js] Free tier at global capacity, protecting subscriber headroom');
+      return json(
+        {
+          error: likelyArabic
+            ? 'الخدمة المجانية مزدحمة دلوقتي. جرّب تاني بعد شوية، أو اشترك لضمان وصول مضمون.'
+            : 'The free tier is at capacity right now. Try again shortly, or subscribe for guaranteed access.',
+          code: 'FREE_TIER_AT_CAPACITY',
+          resetsAt: globalCap.resetsAt,
+        },
+        429, undefined, request,
+      );
+    }
     const msgQuota = await checkAndConsumeFreeMessageQuota(env, clientIp);
     if (!msgQuota.ok) {
       console.warn('[vision.js] Free-tier daily message quota exhausted for', clientIp);
@@ -1636,6 +1695,53 @@ export async function onRequestPost(context) {
     }
     quotaRemaining = msgQuota.remaining;
     quotaResetsAt = msgQuota.resetsAt;
+  } else if (licenseState) {
+    // [NEW, 3-tier fair-share] SAME reasoning as the free-tier block just
+    // above (see its own comment): a subscriber fair-share cap that only
+    // existed in chat.js would be a hole of the exact shape that comment
+    // already warns about — route every vision/PDF call through here
+    // instead of /api/chat and the license's daily message cap would
+    // never be touched. So this deliberately reuses the SAME two license-
+    // keyed gates chat.js's identical block calls, not a second
+    // independent vision allowance:
+    //   - burst: checkRateLimit(..., licenseKey + ':chatburst', ...) —
+    //     same bucket chat.js's burst check writes to, so 6 rapid calls
+    //     spent on images/PDFs here is 6 of the SAME 6-per-5-minutes
+    //     chat.js also draws from, not an extra 6 on top.
+    //   - daily: checkAndConsumeSubscriberMessageQuota(env, licenseKey) —
+    //     same submsgs:{licenseKey} counter chat.js's identical call
+    //     touches. One combined 40/day budget across both endpoints,
+    //     mirroring exactly how the free tier's freemsgs:{ip} counter
+    //     above is already shared between the two files.
+    const subBurstCheck = await checkRateLimit(env, licenseState.licenseKey + ':chatburst', { windowSeconds: 300, maxPerWindow: 6 });
+    if (subBurstCheck.limited) {
+      return json(
+        {
+          ok: false,
+          error: likelyArabic
+            ? 'رسائل كتير بسرعة من مفتاح الاشتراك ده. استنى شوية وحاول تاني.'
+            : 'Too many messages too quickly on this subscription. Please wait a bit and try again.',
+          code: 'SUBSCRIBER_BURST_LIMITED',
+        },
+        429, undefined, request,
+      );
+    }
+    const subQuota = await checkAndConsumeSubscriberMessageQuota(env, licenseState.licenseKey);
+    if (!subQuota.ok) {
+      console.warn('[vision.js] Subscriber daily message quota exhausted for license', licenseState.licenseKey, 'from', clientIp);
+      return json(
+        {
+          error: likelyArabic
+            ? 'خلصت رسايل اليوم المسموح بيها لهذا الاشتراك. هيرجع تاني بعد ما الحصة تتجدد — شوف الميعاد تحت.'
+            : "This subscription has reached today's fair-share message limit. It resets after the window below.",
+          code: 'SUBSCRIBER_MESSAGE_QUOTA_USED',
+          resetsAt: subQuota.resetsAt,
+        },
+        403, undefined, request,
+      );
+    }
+    quotaRemaining = subQuota.remaining;
+    quotaResetsAt = subQuota.resetsAt;
   }
 
   // NEW — mirrors chat.js's identical construction. Spread into both
@@ -1985,7 +2091,9 @@ export async function onRequestPost(context) {
   // X-CES-Vision-Detail is known upfront and stays a real header.
   // ============================================================================
   const geminiKeysIndexed = buildGeminiKeyPool(env);
-  const geminiPool = rotateStart(geminiKeysIndexed);
+  // [NEW] reserveForSubscribers() filters BEFORE rotateStart — see the
+  // function's own header above for why the order matters.
+  const geminiPool = rotateStart(reserveForSubscribers(geminiKeysIndexed, hasElevatedAccess));
   const budget = makeFetchBudget(SUBREQUEST_BUDGET_VISION);
   const startTime = Date.now();
 

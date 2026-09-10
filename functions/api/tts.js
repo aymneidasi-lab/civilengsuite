@@ -611,6 +611,116 @@ import {
   SUBREQUEST_BUDGET_FREE_PLAN,
 } from '../_lib/rotation.mjs';
 
+// [NEW] License/quota awareness — tts.js previously imported nothing from
+// this module and had no concept of subscriber vs free tier at all, only
+// the generic per-IP checkRateLimit burst guard above (abuse protection,
+// not fairness — same gap chat.js/vision.js had before this session's
+// other work). See checkAndConsume{Free,Subscriber}TtsQuota's own header
+// in licenses.mjs for why TTS gets its own quota dimension instead of
+// sharing chat/vision's message quota.
+import {
+  validateLicense,
+  checkAndConsumeFreeTtsQuota,
+  checkAndConsumeSubscriberTtsQuota,
+} from '../_lib/licenses.mjs';
+
+// [NEW] Identical helper to chat.js's/vision.js's own hmacTimingSafeEqual —
+// copied rather than imported (this project has no shared _lib module for
+// it; each of the three route files that need it keeps its own copy, the
+// same "one small primitive, not worth a shared module for one function"
+// convention chat.js's own RACE_CONCURRENCY-adjacent comments already
+// establish). Constant-time comparison so a wrong-password attempt cannot
+// be timed to leak how many leading characters matched.
+async function hmacTimingSafeEqual(a, b) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.generateKey(
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const [sigA, sigB] = await Promise.all([
+    crypto.subtle.sign('HMAC', key, enc.encode(a)),
+    crypto.subtle.sign('HMAC', key, enc.encode(b)),
+  ]);
+  const arrA = new Uint8Array(sigA);
+  const arrB = new Uint8Array(sigB);
+  let diff = 0;
+  for (let i = 0; i < arrA.length; i++) diff |= arrA[i] ^ arrB[i];
+  return diff === 0;
+}
+
+// [NEW] Shared by both handlers below — resolves tier (developer/
+// subscriber/regular) from either the GET query string or the POST JSON
+// body, mirroring chat.js's/vision.js's identical 3a-i/3a-ii block as
+// closely as this file's GET+POST (rather than POST-only) shape allows.
+// GET must read from URLSearchParams — a browser <audio src="..."> element
+// (this file's own primary GET caller, see footing_pro_v104.html's
+// playChunksViaProxy) can only ever issue a plain GET with no custom body
+// or headers, so query params are the only channel available to it.
+async function resolveTier(env, params, clientIp) {
+  const incomingDevPw   = typeof params.devPassword === 'string' ? params.devPassword : '';
+  const configuredDevPw = typeof env.DEVELOPER_PASSWORD === 'string' ? env.DEVELOPER_PASSWORD : '';
+  let isDeveloperMode = false;
+  if (incomingDevPw && configuredDevPw) {
+    try {
+      isDeveloperMode = await hmacTimingSafeEqual(incomingDevPw, configuredDevPw);
+    } catch (_) {
+      isDeveloperMode = (incomingDevPw === configuredDevPw);
+    }
+    if (isDeveloperMode) {
+      console.info('[tts.js] Developer mode authenticated for request from', clientIp);
+    } else {
+      console.warn('[tts.js] Developer mode: wrong password attempt from', clientIp);
+    }
+  }
+
+  const incomingLicenseKey  = typeof params.licenseKey === 'string' ? params.licenseKey : '';
+  const incomingDeviceToken = typeof params.deviceToken === 'string' ? params.deviceToken : '';
+  const incomingFingerprint = typeof params.fingerprintId === 'string' ? params.fingerprintId : '';
+  let hasElevatedAccess = isDeveloperMode;
+  let licenseState = null;
+  if (!isDeveloperMode && incomingLicenseKey && incomingDeviceToken) {
+    const licenseResult = await validateLicense(env, incomingLicenseKey, incomingDeviceToken, incomingFingerprint);
+    if (licenseResult.ok) {
+      hasElevatedAccess = true;
+      licenseState = licenseResult.license;
+    }
+  }
+  return { isDeveloperMode, hasElevatedAccess, licenseState };
+}
+
+// [NEW] Same two-part gate as chat.js's/vision.js's identical blocks: the
+// FREE_TIER_DISABLED kill switch first (see chat.js step 3a-iii for the
+// full rationale — same env var, same '1'-string convention, closes
+// free-tier access on this endpoint too from the same single dashboard
+// toggle), then the character-charged quota itself. Returns a Response to
+// send immediately on rejection, or null to continue.
+async function checkTtsQuota(env, tier, identity, charCount, likelyArabic, requestId, t0, request) {
+  if (!tier.hasElevatedAccess && env.FREE_TIER_DISABLED === '1') {
+    return jsonResponse(403, {
+      error: likelyArabic
+        ? 'التسجيل المجاني مقفول مؤقتًا. اشترك للمتابعة.'
+        : 'Free access is temporarily closed. Subscribe to continue.',
+      code: 'FREE_TIER_DISABLED',
+      requestId,
+    }, request, { 'X-TTS-Request-Id': requestId, 'X-TTS-Latency-Ms': String(Date.now() - t0) });
+  }
+  const quota = tier.hasElevatedAccess && tier.licenseState
+    ? await checkAndConsumeSubscriberTtsQuota(env, tier.licenseState.licenseKey, charCount)
+    : (tier.hasElevatedAccess ? { ok: true } : await checkAndConsumeFreeTtsQuota(env, identity, charCount));
+  if (!quota.ok) {
+    return jsonResponse(403, {
+      error: likelyArabic
+        ? 'خلصت حصة القراءة الصوتية اليومية. حاول تاني بعد ما الحصة تتجدد.'
+        : "Today's text-to-speech quota is used up. Try again after it resets.",
+      code: quota.reason,
+      resetsAt: quota.resetsAt,
+      requestId,
+    }, request, { 'X-TTS-Request-Id': requestId, 'X-TTS-Latency-Ms': String(Date.now() - t0) });
+  }
+  return null;
+}
+
 // ── CORS — same-origin restriction (production + localhost dev) ───────────
 // [FIX, v13] Was 'https://civilengsuite.pages.dev' -- stale. The deployed
 // site's actual origin (confirmed directly from a screenshot of its own
@@ -922,9 +1032,23 @@ function stripSuperSubMarkers(text) {
   // _cesStripSubscriptMarkers genuinely fused every length unconditionally
   // (a real x_i-type bug); this function did not.
   const fuseOrSpace = (_m, base, sub) => (sub.length >= 2 ? base + sub : base + ' ' + sub);
+  // [FIX — Claude] Superscript ("^") markers now always get a space,
+  // never fuse. The two regexes below used to share ONE [_^] character
+  // class feeding this same fuseOrSpace callback, so a 2+-char run after a
+  // caret fused exactly like a subscript does -- correct for a subscript
+  // (f_cu -> "fcu" is a natural-sounding compound) but wrong for an
+  // exponent, where a fused digit+letter is never a real word (confirmed
+  // empirically, tts_test_battery item 11: "d^2y" reaching this fallback
+  // collapsed to the unpronounceable "d2y"). This function's own header
+  // above already documents the intended behavior as "collapsed to a
+  // plain space" for every marker; splitting the two marker types onto
+  // separate regexes is what actually makes that true for "^".
+  const spaceOnly = (_m, base, sub) => base + ' ' + sub;
   return text
-    .replace(/([A-Za-z\u03B2\u03B3\u03B5\u03BB\u03C1\u03C4\u03C8])[_^]\{([A-Za-z0-9+\-=()]{1,8})\}/g, fuseOrSpace)
-    .replace(/([A-Za-z0-9\u03B2\u03B3\u03B5\u03BB\u03C1\u03C4\u03C8])[_^]([A-Za-z0-9+\-]{1,3})(?![A-Za-z0-9])/g, fuseOrSpace)
+    .replace(/([A-Za-z\u03B2\u03B3\u03B5\u03BB\u03C1\u03C4\u03C8])_\{([A-Za-z0-9+\-=()]{1,8})\}/g, fuseOrSpace)
+    .replace(/([A-Za-z\u03B2\u03B3\u03B5\u03BB\u03C1\u03C4\u03C8])\^\{([A-Za-z0-9+\-=()]{1,8})\}/g, spaceOnly)
+    .replace(/([A-Za-z0-9\u03B2\u03B3\u03B5\u03BB\u03C1\u03C4\u03C8])_([A-Za-z0-9+\-]{1,3})(?![A-Za-z0-9])/g, fuseOrSpace)
+    .replace(/([A-Za-z0-9\u03B2\u03B3\u03B5\u03BB\u03C1\u03C4\u03C8])\^([A-Za-z0-9+\-]{1,3})(?![A-Za-z0-9])/g, spaceOnly)
     .replace(SUPERSUB_RE, ch => SUPERSUB_TO_ASCII[ch]);
 }
 
@@ -1033,6 +1157,10 @@ const MATHBB_SPEECH_RE = /\\mathbb\{([A-Za-z])\}/g;
 // the test battery ever produce; same "bounded, not a parser" scope as
 // every other construct-specific regex in this file.
 const INTEGRAL_SPEECH_RE = /\\int(?:_(?:\{([^{}]*)\}|([^\s{}\\^_]+)))?(?:\^(?:\{([^{}]*)\}|([^\s{}\\^_]+)))?/g;
+// [ADDED — Claude] Same bounds shape as INTEGRAL_SPEECH_RE, for \sum/\prod.
+const SUM_PROD_SPEECH_RE = /\\(sum|prod)(?:_(?:\{([^{}]*)\}|([^\s{}\\^_]+)))?(?:\^(?:\{([^{}]*)\}|([^\s{}\\^_]+)))?/g;
+// [ADDED — Claude] \lim's single subscript bound (no superscript side).
+const LIM_SPEECH_RE = /\\lim(?:_\{([^{}]*)\}|_([^\s{}\\^_]+))?/g;
 
 // One level of nested braces (see the client's identical comment on its own
 // CES_FRAC_RE/CES_SQRT_RE/CES_SUP_RE) — a subscript inside a frac numerator
@@ -1046,7 +1174,23 @@ const SQRT_SPEECH_RE = /\\sqrt\{((?:[^{}]|\{[^{}]*\})*)\}/g;
 // end of flattenLatexForSpeech as the broken, literal "sqrt[3]8" (verified
 // empirically before this fix). Mirrors the client's CES_NTH_ROOT_RE.
 const NTH_ROOT_SPEECH_RE = /\\sqrt\[((?:[^\[\]]|\[[^\[\]]*\])*)\]\{((?:[^{}]|\{[^{}]*\})*)\}/g;
-const SUP_SPEECH_RE = /\^\{((?:[^{}]|\{[^{}]*\})*)\}|\^([+-]?[0-9]+|[A-Za-z])(?![A-Za-z0-9])/g;
+// [FIX — Claude] Bare (non-braced) alternative split into a DIGIT capture
+// (no longer requiring a non-alnum lookahead after it) and a LETTER capture
+// (keeps the lookahead). Real LaTeX grammar makes a bare "^" consume
+// exactly one following character/group regardless of what comes after --
+// "d^2y" is unambiguously "d superscript 2, then y" the same way it is in
+// a real LaTeX renderer, never "d superscript (2y)". The previous shared
+// lookahead required a non-alnum boundary before the caret would fire at
+// all, so this domain's routine Leibniz second/third-derivative shorthand
+// (d^2y/dx^2, d^3y/dx^3, written tight with no space before the next
+// letter) never matched -- confirmed empirically (tts_test_battery item
+// 11: "d^2y" reached the TTS engine as the unpronounceable fused token
+// "d2y", the exponent digit swallowed with no "squared" wording at all).
+// The LETTER alternative keeps its lookahead unchanged: a single bare
+// letter exponent directly followed by more letters ("x^ny") is rarer and
+// more genuinely ambiguous in informal (non-braced) notation, and no
+// battery item depends on loosening it, so it is left exactly as before.
+const SUP_SPEECH_RE = /\^\{((?:[^{}]|\{[^{}]*\})*)\}|\^([+-]?[0-9]+)|\^([A-Za-z])(?![A-Za-z0-9])/g;
 // [ADDED] \text{}/\mathrm{}/\mathbf{}/\mathit{}/\boldsymbol{}/\overline{}/
 // \bar{}/\hat{}/\underline{}/\mathcal{} -- typographic wrappers with no
 // spoken content of their own. Previously unhandled: fell through to the
@@ -1127,9 +1271,28 @@ function _wrapOperand(x) {
 // closes a false-positive path that would otherwise fire on ordinary
 // conversational sentences, not just formulas -- a far more severe defect
 // than the derivative-notation gap this const was added to close.
-const PRIME_CALL_RE = /(?<![A-Za-z])([A-Za-z\u0370-\u03FF])('{1,3})(?!_)/g;
+// [FIX — Claude] Prime-mark character class widened from ASCII "'" only to
+// also accept the typographic right single quote U+2019 (notationNormalizer
+// .mjs's own f'_c pattern already special-cases this exact substitution --
+// see that file's "PATCH -- f'_c prime notation" comment -- proving it
+// reaches production text) and the two real Unicode prime marks U+2032/
+// U+2033 (an author using a proper math-symbol input method produces these
+// directly, never an apostrophe). Previously only the straight apostrophe
+// matched, so any of these other three forms silently fell through every
+// pass in this file and reached the TTS engine as a bare, unspoken
+// punctuation mark -- confirmed empirically (f\u2019(x), f\u2032(x): "prime"
+// never spoken). Weight map lets a single "\u2033" character (already
+// meaning double-prime) resolve to the same order as two typed apostrophes,
+// instead of being miscounted as a length-1 run.
+const PRIME_UNIT_WEIGHT = { "'": 1, '\u2019': 1, '\u2032': 1, '\u2033': 2, '\u2034': 3 };
+function primeOrder(run) {
+  let n = 0;
+  for (const ch of run) n += PRIME_UNIT_WEIGHT[ch] || 1;
+  return n;
+}
+const PRIME_CALL_RE = /(?<![A-Za-z])([A-Za-z\u0370-\u03FF])(['\u2019\u2032\u2033\u2034]{1,3})(?!_)/g;
 function primeCallWord(base, primes, isAr) {
-  const n = primes.length;
+  const n = primeOrder(primes);
   const word = isAr
     ? (n === 1 ? ' مشتقة ' : n === 2 ? ' مشتقة ثانية ' : n === 3 ? ' مشتقة ثالثة ' : ` مشتقة من الرتبة ${n} `)
     : (n === 1 ? ' prime ' : n === 2 ? ' double prime ' : n === 3 ? ' triple prime ' : ` order-${n} prime `);
@@ -1138,8 +1301,8 @@ function primeCallWord(base, primes, isAr) {
 // Prime immediately before "_" -- e.g. bare-prose "f'_c". Unambiguous
 // engineering-strength notation (no English contraction is ever shaped
 // "word'_something"), so -- unlike the blanket strip -- this is safe to run
-// outside math spans too.
-const PRIME_SUBSCRIPT_RE = /([A-Za-z\u0370-\u03FF])'(?=_)/g;
+// outside math spans too. Same widened character class as PRIME_CALL_RE.
+const PRIME_SUBSCRIPT_RE = /([A-Za-z\u0370-\u03FF])['\u2019\u2032\u2033\u2034](?=_)/g;
 // and/or, he/she, pass/fail, etc. -- idiomatic English slash-shorthand that
 // BARE_DIV_SPEECH_RE's own token grammar can't tell apart from a genuine
 // variable ratio once it's sitting in bare prose with no surrounding LaTeX
@@ -1188,7 +1351,7 @@ function resolveMathInnerForSpeech(inner, isAr) {
   // point.
   s = s
     .replace(PRIME_CALL_RE, (_m, base, primes) => primeCallWord(base, primes, isAr))
-    .replace(/'/g, ''); // prime marks read as "apostrophe" on every engine -- see stripSuperSubMarkers's own header for the same "don't trust five black boxes" reasoning
+    .replace(/['\u2019\u2032\u2033\u2034]/g, ''); // prime marks read as "apostrophe" on every engine -- see stripSuperSubMarkers's own header for the same "don't trust five black boxes" reasoning
   for (let pass = 0; pass < 4; pass++) {
     const before = s;
     // [ADDED] Matrix/array environment -- see MATRIX_SPEECH_RE's own
@@ -1242,6 +1405,49 @@ function resolveMathInnerForSpeech(inner, isAr) {
       if (upper !== undefined) return isAr ? ` تكامل إلى ${upper} ` : ` integral to ${upper} `;
       return isAr ? ' تكامل ' : ' integral ';
     });
+    // [ADDED — Claude] \sum / \prod with Leibniz-style bounds (_{lo}^{up},
+    // each optionally braced, each optional independently) -- mirrors
+    // INTEGRAL_SPEECH_RE immediately above, same reasoning: left to the
+    // generic SUB_SPEECH_RE/SUP_SPEECH_RE passes further down, a
+    // summation's upper bound reads as an EXPONENT instead of a range end
+    // (confirmed empirically, tts_test_battery item 18: "\sum_{i=1}^{n}"
+    // -> "sum i=1 to the power n", not "sum from i equals 1 to n"). Must
+    // run here, BEFORE SUB_SPEECH_RE/SUP_SPEECH_RE, for the identical
+    // reason INTEGRAL_SPEECH_RE must -- placing it later (e.g. next to the
+    // other bare-word macro mappings further down) lets those two generic
+    // passes consume and mangle the bounds first. Replaces the old
+    // standalone bare "\sum"/"\prod" -> word mappings (removed further
+    // down), since a \sum/\prod with NO bounds at all still matches this
+    // same regex (all bound groups are optional) and produces the
+    // identical bare word.
+    s = s.replace(SUM_PROD_SPEECH_RE, (_m, name, lb, lb2, ub, ub2) => {
+      const lower = lb !== undefined ? lb : lb2;
+      const upper = ub !== undefined ? ub : ub2;
+      const word = name === 'prod' ? (isAr ? ' حاصل ضرب ' : ' product ') : (isAr ? ' مجموع ' : ' sum ');
+      if (lower !== undefined && upper !== undefined)
+        return isAr ? `${word}من ${lower} إلى ${upper} ` : `${word}from ${lower} to ${upper} `;
+      if (lower !== undefined) return isAr ? `${word}من ${lower} ` : `${word}from ${lower} `;
+      if (upper !== undefined) return isAr ? `${word}إلى ${upper} ` : `${word}to ${upper} `;
+      return word;
+    });
+    // [ADDED — Claude] \lim with a Leibniz-style subscript bound
+    // (_{x \to a}) -- \lim was previously completely unmapped (fell through
+    // to the generic unmapped-backslash safety net as the bare word "lim"),
+    // and its bound was left for the generic SUB_SPEECH_RE pass, which has
+    // no way to know "\to" means "approaches" (confirmed empirically,
+    // tts_test_battery item 19: "\lim_{x \to \infty}" -> "lim x to
+    // infinity", not "the limit as x approaches infinity"). Must run here
+    // for the same before-SUB_SPEECH_RE reason as above.
+    s = s.replace(LIM_SPEECH_RE, (_m, lb, lb2) => {
+      const bound = lb !== undefined ? lb : lb2;
+      if (bound === undefined) return isAr ? ' نهاية ' : ' limit ';
+      const spokenBound = bound.replace(/\\to/g, isAr ? ' تقترب من ' : ' approaches ');
+      return isAr ? ` النهاية عندما ${spokenBound} ` : ` the limit as ${spokenBound} `;
+    });
+    // [ADDED — Claude] Generic \to -> "approaches" fallback for any
+    // occurrence outside a \lim bound (the case above already resolves its
+    // own "\to" internally, so this cannot double-speak that instance).
+    s = s.replace(/\\to(?![A-Za-z])/g, () => (isAr ? ' تقترب من ' : ' approaches '));
     // [ADDED] Generic bare "/" division -- mirrors the client's identical
     // addition; see BARE_DIV_SPEECH_RE's own comment.
     s = s.replace(BARE_DIV_SPEECH_RE, (_m, num, den) =>
@@ -1297,8 +1503,8 @@ function resolveMathInnerForSpeech(inner, isAr) {
       const spoken = sub.replace(/,\s*/g, isAr ? '، ' : ', ').replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
       return ' ' + spoken + ' ';
     });
-    s = s.replace(SUP_SPEECH_RE, (_m, braced, bare) => {
-      let exp = braced !== undefined ? braced : bare;
+    s = s.replace(SUP_SPEECH_RE, (_m, braced, bareDigit, bareLetter) => {
+      let exp = braced !== undefined ? braced : (bareDigit !== undefined ? bareDigit : bareLetter);
       // [ROUND 3] A leading sign was previously left in the output
       // verbatim ("to the power -1"), relying on the engine to correctly
       // vocalize a bare "-N" -- confirmed empirically that at least one
@@ -1348,10 +1554,27 @@ function resolveMathInnerForSpeech(inner, isAr) {
     // the client's matching additions.
     s = s.replace(/\\neq/g, () => (isAr ? ' لا يساوي ' : ' not equal to '));
     s = s.replace(/\\approx/g, () => (isAr ? ' يساوي تقريبًا ' : ' approximately equal to '));
+    // [FIX — Claude] Bare "=" was never converted to a spoken word anywhere
+    // in this file -- every OTHER relational operator here (\leq/\geq/\neq/
+    // \approx, immediately above) already gets this treatment; the most
+    // common one, plain "=", did not (confirmed empirically, tts_test_
+    // battery items 4, 10, 15, 18, 19: each leaves a literal "=" character
+    // in the text handed to the TTS engine). Unlike "-" (doubles as a
+    // hyphen in ordinary compound words, so deliberately left alone -- see
+    // the minus-sign pass below), "=" has no competing non-mathematical
+    // meaning, so converting it unconditionally is safe.
+    s = s.replace(/=/g, () => (isAr ? ' يساوي ' : ' equals '));
+    // [FIX — Claude] Bare "+" -- same gap, same reasoning (tts_test_battery
+    // items 8, 13: "\Delta+\nabla", "(a+b)" both leave a literal "+"
+    // unspoken). Runs after SUP_SPEECH_RE above, which already consumes and
+    // silently drops a leading "+" that belongs to an exponent sign
+    // (x^+2) as part of its own callback -- so this cannot double-speak
+    // that case.
+    s = s.replace(/\+/g, () => (isAr ? ' زائد ' : ' plus '));
     s = s.replace(/\\infty/g, () => (isAr ? ' لانهاية ' : ' infinity '));
-    s = s.replace(/\\sum/g, () => (isAr ? ' مجموع ' : ' sum '));
     s = s.replace(/\\int/g, () => (isAr ? ' تكامل ' : ' integral '));
-    s = s.replace(/\\prod/g, () => (isAr ? ' حاصل ضرب ' : ' product '));
+    // \sum/\prod bare-word mapping now handled earlier in this same pass by
+    // SUM_PROD_SPEECH_RE (covers both the bounded and bare-no-bounds case).
     // [ADDED] \partial/\nabla -- mirrors the client's identical addition.
     // Any \partial that's half of a Leibniz quotient is already fully
     // consumed by PARTIAL_DERIV_SPEECH_RE above; this only catches a
@@ -1404,6 +1627,46 @@ function resolveMathInnerForSpeech(inner, isAr) {
 // spans. √ can only contribute a fixed leading phrase (it has no way to
 // capture "what follows" the way \sqrt{} does) -- an imperfect but
 // strictly-better-than-silent fallback for this one non-LaTeX hybrid form.
+// [ADDED — Claude] Standalone Unicode superscript digits (²³ etc.) used
+// with no LaTeX "^" syntax and no \sqrt/\frac wrapper at all -- e.g. a
+// reply writing "β²" or "x² + y" with the ready-made glyph. Previously
+// these reached stripSuperSubMarkers completely unprocessed by any speech-
+// aware pass and were silently demoted straight to a bare ASCII digit with
+// no "squared"/spoken-power wording (confirmed empirically, tts_test_
+// battery items 20-22: "β²" -> "beta 2", not "beta squared"). Runs at the
+// same bare-glyph level as BARE_GLYPH_RE below (applies whether or not the
+// surrounding text is $-wrapped), for the same reason that table does.
+const SUP_DIGIT_TO_ASCII = {
+  '\u2070':'0','\u00B9':'1','\u00B2':'2','\u00B3':'3','\u2074':'4',
+  '\u2075':'5','\u2076':'6','\u2077':'7','\u2078':'8','\u2079':'9',
+};
+const SUP_DIGIT_RUN_RE = /[\u2070\u00B9\u00B2\u00B3\u2074-\u2079]+/g;
+function bareSupDigitToSpeech(text, isAr) {
+  return text.replace(SUP_DIGIT_RUN_RE, (run) => {
+    const digits = Array.from(run).map(ch => SUP_DIGIT_TO_ASCII[ch]).join('');
+    if (digits === '2') return isAr ? ' تربيع ' : ' squared ';
+    if (digits === '3') return isAr ? ' تكعيب ' : ' cubed ';
+    return isAr ? ` أُس ${digits} ` : ` to the power ${digits} `;
+  });
+}
+// [ADDED — Claude] Bare "√[n]{...}" -- the bracket-order nth-root shape
+// written with the ready-made √ glyph instead of the LaTeX "\sqrt[n]{...}"
+// macro NTH_ROOT_SPEECH_RE (inside resolveMathInnerForSpeech) already
+// handles. Previously the standalone √ mapping in BARE_GLYPH_RE fired on
+// "√" alone with no way to see a following "[n]", always saying "square
+// root of" regardless of the actual order, and left the stray "[n]"/"{}"
+// as literal leftover punctuation (confirmed empirically, tts_test_battery
+// items 21-22). Must run BEFORE BARE_GLYPH_RE's own generic √ mapping so
+// the bracket form is consumed as a whole first; a plain "√(...)"/"√x"
+// with no bracket is left for that generic mapping, unchanged.
+const BARE_NTH_ROOT_RE = /\u221A\[((?:[^\[\]]|\[[^\[\]]*\])*)\]\{((?:[^{}]|\{[^{}]*\})*)\}/g;
+function bareNthRootToSpeech(text, isAr) {
+  return text.replace(BARE_NTH_ROOT_RE, (_m, order, x) => {
+    if (order === '2') return isAr ? ` الجذر التربيعي لـ (${x}) ` : ` square root of (${x}) `;
+    if (order === '3') return isAr ? ` الجذر التكعيبي لـ (${x}) ` : ` cube root of (${x}) `;
+    return isAr ? ` الجذر رقم ${order} لـ (${x}) ` : ` the ${ordinalSpeech(order)} root of (${x}) `;
+  });
+}
 const BARE_GLYPH_RE = /[\u2264\u2265\u00B1\u2260\u2248\u221E\u00D7\u00F7\u0391-\u03A9\u03B1-\u03C9\u2202\u2207\u221A]/g;
 const BARE_GLYPH_WORDS_AR = {
   '\u2264':' أصغر من أو يساوي ', '\u2265':' أكبر من أو يساوي ', '\u00B1':' زائد أو ناقص ', '\u2260':' لا يساوي ',
@@ -1453,6 +1716,8 @@ function flattenLatexForSpeech(text) {
     out += text[i];
     i++;
   }
+  out = bareNthRootToSpeech(out, isAr);
+  out = bareSupDigitToSpeech(out, isAr);
   out = out.replace(BARE_GLYPH_RE, (m) => (isAr ? BARE_GLYPH_WORDS_AR : BARE_GLYPH_WORDS_EN)[m]);
   // [ROUND 2 — bare-prose defense-in-depth] Everything above only ever
   // runs on text the model wrapped in $.../$$...$$. Verified empirically
@@ -1481,6 +1746,13 @@ function flattenLatexForSpeech(text) {
       ? ` المشتقة الجزئية لـ ${n} بالنسبة لـ ${denomVar} `
       : ` the partial derivative of ${n} with respect to ${denomVar} `;
   });
+  // [FIX — Claude] Bare "="/"+" in ordinary un-wrapped prose (no $ at all)
+  // -- same gap as inside a math span, and the same "no competing
+  // non-mathematical meaning" safety argument applies here too (unlike the
+  // "-" pass, which stays $-span-only precisely because bare prose is
+  // full of legitimate hyphenated words).
+  out = out.replace(/=/g, () => (isAr ? ' يساوي ' : ' equals '));
+  out = out.replace(/\+/g, () => (isAr ? ' زائد ' : ' plus '));
   out = bareUnitRespell(out, isAr);
   out = out.replace(BARE_DIV_SPEECH_RE, (_m, num, den) => {
     const nLower = /^[A-Za-z]+$/.test(num) ? num.toLowerCase() : null;
@@ -1505,7 +1777,7 @@ const EMOJI_STRIP_RE = (function () {
   try {
     return new RegExp(
       '\\p{Extended_Pictographic}[\\u{FE0E}\\u{FE0F}]?(?:\\u200D\\p{Extended_Pictographic}[\\u{FE0E}\\u{FE0F}]?)*' +
-      '|[0-9#*][\\uFE0F]?\\u20E3' +
+      '|([0-9#*])[\\uFE0F]?\\u20E3' +
       '|\\p{Regional_Indicator}{2}',
       'gu'
     );
@@ -1517,7 +1789,15 @@ const EMOJI_STRIP_RE = (function () {
 function stripEmojiMarkers(text) {
   if (!EMOJI_STRIP_RE) return text;
   try {
-    return text.replace(EMOJI_STRIP_RE, ' ');
+    // [FIX — Claude] Keycap sequences (0-9/#/* + optional FE0F + U+20E3)
+    // used to be replaced wholesale with a single space, taking the base
+    // character down with the combining marks -- "الخطوة 1️⃣" became
+    // "الخطوة " with the step number gone entirely, not just the circle
+    // graphic (confirmed empirically, tts_test_battery item 22). The base
+    // character is now captured and returned in place of the match instead
+    // of a space; every other alternative (plain pictographic sequences,
+    // flag pairs) still collapses to a space exactly as before.
+    return text.replace(EMOJI_STRIP_RE, (m, keycapBase) => (keycapBase !== undefined ? keycapBase : ' '));
   } catch (_) {
     return text;
   }
@@ -1602,9 +1882,27 @@ const PROSODY_LEXICON = Object.freeze({
   warning: ['تنبيه', 'تحذير', 'احترس', 'خطأ', 'ممنوع', 'خطر'],
 });
 
+// [ADDED — Claude] Emoji-based scoring, same three categories, same
+// additive scoring/tie-break as PROSODY_LEXICON above. Closes a real gap:
+// a reply consisting mostly or entirely of emoji (e.g. "😢😢😢") always
+// classified as neutral, because PROSODY_LEXICON only ever matches Arabic
+// text stems and `text` here is the caller's already-preprocessText()-ed
+// string, which has had every one of these emoji already removed by
+// stripEmojiMarkers before inferProsody ever sees it (confirmed
+// empirically, tts_test_battery item 16) -- see inferProsody's new
+// `emojiSourceText` parameter below, which is what actually lets this
+// table match anything. Deliberately small and coarse (three categories,
+// not a full sentiment lexicon): this only needs to catch clearly
+// one-sided emoji, not adjudicate ambiguous ones.
+const PROSODY_EMOJI_LEXICON = Object.freeze({
+  excited: ['🎉', '🎊', '🥳', '🏆', '🔥', '💯', '😍', '🥰', '👏', '😂', '🤣'],
+  empathetic: ['😢', '😭', '😞', '😔', '🥺', '💔'],
+  warning: ['⚠️', '🚨', '🛑'],
+});
+
 /**
  * Classify one already-preprocessText()-ed chunk into a prosody profile.
- * Pure function of its three arguments -- no I/O, no Date.now(), no shared
+ * Pure function of its arguments -- no I/O, no Date.now(), no shared
  * mutable state beyond Math.random() for jitter -- see __inferProsodyForTests.
  *
  * @param {string} text
@@ -1612,13 +1910,19 @@ const PROSODY_LEXICON = Object.freeze({
  * @param {string} [forcedEmotion] one of PROSODY_PROFILES's keys, or
  *   'auto'/undefined/anything unrecognized to run the lexicon scorer --
  *   an unrecognized value degrades to today's inference, never a 400.
+ * @param {string} [emojiSourceText] the pre-stripEmojiMarkers original text,
+ *   scanned against PROSODY_EMOJI_LEXICON in addition to `text`'s own
+ *   PROSODY_LEXICON word scan. Optional and falls back to `text` itself
+ *   (a no-op scan, since `text` has no emoji left in it by the time it
+ *   reaches here) so every existing caller -- including
+ *   __inferProsodyForTests -- keeps working unchanged without this arg.
  * @returns {{
  *   emotion: string, isQuestion: boolean,
  *   pitchHz: number, ratePct: number, volumePct: number,
  *   elevenStyle: number, stabilityDelta: number,
  * }}
  */
-function inferProsody(text, limits, forcedEmotion) {
+function inferProsody(text, limits, forcedEmotion, emojiSourceText) {
   const isQuestion = /[؟?]\s*$/.test(text);
 
   let emotion;
@@ -1630,6 +1934,14 @@ function inferProsody(text, limits, forcedEmotion) {
     for (const category of Object.keys(PROSODY_LEXICON)) {
       for (const stem of PROSODY_LEXICON[category]) {
         if (text.includes(stem)) scores[category] += 1;
+      }
+    }
+    // [ADDED — Claude] Same accumulator, same additive scoring, just a
+    // second table and a second (usually emoji-intact) source string.
+    const emojiScanText = typeof emojiSourceText === 'string' ? emojiSourceText : text;
+    for (const category of Object.keys(PROSODY_EMOJI_LEXICON)) {
+      for (const stem of PROSODY_EMOJI_LEXICON[category]) {
+        if (emojiScanText.includes(stem)) scores[category] += 1;
       }
     }
     // Fixed tie-break priority when multiple categories score >0:
@@ -2684,7 +2996,7 @@ export {
  * point 8. A thrown error here is now an unexpected internal fault, not a
  * routine outcome.
  */
-async function runTtsCascade({ text, lang, genderKey, speed, emotion, env, context, timeouts }) {
+async function runTtsCascade({ text, rawText, lang, genderKey, speed, emotion, env, context, timeouts }) {
   const devMode = isDevMode(env);
   const englishOnly = isEnglish(lang);
   const budget = makeFetchBudget(SUBREQUEST_BUDGET_FREE_PLAN);
@@ -2722,7 +3034,7 @@ async function runTtsCascade({ text, lang, genderKey, speed, emotion, env, conte
     styleMax         : nonNegFloatFromEnv(env, 'TTS_PROSODY_STYLE_MAX', PROSODY_STYLE_MAX, 1),
     stabilityDeltaMax: nonNegFloatFromEnv(env, 'TTS_PROSODY_STABILITY_DELTA_MAX', PROSODY_STABILITY_DELTA_MAX, 1),
   };
-  const prosody = inferProsody(text, prosodyLimits, emotion);
+  const prosody = inferProsody(text, prosodyLimits, emotion, rawText);
   // ASCII-only values throughout (emotion is one of PROSODY_PROFILES's
   // English keys, the rest are signed integers/floats) -- see v8 changelog
   // point 5 on why a non-Latin-1 header value throws at the Fetch API layer.
@@ -3079,12 +3391,22 @@ export async function onRequestGet(context) {
     });
   }
 
+  // [NEW] Tier resolution + quota — see resolveTier's/checkTtsQuota's own
+  // headers above. GET reads licenseKey/deviceToken/devPassword straight
+  // off url.searchParams since a browser <audio src> element cannot send
+  // a body or custom headers.
+  const likelyArabic = langParam.toLowerCase().startsWith('ar');
+  const paramsForTier = Object.fromEntries(url.searchParams.entries());
+  const tier = await resolveTier(env, paramsForTier, clientIp);
+  const quotaRejection = await checkTtsQuota(env, tier, clientIp, text.length, likelyArabic, requestId, t0, request);
+  if (quotaRejection) return quotaRejection;
+
   const safeLang  = ALLOWED_LANGS.has(langParam) ? langParam : 'ar-EG';
   const genderKey = voiceParam === 'male' ? 'male' : 'female';
 
   try {
     const result = await runTtsCascade({
-      text, lang: safeLang, genderKey, speed: speedParam, emotion: emotionParam, env, context,
+      text, rawText, lang: safeLang, genderKey, speed: speedParam, emotion: emotionParam, env, context,
       timeouts: resolveTimeouts(env),
     });
     logTtsEvent({ requestId, route: 'GET', lang: safeLang, provider: result.provider, fallback: result.attempts.length > 0, attempts: result.attempts, budgetRemaining: result.budgetRemaining });
@@ -3149,12 +3471,20 @@ export async function onRequestPost(context) {
     });
   }
 
+  // [NEW] Same tier resolution + quota as the GET handler above — POST
+  // reads credentials from the JSON body instead of query params, matching
+  // chat.js's/vision.js's own convention for their JSON-body interfaces.
+  const likelyArabic = langParam.toLowerCase().startsWith('ar');
+  const tier = await resolveTier(env, body, clientIp);
+  const quotaRejection = await checkTtsQuota(env, tier, clientIp, text.length, likelyArabic, requestId, t0, request);
+  if (quotaRejection) return quotaRejection;
+
   const safeLang  = ALLOWED_LANGS.has(langParam) ? langParam : 'ar-EG';
   const genderKey = genderRaw === 'male' ? 'male' : 'female';
 
   try {
     const result = await runTtsCascade({
-      text, lang: safeLang, genderKey, speed: speedParam, emotion: emotionParam, env, context,
+      text, rawText, lang: safeLang, genderKey, speed: speedParam, emotion: emotionParam, env, context,
       timeouts: resolveTimeouts(env),
     });
     logTtsEvent({ requestId, route: 'POST', lang: safeLang, provider: result.provider, fallback: result.attempts.length > 0, attempts: result.attempts, budgetRemaining: result.budgetRemaining });

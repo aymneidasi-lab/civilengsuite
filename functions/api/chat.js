@@ -2119,7 +2119,7 @@ import { assertPromptBudget } from '../_lib/promptBudget.mjs';
 // dev-upload.js (upload time) and vision.js (its own multi-source count);
 // chat.js's text-file path has no equivalent per-file quota of its own,
 // only the free-tier MESSAGE quota below.
-import { validateLicense, issueLicense, revokeLicense, resetDevices, listLicenses, getLicense, updateLicense, deleteLicense, checkAndConsumeFreeMessageQuota } from '../_lib/licenses.mjs';
+import { validateLicense, issueLicense, revokeLicense, resetDevices, listLicenses, getLicense, updateLicense, deleteLicense, checkAndConsumeFreeMessageQuota, checkAndConsumeSubscriberMessageQuota, peekSubscriberMessageQuota, checkAndConsumeFreeTierGlobalCapacity } from '../_lib/licenses.mjs';
 
 
 // ── Per-isolate dead-key skip cache (v25) ─────────────────────────────────
@@ -2644,6 +2644,66 @@ const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 // wall-clock improvement on a representative fixture at concurrency=3; see
 // audit notes before raising it further.
 const RACE_CONCURRENCY = 3;
+
+// [NEW] Supply-side subscriber priority — reserves a slice of each
+// provider's key pool exclusively for subscriber/developer
+// (hasElevatedAccess) traffic. Complements the earlier DEMAND-side fix
+// (checkAndConsumeFreeTierGlobalCapacity in licenses.mjs, which caps how
+// many free-tier messages are even attempted in aggregate) — that fix
+// protects the shared KV/provider budget in the aggregate; this one
+// protects it at the level of WHICH KEYS a request can even see. A
+// free-tier flood can burn through every key it is given, but it is never
+// given 100% of any pool: SUBSCRIBER_RESERVED_POOL_FRACTION of each pool
+// never appears in a non-elevated request's pool at all, full stop,
+// regardless of how much of the rest free tier has already exhausted.
+//
+// GATED ON hasElevatedAccess, THE SAME VARIABLE EVERY OTHER TIER CHECK IN
+// THIS FILE USES: true for both a validated subscriber and dev-password
+// access, exactly matching how file/quota limits already treat those two
+// as one "elevated" population — no new tier concept introduced here.
+//
+// PROPORTIONAL, NOT A FIXED COUNT: this codebase's pools are documented
+// as 13 keys each, but every xKeysIndexed array above only includes keys
+// actually configured in env (empty ones are filtered) — a deployment
+// missing a key temporarily, or mid-rotation, can have a materially
+// smaller real pool. A fixed "reserve 2" could reserve most or all of a
+// small pool; a proportion scales down with it. Floored at 1 (any
+// non-trivial pool reserves at least one key) and capped at half (never
+// reserve so much that free tier's own resilience is gutted).
+//
+// APPLIED BEFORE rotateStart(), NOT AFTER: filtering first, then
+// randomizing the start offset WITHIN whichever subset a tier receives,
+// keeps rotateStart's own anti-thundering-herd guarantee fully intact
+// for both populations separately — reservation changes which keys are
+// visible, not the fairness-among-concurrent-requests behavior already
+// built for whichever pool a request ends up with.
+//
+// DELIBERATELY DOES NOT TOUCH RACE_CONCURRENCY: raising concurrency for
+// subscribers would make each subscriber message draw down MORE of the
+// shared pool per message (every extra concurrent attempt is a real
+// fetch() against a real key's daily quota — see RACE_CONCURRENCY's own
+// comment just above), working against the exact protection this and the
+// KV-side fix exist to provide. Reservation changes WHICH keys are
+// available, not how many are tried at once, so it does not increase
+// subscriber traffic's own cost per message the way a concurrency bump
+// would.
+const SUBSCRIBER_RESERVED_POOL_FRACTION = 0.15; // ~2 of 13 at current pool sizes
+
+function reserveForSubscribers(fullPool, hasElevatedAccess) {
+  if (hasElevatedAccess || fullPool.length <= 1) return fullPool;
+  const reserveCount = Math.min(
+    Math.floor(fullPool.length / 2),
+    Math.max(1, Math.ceil(fullPool.length * SUBSCRIBER_RESERVED_POOL_FRACTION)),
+  );
+  // Slice from the END, consistently every call for the same env (the
+  // xKeysIndexed arrays are built in the same fixed env-var order every
+  // request) — a free-tier request excludes the SAME actual keys every
+  // time, not a different random subset per request. That consistency is
+  // what makes this a real guarantee rather than a probabilistic one: a
+  // specific slice of each pool's daily quota is never touched by free
+  // tier, period, not just "usually" left alone.
+  return fullPool.slice(0, fullPool.length - reserveCount);
+}
 
 // [PATCH] Exact same object callGeminiWithRetry() below has always sent
 // (see that function's own v19 comment for the thinkingBudget:0 rationale
@@ -6586,6 +6646,13 @@ export async function onRequestPost(context) {
   // cesApplyLicenseStatusFromDone() can consume either response shape
   // identically without a second code path.
   if (body.checkLicense === true) {
+    // [NEW] Read-only peek at the subscriber fair-share quota (see step
+    // 3c-ii-b below and peekSubscriberMessageQuota's own header in
+    // licenses.mjs) — never consumes, so pinging Save can't itself cost
+    // the subscriber one of their daily messages.
+    const subQuotaPeek = licenseState
+      ? await peekSubscriberMessageQuota(env, licenseState.licenseKey)
+      : null;
     return json(
       {
         ok: true,
@@ -6595,10 +6662,35 @@ export async function onRequestPost(context) {
             ? { licenseValid: true, licenseExpiresAt: licenseState.expiresAt }
             : { licenseValid: false, licenseRejectReason }
         ) : {}),
+        ...(subQuotaPeek ? { quotaRemaining: subQuotaPeek.remaining, quotaResetsAt: subQuotaPeek.resetsAt } : {}),
       },
       200,
       undefined,
       request,
+    );
+  }
+
+  // 3a-iii. [NEW] Free-tier kill switch. Set FREE_TIER_DISABLED="1" in the
+  // Cloudflare dashboard (Settings -> Environment Variables) to close free
+  // access instantly — no code change or redeploy needed. Same '1'-string
+  // convention promptBudget.mjs's PROMPT_BUDGET_STRICT already uses, so it
+  // reads the same way as every other feature flag in this codebase.
+  // Placed AFTER the checkLicense short-circuit above (so saving/
+  // validating a license key still works even while free tier is closed —
+  // that's a status check, not free-tier usage) and BEFORE every other
+  // non-elevated code path below (message quota, file quota, the actual
+  // provider calls) — one gate here covers all of them, so there is no
+  // second place in this file that also needs to know about this switch.
+  if (!hasElevatedAccess && env.FREE_TIER_DISABLED === '1') {
+    console.warn('[chat.js] Free tier closed (FREE_TIER_DISABLED=1), rejecting request from', clientIp);
+    return json(
+      {
+        error: likelyArabic
+          ? 'التسجيل المجاني مقفول مؤقتًا. اشترك للمتابعة.'
+          : 'Free access is temporarily closed. Subscribe to continue.',
+        code: 'FREE_TIER_DISABLED',
+      },
+      403, undefined, request,
     );
   }
 
@@ -7649,6 +7741,26 @@ export async function onRequestPost(context) {
   //   atomic-check-and-consume tradeoff and the KV write-budget ceiling
   //   this implies at scale.
   if (!hasElevatedAccess) {
+    // [NEW] Global reservation, runs BEFORE the personal per-IP check
+    // below. Protects a floor of the shared KV/provider budget for
+    // subscribers regardless of how many different free IPs are active —
+    // see checkAndConsumeFreeTierGlobalCapacity's own header in
+    // licenses.mjs for the reserved-floor math and the write-cost
+    // trade-off this adds.
+    const globalCap = await checkAndConsumeFreeTierGlobalCapacity(env);
+    if (!globalCap.ok) {
+      console.warn('[chat.js] Free tier at global capacity, protecting subscriber headroom');
+      return json(
+        {
+          error: likelyArabic
+            ? 'الخدمة المجانية مزدحمة دلوقتي. جرّب تاني بعد شوية، أو اشترك لضمان وصول مضمون.'
+            : 'The free tier is at capacity right now. Try again shortly, or subscribe for guaranteed access.',
+          code: 'FREE_TIER_AT_CAPACITY',
+          resetsAt: globalCap.resetsAt,
+        },
+        429, undefined, request,
+      );
+    }
     const msgQuota = await checkAndConsumeFreeMessageQuota(env, clientIp);
     if (!msgQuota.ok) {
       console.warn('[chat.js] Free-tier daily message quota exhausted for', clientIp);
@@ -7665,6 +7777,60 @@ export async function onRequestPost(context) {
     }
     quotaRemaining = msgQuota.remaining;
     quotaResetsAt = msgQuota.resetsAt;
+  } else if (licenseState) {
+    // 3c-ii-b. [NEW] Subscriber fair-share quota. Same seam as the
+    // free-tier block above, but keyed by LICENSE KEY (shared across both
+    // of a subscriber's device slots — see MAX_DEVICES_PER_LICENSE)
+    // instead of clientIp, so one subscriber can no longer draw an
+    // unbounded share of the shared Gemini/Groq/OpenRouter/Workers AI
+    // pool at every other subscriber's expense. isDeveloperMode-only
+    // sessions correctly skip this: licenseState stays null unless a real
+    // license was validated (step 3a-ii), so this is a subscriber
+    // fairness mechanism, never a site-owner throttle.
+    //
+    // Layer 1 — BURST: reuses the same checkRateLimit() the step-1 per-IP
+    // guard and the image/rebar per-feature limiters below already call,
+    // just keyed by license instead of IP. Closes a gap step 1 leaves
+    // open by design: step 1 is IP-keyed, so one license's two devices on
+    // two different IPs (or one device hopping IPs) are invisible to it
+    // as the same actor. ':chatburst' suffix namespaces this bucket from
+    // any other checkRateLimit call keyed off the same license string —
+    // same reason the ':image'/':rebar' suffixes exist below.
+    const subBurstCheck = await checkRateLimit(env, licenseState.licenseKey + ':chatburst', { windowSeconds: 300, maxPerWindow: 6 });
+    if (subBurstCheck.limited) {
+      return json(
+        {
+          ok: false,
+          error: likelyArabic
+            ? 'رسائل كتير بسرعة من مفتاح الاشتراك ده. استنى شوية وحاول تاني.'
+            : 'Too many messages too quickly on this subscription. Please wait a bit and try again.',
+          code: 'SUBSCRIBER_BURST_LIMITED',
+        },
+        429, undefined, request,
+      );
+    }
+    // Layer 2 — DAILY AGGREGATE: the actual fair-share cap, so a
+    // subscriber spacing requests out slowly enough to dodge Layer 1
+    // still can't monopolize the shared pool over a full day. See
+    // checkAndConsumeSubscriberMessageQuota's own header in licenses.mjs
+    // for the write-cost accounting and how the 40/day default was
+    // chosen.
+    const subQuota = await checkAndConsumeSubscriberMessageQuota(env, licenseState.licenseKey);
+    if (!subQuota.ok) {
+      console.warn('[chat.js] Subscriber daily message quota exhausted for license', licenseState.licenseKey, 'from', clientIp);
+      return json(
+        {
+          error: likelyArabic
+            ? 'خلصت رسايل اليوم المسموح بيها لهذا الاشتراك. هيرجع تاني بعد ما الحصة تتجدد — شوف الميعاد تحت.'
+            : "This subscription has reached today's fair-share message limit. It resets after the window below.",
+          code: 'SUBSCRIBER_MESSAGE_QUOTA_USED',
+          resetsAt: subQuota.resetsAt,
+        },
+        403, undefined, request,
+      );
+    }
+    quotaRemaining = subQuota.remaining;
+    quotaResetsAt = subQuota.resetsAt;
   }
 
   // NEW — spread into every sseWriter.writeDone() call below (previously
@@ -8069,7 +8235,9 @@ inferring one. General engineering knowledge is still fine to answer from, with 
   // v13: rotateStart() — see rotation.mjs for the full rationale. Every
   // concurrent request gets a different starting key instead of every
   // request piling onto geminiKeysIndexed[0] first.
-  const geminiPool = skipDeadKeys(rotateStart(geminiKeysIndexed), 'gemini');
+  // [NEW] reserveForSubscribers() filters BEFORE rotateStart — see its
+  // own header above for why the order matters and what this guarantees.
+  const geminiPool = skipDeadKeys(rotateStart(reserveForSubscribers(geminiKeysIndexed, hasElevatedAccess)), 'gemini');
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -8362,7 +8530,7 @@ inferring one. General engineering knowledge is still fine to answer from, with 
             ]
               .map((key, originalIndex) => ({ key, originalIndex }))
               .filter(k => k.key);
-            const groqPool = skipDeadKeys(rotateStart(groqKeysIndexed), 'groq');
+            const groqPool = skipDeadKeys(rotateStart(reserveForSubscribers(groqKeysIndexed, hasElevatedAccess)), 'groq');
 
             let groqRetracted = false;
             let groqCommittedCanceller = null; // [PATCH] BUG 1 FIX — same commitment gate as the Gemini tier above
@@ -8426,7 +8594,7 @@ inferring one. General engineering knowledge is still fine to answer from, with 
             ]
               .map((key, originalIndex) => ({ key, originalIndex }))
               .filter(k => k.key);
-            const openRouterPool = skipDeadKeys(rotateStart(openRouterKeysIndexed), 'openrouter');
+            const openRouterPool = skipDeadKeys(rotateStart(reserveForSubscribers(openRouterKeysIndexed, hasElevatedAccess)), 'openrouter');
 
             let orRetracted = false;
             let orCommittedCanceller = null; // [PATCH] BUG 1 FIX — same commitment gate as the Gemini tier above
