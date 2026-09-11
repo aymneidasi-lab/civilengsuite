@@ -348,6 +348,13 @@ import { raceKeyPool } from '../_lib/raceKeyPool.mjs';
 import { callGeminiStreaming } from '../_lib/streamingProviders.mjs';
 import { SseChunkWriter } from '../_lib/resumableSse.mjs'; // [PATCH] resume-mechanism chunkIndex writer
 import { PDF_MIME_TYPE, validatePdfDocument } from '../_lib/documentGuard.mjs'; // NEW — "Insert Text / PDF"
+// [NEW — /explode, /section] Same _lib/imageGen.mjs chat.js already imports
+// for its mode:'image' text-to-image feature. Reused here, not duplicated:
+// generateImageWorkersAI is the only image-GENERATION call anywhere in this
+// stack (Workers AI, text prompt in, image out — see its use below for why
+// that matters). validateImagePrompt runs on the Gemini-produced
+// description before it reaches the generator, same as the free-text path.
+import { validateImagePrompt, generateImageWorkersAI } from '../_lib/imageGen.mjs';
 // [PATCH, 3-tier] Unlike chat.js's text-file path, THIS file is the direct-
 // submission path for images (body.image/body.images) and inline text/
 // document attachments, which never touch dev-upload.js at all — so unlike
@@ -390,6 +397,111 @@ const GEMINI_MODEL_FALLBACK = 'gemini-3.1-flash-lite';
 const GEMINI_API_URL = model =>
   `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 const GEMINI_MAX_OUTPUT_TOKENS = 1536; // vision replies run longer than chat's FAQ turns
+
+// ═══════════════════════════════════════════════════════════════════════
+// VISUAL DECOMPOSITION COMMANDS (v1) — /explode, /section
+// ═══════════════════════════════════════════════════════════════════════
+// "Attach a photo + type /explode or /section" — the same short-command
+// pattern popularized for exploded-view/cross-section AI image tricks,
+// applied to an uploaded structural photo instead of a generic product
+// photo. Two-stage pipeline, not one call, because of a real gap in this
+// stack: generateImageWorkersAI (imageGen.mjs, imported above) is TEXT
+// prompt in, image out — Workers AI is never given the uploaded photo
+// itself. There is no image-to-image / photo-conditioned generation call
+// anywhere in chat.js or this file today (confirmed by review, not
+// assumed) — so Stage 1 has Gemini (already required, already vision-
+// capable, already loaded with the actual photo a few lines below) WRITE
+// a detailed visual description of the requested exploded/section view;
+// Stage 2 feeds that description into the existing text-to-image call,
+// exactly as chat.js's mode:'image' free-text path already does.
+//
+// HONEST LIMITATION, surfaced to the user in the response, not hidden:
+// the output is an AI-conceptual illustration guided by Gemini's
+// description of the photo, not a pixel-faithful geometric transform of
+// the actual photographed object. It is not presented as a measured
+// drawing — the deterministic /diagram family (chat.js) is what does
+// that. A true image-to-image path would need either a Workers AI
+// binding to an img2img-capable checkpoint or a native Gemini image-
+// generation call; neither was confirmed available from the files
+// reviewed for this change (imageGen.mjs's internals were not in the
+// reviewed set) — that is the documented upgrade path, not a claim that
+// it is already possible today.
+const VISUAL_DECOMPOSE_COMMANDS = {
+  explode: {
+    instructionAr: 'اكتب وصفًا بصريًا تفصيليًا لمنظور هندسي "انفجاري" (Exploded View) لهذا العنصر الإنشائي كما يظهر فعليًا في الصورة المرفقة: افصل مكوناته الظاهرة (مثال: حديد التسليح، القالب الخرساني، القاعدة أو التربة، الكانات) بمسافات واضحة بينها مع خطوط إسقاط تربطها بموضعها الأصلي، بأسلوب رسم فني هندسي تعليمي (Technical Illustration / Isometric) نظيف بخلفية بسيطة موحدة اللون. صِف فقط ما تراه فعليًا في الصورة؛ لا تخترع تفاصيل إنشائية غير ظاهرة بثقة زائدة — لو جزء غير واضح في الصورة، اذكره كـ"غير واضح" بدل افتراض شكل محدد له.',
+    instructionEn: 'Write a detailed visual description, for an image-generation model, of an "exploded view" engineering illustration of the structural element actually shown in the attached photo: separate its visible components (e.g. reinforcement bars/cage, concrete formwork, footing/soil base, stirrups) with clear spacing and projection lines linking each part back to its original position, in a clean technical-illustration / isometric style on a simple flat background. Describe only what is actually visible in the photo; do not confidently invent structural details that are not visible — if a part is unclear in the photo, describe it as "unclear" rather than assuming a specific form for it.',
+  },
+  section: {
+    instructionAr: 'اكتب وصفًا بصريًا تفصيليًا لقطاع رأسي هندسي (Cross-Section) لهذا العنصر الإنشائي كما يظهر فعليًا في الصورة المرفقة: أظهر الترتيب الداخلي الظاهر لحديد التسليح والأبعاد النسبية الظاهرة، بأسلوب رسم فني هندسي تعليمي نظيف بخلفية بسيطة موحدة اللون. صِف فقط ما تراه فعليًا في الصورة؛ لا تخترع تفاصيل إنشائية غير ظاهرة بثقة زائدة.',
+    instructionEn: 'Write a detailed visual description, for an image-generation model, of a vertical cross-section engineering illustration of the structural element actually shown in the attached photo: show the visible internal arrangement of reinforcement and the visible relative dimensions, in a clean technical-illustration style on a simple flat background. Describe only what is actually visible in the photo; do not confidently invent structural details that are not visible.',
+  },
+};
+
+// Matched against body.prompt — the accompanying-text field this file's
+// image-share requests already use (see sendImageMessage()'s reqBody in
+// pc_suite_v106.html) — never against body.message, which this file does
+// not read at all (that field belongs to /api/chat, not /api/vision).
+function detectVisualDecomposeCommand(text) {
+  if (typeof text !== 'string') return null;
+  const m = text.trim().match(/^\/(explode|section)\b/i);
+  return m ? m[1].toLowerCase() : null;
+}
+
+// Single-shot, non-streaming Gemini call. Deliberately NOT routed through
+// geminiPool/raceKeyPool (used elsewhere in this file for the extraction/
+// chat paths below) — this is a lightweight, best-effort description
+// step, and raceKeyPool.mjs's consumption contract isn't exercised
+// anywhere in THIS file in a way confirmable without that module's own
+// source. A single env.GEMINI_API_KEY call — the same required key this
+// whole file already depends on — keeps this self-contained and correct
+// by construction rather than guessing at an unverified pool API. Own
+// AbortController timeout rather than the imported fetchWithTimeout
+// (rotation.mjs), for the same reason: that helper's exact signature
+// (does it take a 3rd timeout-ms argument? what unit?) was not
+// independently confirmed from this file's own call site alone.
+async function describeImageForVisualDecompose(geminiKey, base64Image, mimeType, instruction) {
+  const requestPayload = {
+    contents: [{
+      role: 'user',
+      parts: [
+        { text: instruction },
+        { inline_data: { mime_type: mimeType, data: base64Image } },
+      ],
+    }],
+    generationConfig: { temperature: 0.4, maxOutputTokens: 700 },
+  };
+
+  const attempt = async (model) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 25000);
+    try {
+      const res = await fetch(`${GEMINI_API_URL(model)}?key=${geminiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestPayload),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => '');
+        return { ok: false, status: res.status, errBody };
+      }
+      const data = await res.json().catch(() => null);
+      const parts = data && data.candidates && data.candidates[0]
+        && data.candidates[0].content && data.candidates[0].content.parts;
+      const text = Array.isArray(parts) ? parts.map(p => p.text || '').join(' ').trim() : '';
+      if (!text) return { ok: false, status: 502, errBody: 'empty Gemini response' };
+      return { ok: true, text };
+    } catch (err) {
+      return { ok: false, status: (err && err.name === 'AbortError') ? 504 : 500, errBody: String((err && err.message) || err) };
+    } finally {
+      clearTimeout(timeoutId); // always cleared — success, HTTP error, and abort/exception paths all pass through here
+    }
+  };
+
+  let result = await attempt(GEMINI_MODEL_PRIMARY);
+  if (!result.ok) result = await attempt(GEMINI_MODEL_FALLBACK);
+  return result;
+}
 
 // [PATCH] Same concurrency rationale as chat.js's identical constant — see
 // that file's own comment. Kept as a separate local constant rather than a
@@ -1835,6 +1947,101 @@ export async function onRequestPost(context) {
       continue;
     }
     images.push({ mimeType: result.mimeType, data: result.data });
+  }
+
+  // ── Visual decomposition short-circuit: /explode, /section ───────────
+  // [NEW] Runs BEFORE extractMode/runGenericExtraction and the streaming
+  // Gemini conversational reply further below — same "early short-
+  // circuit, single buffered JSON response" shape as chat.js's own
+  // mode:'image' precedent, deliberately bypassing geminiPool/extractMode
+  // entirely rather than threading a third concern through that already
+  // complex machinery. Covered by this file's own top-of-function
+  // checkRateLimit('vision:'+clientIp) above, same as every other request
+  // here — not additionally wired into the subscription/message-quota
+  // functions (checkAndConsumeFreeMessageQuota etc.) below, matching
+  // chat.js's own mode:'image' choice to sit outside that metering for
+  // the same cost/complexity reasons documented in that file. Requires at
+  // least one valid attached image; a /explode or /section typed with no
+  // image attached falls through unchanged to the normal extraction/chat
+  // reply below, where it just reads as ordinary text Gemini can react
+  // to — no dead end, no silent drop.
+  const visualDecomposeCmd = images.length > 0 ? detectVisualDecomposeCommand(body?.prompt) : null;
+  if (visualDecomposeCmd) {
+    const geminiKeyForDecompose = env.GEMINI_API_KEY || '';
+    if (!geminiKeyForDecompose) {
+      return json({
+        ok: false,
+        error: 'No AI provider configured. Set GEMINI_API_KEY in Cloudflare Pages environment variables.',
+        code: 'NO_GEMINI_KEY',
+      }, 500, undefined, request);
+    }
+
+    const cmdDef = VISUAL_DECOMPOSE_COMMANDS[visualDecomposeCmd];
+    const instruction = likelyArabic ? cmdDef.instructionAr : cmdDef.instructionEn;
+    // Multi-image /explode is a v2 question — v1 decomposes the first
+    // attached photo only, same "first image" precedent this file's own
+    // single-image extraction branch already uses.
+    const firstImage = images[0];
+
+    const described = await describeImageForVisualDecompose(
+      geminiKeyForDecompose, firstImage.data, firstImage.mimeType, instruction,
+    );
+    if (!described.ok) {
+      console.error('[vision.js] visual-decompose describe step failed:', described.status, described.errBody);
+      return json({
+        ok: false,
+        error: likelyArabic
+          ? 'تعذر تحليل الصورة دلوقتي. حاول تاني كمان شوية.'
+          : 'Could not analyze the image right now. Please try again shortly.',
+        code: 'VISUAL_DECOMPOSE_DESCRIBE_FAILED',
+      }, 502, undefined, request);
+    }
+
+    // validateImagePrompt enforces the same length/content gate the
+    // free-text /image path already applies — run here too since Stage 2
+    // is the same generator, even though this text was Gemini-written
+    // rather than user-typed. Falls back to a hard slice (not a hard
+    // failure) on a length miss only: Gemini's own output is already one
+    // model's sanity-checked description, not attacker-controlled input,
+    // so a soft truncation is the right failure mode here, unlike the
+    // free-text path where validateImagePrompt failing IS the answer.
+    const promptCheck = validateImagePrompt(described.text);
+    const finalPrompt = promptCheck.ok ? promptCheck.prompt : described.text.slice(0, 480);
+
+    const imageResult = await generateImageWorkersAI(env.AI, finalPrompt);
+    if (!imageResult.ok) {
+      console.error('[vision.js] visual-decompose generate step failed:', imageResult.errStatus, imageResult.errBody);
+      if (imageResult.errStatus === 'NOT_BOUND') {
+        return json({
+          ok: false,
+          error: 'Image generation is not configured on the server (missing Workers AI binding).',
+          code: 'AI_NOT_BOUND',
+        }, 500, undefined, request);
+      }
+      return json({
+        ok: false,
+        error: likelyArabic
+          ? 'تعذر إنشاء الصورة دلوقتي. حاول تاني كمان شوية.'
+          : 'Could not generate the image right now. Please try again shortly.',
+        code: imageResult.errStatus || 'IMAGE_GEN_FAILED',
+      }, 502, undefined, request);
+    }
+
+    // Same flat, VBA-parseable shape as chat.js's mode:'image' response
+    // (dataUri is display-ready as <img src> with zero string work), plus
+    // `description` so the engineer can see and sanity-check what
+    // actually drove the generation — the one thing that IS checkable
+    // against the real photo, given the honest limitation documented
+    // above VISUAL_DECOMPOSE_COMMANDS: this is a conceptual illustration
+    // guided by a description, not a verified measured drawing.
+    return json({
+      ok         : true,
+      dataUri    : `data:${imageResult.mime};base64,${imageResult.base64}`,
+      mimeType   : imageResult.mime,
+      source     : imageResult.model,
+      description: described.text,
+      command    : visualDecomposeCmd,
+    }, 200, undefined, request);
   }
 
   // 5b-ii. Document (PDF) attachment — NEW, "Insert Text / PDF". Singular
