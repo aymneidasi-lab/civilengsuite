@@ -6229,6 +6229,79 @@ async function callOpenRouterWithRetry(apiKey, messages, budget) {
 // Extended-A, Presentation Forms A/B) so it catches Arabic regardless of
 // diacritics or the specific extended characters used. Good enough to pick
 // ONE reply language; not meant to classify mixed-script or non-EN/AR input.
+// ═══════════════════════════════════════════════════════════════════════
+// GLOBAL STRUCTURAL COMMANDS (v1) — /punch /ld /cover /code
+// ═══════════════════════════════════════════════════════════════════════
+// Chat-native shorthand for ECP 203 / ACI 318 design checks. Deliberately
+// does NOT hard-code any code coefficient here (no punching-shear factor,
+// no development-length multiplier, no cover-table value) — every numeric
+// factor the model uses under one of these commands is required to come
+// from the KB retrieval this same request already runs (kbScored /
+// kbQueryGemini below, via scoreKbForQueryHybrid), never from the model's
+// own parametric memory. Not a style choice: this file's own changelog
+// documents clause-citation accuracy as a bug already fixed once by moving
+// from prompt concatenation to real retrieval — hard-coding formulas here
+// would reintroduce the exact failure mode this addendum exists to prevent.
+//
+// /stress is deliberately NOT included yet. /punch, /ld, /cover, and /code
+// all reduce to "look up a fixed formula/table, then apply it." /stress is
+// open-ended section analysis (max moment, neutral-axis location) needing
+// a full span/load/support-condition description this chat has no input
+// slot for today — adding it with the same ask-don't-assume discipline is
+// the next step, not this one.
+const STRUCTURAL_COMMANDS = ['punch', 'ld', 'cover', 'code'];
+
+function detectStructuralCommand(message) {
+  if (typeof message !== 'string') return null;
+  const m = message.trim().match(/^\/(punch|ld|cover|code)\b([\s\S]*)$/i);
+  if (!m) return null;
+  return { command: m[1].toLowerCase(), rest: m[2].trim() };
+}
+
+// Per-command retrieval boost appended to kbQueryGemini (see call site
+// below) so a bare "/punch" with no engineering vocabulary of its own
+// still pulls the right chunk out of scoreKbForQueryHybrid. kbScored is
+// computed once and reused for Workers AI/Groq/OpenRouter too (v18 note
+// above packKbFactsBlock's Workers AI call site) — boosting this one query
+// improves retrieval for all four provider tiers from a single edit site.
+const STRUCTURAL_KB_BOOST = {
+  punch: 'punching shear critical section perimeter b0 two-way shear column-slab connection قص ثاقب محيط القص الحرج',
+  ld:    'development length lap splice bar diameter top reinforcement bar factor Ld طول التماسك وصلة التراكب معامل السيخ العلوي',
+  cover: 'concrete cover exposure condition minimum clear cover الغطاء الخرساني ظروف التعرض الغطاء الأدنى',
+  code:  'clause reference section number code provision بند الكود رقم الفقرة',
+};
+
+// Returns '' for an unrecognized command — defensive only; callers here
+// always pass a value detectStructuralCommand() already validated, but a
+// blind string-concatenation call site has no other way to be told
+// "nothing to add."
+function buildStructuralCommandAddendum(command, isArabic) {
+  if (STRUCTURAL_COMMANDS.indexOf(command) === -1) return '';
+
+  const commonAr = 'وضع أمر إنشائي صارم مفعّل. لو أي مدخل مطلوب ناقص، اسأل عنه بالاسم صراحةً قبل أي حساب — لا تفترض قيمة نموذجية أبداً. أي معامل أو رقم من الكود (نسب، حدود، عوامل تعديل) يُؤخذ فقط من نصوص الكود المسترجعة المتاحة في السياق أعلاه؛ لو النص المسترجع لا يغطي الحالة بوضوح، قل ذلك صراحةً بدل تخمين رقم. اذكر صراحةً أي كود وأي إصدار تستخدمه (مثال: ECP 203/2020 أو ACI 318-19)، واسأل المستخدم لو لم يحدده. اعرض خطوات الحساب رقمًا برقم بشكل قابل للتحقق يدويًا.';
+  const commonEn = 'Strict structural-command mode is active. If any required input is missing, explicitly ask for it by name before calculating — never assume a typical value. Any numeric code coefficient, limit, or modification factor must come only from the retrieved code text already present in context above; if that text does not clearly cover this case, say so explicitly instead of guessing a number. State explicitly which code and edition you are using (e.g. ECP 203/2020 or ACI 318-19), and ask the user if they have not specified one. Show the calculation step by step in a form the engineer can verify by hand.';
+
+  const disclaimerAr = 'ملحوظة ثابتة: هذا تحقق أولي سريع فقط، وليس بديلاً عن مراجعة المهندس المسؤول للنص الكامل للكود ولا عن حساب معتمد وموقّع.';
+  const disclaimerEn = 'Standing note: this is a quick preliminary check only — it does not replace the responsible engineer\'s review of the full code text or a stamped calculation.';
+
+  const perCommandAr = {
+    punch: 'أمر /punch — مراجعة القص الثاقب: اطلب أبعاد العمود أو منطقة التحميل، السُمك الفعّال d، الحمل المصمَّم Pu، وموقع العمود (داخلي/حرف/ركن). احسب محيط القص الحرج b0 وإجهاد القص الفعلي qu = Pu/(b0×d)، وقارنه بالمقاومة المسموح بها المأخوذة من النص المسترجع. اذكر نسبة الأمان أو نسبة التجاوز بوضوح. بمجرد معرفة b0 وd، اعرض على المستخدم صراحةً متابعة الأمر /diagram punchingshear لرسم تفصيلة التسليح — هذا الأمر يتحقق رقميًا فقط، لا يرسم.',
+    ld:    'أمر /ld — طول التماسك ووصلات الركوب: اطلب قطر السيخ، رتبة الخرسانة fcu، إجهاد حديد التسليح fy، وموقع السيخ (سفلي/علوي). طبّق معامل السيخ العلوي (عادة 1.3) فقط لو تعريف "أعلى" في النص المسترجع ينطبق فعليًا على هذا السيخ. اعرض القيمة النهائية لـ Ld وطول وصلة الركوب المقابلة.',
+    cover: 'أمر /cover — الغطاء الخرساني: اطلب نوع العنصر (قاعدة/عمود/بلاطة/كمرة) وظروف التعرض (تلامس مباشر مع التربة، عوامل جوية، داخلي محمي، إلخ). طابق القيمة حصريًا من جدول الغطاء في النص المسترجع.',
+    code:  'أمر /code — مطابقة بند الكود: لا تذكر رقم بند أو فقرة إلا لو ظهر فعليًا في النص المسترجع أعلاه. لو مفيش تطابق واضح، قل "لا يوجد نص مسترجع يطابق هذا البند بدقة" بدل اختلاق رقم.',
+  };
+  const perCommandEn = {
+    punch: '/punch — punching shear review: ask for column or loaded-area dimensions, effective depth d, factored load Pu, and column position (interior/edge/corner). Compute the critical shear perimeter b0 and the applied shear stress qu = Pu/(b0×d), then compare against the allowable resistance taken from the retrieved text. State the safety margin or overstress percentage explicitly. Once b0 and d are known, explicitly offer the user the /diagram punchingshear command to draw the reinforcement detail — this command checks numbers only, it does not draw.',
+    ld:    '/ld — development length and lap splices: ask for bar diameter, concrete grade fcu/f\'c, steel yield fy, and bar position (bottom/top). Apply the top-bar factor (commonly 1.3) only if the retrieved text\'s own "top bar" definition actually applies to this bar. State the final Ld and corresponding lap splice length.',
+    cover: '/cover — minimum concrete cover: ask for member type (footing/column/slab/beam) and exposure condition (direct soil contact, weather, protected interior, etc.). Match the value strictly from the retrieved cover table text.',
+    code:  '/code — clause matching: never state a clause or section number unless it actually appears in the retrieved text above. If there is no clear match, say so explicitly instead of inventing one.',
+  };
+
+  return isArabic
+    ? `\n\n[وضع أمر إنشائي: /${command}]\n${commonAr} ${perCommandAr[command]}\n${disclaimerAr}`
+    : `\n\n[Structural command mode: /${command}]\n${commonEn} ${perCommandEn[command]}\n${disclaimerEn}`;
+}
+
 function isArabicText(str) {
   return /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/.test(str || '');
 }
@@ -8017,7 +8090,16 @@ export async function onRequestPost(context) {
   // it has live search when the tool won't actually be attached) and the
   // tool-attach call site itself.
   const groundingUsable = searchGroundingEnabled && !isGroundingBroken('gemini');
-  const baseSystemPrompt   = isFirstTurn ? buildSystemPrompt(isDeveloperMode, groundingUsable) : buildGeminiFollowupPrompt(isDeveloperMode, groundingUsable);
+  // [NEW — Global Structural Commands] Detected on the raw userMessage,
+  // BEFORE the prompt is built, so the addendum rides along through every
+  // downstream composition that starts from baseSystemPrompt (Gemini
+  // first-turn/follow-up) or from baseWorkersPrompt's sibling below
+  // (Workers AI/Groq/OpenRouter) — one detection site, not four. Detection
+  // never mutates userMessage itself: the command text stays visible in
+  // the conversation exactly as the engineer typed it.
+  const structuralCmd    = detectStructuralCommand(userMessage);
+  const baseSystemPrompt   = (isFirstTurn ? buildSystemPrompt(isDeveloperMode, groundingUsable) : buildGeminiFollowupPrompt(isDeveloperMode, groundingUsable))
+    + (structuralCmd ? buildStructuralCommandAddendum(structuralCmd.command, isArabicText(userMessage)) : '');
 
   // v16: KB retrieval query — the live message, plus the immediately prior
   // model reply on follow-ups (gives the scorer context for short replies
@@ -8026,9 +8108,14 @@ export async function onRequestPost(context) {
   // tokenizes and de-dupes internally so a longer query costs nothing extra
   // beyond the scan itself.
   const prevModelTurn = turns.length >= 2 ? turns[turns.length - 2] : null;
-  const kbQueryGemini = prevModelTurn && prevModelTurn.role === 'model'
+  // [NEW — Global Structural Commands] Boost term appended when a command
+  // is active, so "/punch" alone (no engineering vocabulary yet) still
+  // scores the right KB chunk. kbScored below is reused as-is by Workers
+  // AI/Groq/OpenRouter (v18 note), so this one boost covers all four tiers.
+  const structuralKbBoost = structuralCmd ? ` ${STRUCTURAL_KB_BOOST[structuralCmd.command] || ''}` : '';
+  const kbQueryGemini = (prevModelTurn && prevModelTurn.role === 'model'
     ? `${prevModelTurn.text.slice(0, 200)} ${userMessage}`
-    : userMessage;
+    : userMessage) + structuralKbBoost;
   const kbScored      = await scoreKbForQueryHybrid(env, kbQueryGemini); // v_vec: hybrid keyword+semantic (RRF), hard-falls-back to keyword-only on any failure — see scoreKbForQueryHybrid
   // v_pack2 (2026-08): raised 1600 → 6000. Reasoning: gemini-3.5-flash's
   // free tier is gated by RPD/RPM, not TPM — sources vary widely on the
@@ -8440,9 +8527,16 @@ inferring one. General engineering knowledge is still fine to answer from, with 
         // config bump.
         const workersKbFacts = packKbFactsBlock(kbScored, 950); // v18: reuses kbScored, no re-scan
         const baseWorkersPrompt    = buildWorkersAiSystemPrompt(isDeveloperMode);
+        // [NEW — Global Structural Commands] structuralCmd is declared far
+        // above (Gemini-path block) at the same onRequestPost function
+        // scope as this nested if — a normal JS closure read, not a
+        // re-detection. Applied here too so Groq/OpenRouter fallback
+        // traffic gets the identical ask-don't-assume/retrieval-only
+        // instruction Gemini gets, not a silently weaker fallback mode.
         const workersSystemContent = (isDeveloperMode
           ? DEVELOPER_SYSTEM_PROMPT + baseWorkersPrompt
-          : baseWorkersPrompt) + workersKbFacts + groundingNote + clientDateBlock;
+          : baseWorkersPrompt) + workersKbFacts + groundingNote + clientDateBlock
+          + (structuralCmd ? buildStructuralCommandAddendum(structuralCmd.command, isArabicText(userMessage)) : '');
         // [PATCH — budget reconciliation] +132 chars/~35 tokens for the
         // notation reminder just added to this tier (see buildWorkersAiSystemPrompt).
         // [PATCH — exponent notation] +106 chars/~28 est. tokens more for the
