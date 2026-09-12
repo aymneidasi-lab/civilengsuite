@@ -351,3 +351,92 @@ export async function generateImageWorkersAI(aiBinding, prompt, opts = {}) {
   console.error('[imageGen.mjs] all models failed:', lastErr);
   return { ok: false, httpStatus: 0, errStatus: 'WORKERS_AI_IMAGE_ERROR', errBody: lastErr };
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// IMG2IMG — added for vision.js's /explode, /section (visual-decompose)
+// commands specifically. Root-cause history, kept because each version was
+// a real, wrong production behavior:
+//   v1 (vision.js) — described an uploaded photo in text (Gemini), then
+//   handed that text ALONE to generateImageWorkersAI above: a blind
+//   text-to-image call with zero access to the photo. Output was
+//   consistently unrelated to what was uploaded.
+//   v2 (vision.js) — swapped Stage 2 to a paid Gemini image-generation
+//   call to get real photo-conditioning. Fixed groundedness, reintroduced
+//   a cost every other image path in this app has never had.
+//   v3 (this function) — @cf/runwayml/stable-diffusion-v1-5-img2img,
+//   confirmed $0.00 per step on Cloudflare's own Workers AI pricing table
+//   (developers.cloudflare.com/workers-ai/models/stable-diffusion-v1-5-img2img,
+//   checked Sept 2026) — genuinely free, same env.AI binding as
+//   generateImageWorkersAI above, no new account/key/billing surface. It
+//   takes the real photo directly via its image_b64 parameter, so output
+//   is actually conditioned on it, closing the v1 gap without v2's cost.
+//   Not "Partner"-tagged on Cloudflare's catalog (unlike the newer
+//   FLUX.2 [klein] family, which also unifies generation+editing but
+//   carries non-zero per-tile pricing and a multipart request shape this
+//   file's own docs review could not fully confirm field-for-field) — a
+//   plain Cloudflare-hosted Beta model, which is the more conservative
+//   pick for "confirmed free" specifically, at some cost in raw image
+//   quality versus FLUX.2. Revisit if Cloudflare moves this model's
+//   pricing or Beta status.
+//
+// Reuses buildEngineeringPrompt/NEGATIVE_PROMPT from the text-to-image
+// path above rather than duplicating prompt logic — same glossary
+// translation, same "no fake dimensions/text" steering, same three rounds
+// of live-traffic tuning already paid for once.
+//
+// Single confirmed-free img2img model, so unlike MODEL_ATTEMPTS above this
+// has no cross-model fallback chain — deliberately: silently falling back
+// to blind text-to-image on failure would just reintroduce the v1 bug
+// under a different code path. One retry of the SAME model (transient-
+// failure recovery only, RETRY_DELAY_MS pacing, same as the loop above) is
+// as far as this goes; a real failure surfaces as ok:false, not a worse
+// image.
+//
+// strength=0.55 is a starting point, not a measured constant — no
+// empirical tuning data existed when this was written. Lower keeps output
+// closer to the source photo's real composition/colors; higher gives the
+// model more room to actually render the requested exploded/section
+// transformation instead of a near-copy of the input. This is the single
+// highest-leverage constant in this function for output quality — tune it
+// against real /explode and /section results before touching prompt
+// wording.
+export async function generateImageWorkersAI_img2img(aiBinding, base64Image, prompt, opts = {}) {
+  if (!aiBinding) {
+    return { ok: false, httpStatus: 0, errStatus: 'NOT_BOUND', errBody: 'env.AI is not bound on this Pages project.' };
+  }
+  if (!base64Image) {
+    return { ok: false, httpStatus: 0, errStatus: 'NO_INPUT_IMAGE', errBody: 'img2img requires a source image (base64Image was empty).' };
+  }
+  const timeoutMs = opts.timeoutMs ?? 20000; // same ceiling as generateImageWorkersAI above — img2img is not documented as meaningfully slower on this model family
+  const model = '@cf/runwayml/stable-diffusion-v1-5-img2img';
+  const params = {
+    prompt: buildEngineeringPrompt(prompt),
+    negative_prompt: NEGATIVE_PROMPT,
+    image_b64: base64Image,
+    strength: opts.strength ?? 0.55,
+    num_steps: opts.numSteps ?? 20,
+    guidance: opts.guidance ?? 7.5,
+  };
+
+  const attemptOnce = () => runOnce(aiBinding, model, params, timeoutMs);
+  try {
+    let raw;
+    try {
+      raw = await attemptOnce();
+    } catch (firstErr) {
+      // One retry only, same model — see header comment for why there is
+      // no cross-model fallback here. A second failure propagates to the
+      // outer catch below.
+      await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+      raw = await attemptOnce();
+    }
+    const base64 = await normalizeImageResult(raw);
+    if (!base64) {
+      return { ok: false, httpStatus: 0, errStatus: 'WORKERS_AI_IMAGE_ERROR', errBody: `${model}: response had no recognizable image payload` };
+    }
+    return { ok: true, base64, mime: 'image/jpeg', model };
+  } catch (err) {
+    console.error('[imageGen.mjs] img2img failed after retry:', err && err.message);
+    return { ok: false, httpStatus: 0, errStatus: 'WORKERS_AI_IMAGE_ERROR', errBody: `${model}: ${err && err.message}` };
+  }
+}
