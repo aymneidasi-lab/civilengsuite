@@ -1,5 +1,5 @@
 /**
- * functions/api/vision.js — v3.0 (text file attachments, 2026-07-20)
+ * functions/api/vision.js — v3.01 (text file attachments, 2026-07-20)
  * ─────────────────────────────────────────────────────────────────────────
  * Cloudflare Pages Function — "Insert Image" backend for Civil Engineering
  * Suite chat (web + VBA desktop). Route: POST /api/vision.
