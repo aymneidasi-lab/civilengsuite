@@ -428,12 +428,49 @@ const GEMINI_MAX_OUTPUT_TOKENS = 1536; // vision replies run longer than chat's 
 // it is already possible today.
 const VISUAL_DECOMPOSE_COMMANDS = {
   explode: {
-    instructionAr: 'اكتب وصفًا بصريًا تفصيليًا لمنظور هندسي "انفجاري" (Exploded View) لهذا العنصر الإنشائي كما يظهر فعليًا في الصورة المرفقة: افصل مكوناته الظاهرة (مثال: حديد التسليح، القالب الخرساني، القاعدة أو التربة، الكانات) بمسافات واضحة بينها مع خطوط إسقاط تربطها بموضعها الأصلي، بأسلوب رسم فني هندسي تعليمي (Technical Illustration / Isometric) نظيف بخلفية بسيطة موحدة اللون. صِف فقط ما تراه فعليًا في الصورة؛ لا تخترع تفاصيل إنشائية غير ظاهرة بثقة زائدة — لو جزء غير واضح في الصورة، اذكره كـ"غير واضح" بدل افتراض شكل محدد له.',
-    instructionEn: 'Write a detailed visual description, for an image-generation model, of an "exploded view" engineering illustration of the structural element actually shown in the attached photo: separate its visible components (e.g. reinforcement bars/cage, concrete formwork, footing/soil base, stirrups) with clear spacing and projection lines linking each part back to its original position, in a clean technical-illustration / isometric style on a simple flat background. Describe only what is actually visible in the photo; do not confidently invent structural details that are not visible — if a part is unclear in the photo, describe it as "unclear" rather than assuming a specific form for it.',
+    // [REVISED v2, after reading the actual imageGen.mjs this feeds into —
+    // v1's fix was directionally right (ban in-image text) but missed the
+    // real root cause of the "unrelated crane" result, now confirmed
+    // rather than guessed:]
+    //
+    // (1) generateImageWorkersAI() does NOT take a raw prompt — every call
+    //     is wrapped in that file's own buildEngineeringPrompt(), which
+    //     prepends fixed framing text and explicitly disambiguates a FIXED
+    //     set of structural nouns ("footing", "column", "beam", "pile",
+    //     "slab" are structural, not feet/furniture/light). v1's instruction
+    //     told Gemini to AVOID exactly those nouns in favor of plain visual
+    //     words ("thin dark rods" instead of "reinforcement bars") -- which
+    //     removes the one anchor that wrapper's disambiguation needs to
+    //     engage at all, leaving the model to free-associate on generic
+    //     "rods and panels." v2 does the opposite: lead with the plain
+    //     structural noun on purpose.
+    // (2) v1 asked for a "detailed" description with no length bound beyond
+    //     maxOutputTokens:700 -- comfortably long enough to blow past
+    //     imageGen.mjs's own validateImagePrompt() 500-char cap, which
+    //     silently fell back (in vision.js, not here) to a raw
+    //     text.slice(0, 480) -- a mid-sentence character cut, not a clean
+    //     truncation. Even when under 500 chars, that text then gets
+    //     prepended with buildEngineeringPrompt()'s own fixed framing
+    //     sentence before reaching either model's text encoder, which has
+    //     a bounded token window regardless of the character-count check.
+    //     A long, free-form paragraph stacked under a second template's
+    //     own prefix is a real truncation risk independent of the 500-char
+    //     gate. v2 asks for one short, front-loaded sentence instead of a
+    //     paragraph, so the highest-value words survive even if something
+    //     downstream still truncates.
+    // (3) the "no numbers/text/labels" instruction stays -- imageGen.mjs's
+    //     NEGATIVE_PROMPT already covers this for the stable-diffusion-xl-
+    //     lightning fallback, but flux-1-schnell (the PRIMARY model) has no
+    //     negative_prompt field in its schema at all per that file's own
+    //     comment, so positive-language avoidance in what we send is the
+    //     only lever available for that model specifically.
+    instructionAr: 'دي صورة لعنصر إنشائي. اكتب وصفًا بصريًا قصيرًا جدًا (جملة أو جملتين، أقل من 25 كلمة) يصلح كـ prompt لموديل توليد صور، لمنظور "انفجاري" (Exploded View): ابدأ مباشرة باسم العنصر الهندسي الواضح (عمود، قاعدة منفردة، كمرة، بلاطة...) ثم اذكر أهم مكوّنين أو تلاتة ظاهرين فعليًا محتاجين يتفصلوا عن بعض (حديد تسليح، قالب، كانات، قاعدة...) — استخدم المصطلحات الهندسية العادية دي بالذات، من غير ترجمة لمصطلحات بصرية بديلة. ممنوع تمامًا ذكر أي رقم أو نص أو تسمية مكتوبة. من غير أي مقدمة زي "الوصف هو" أو "هذه صورة لـ" — ابدأ بالمحتوى على طول. صِف بس اللي واضح فعليًا؛ لو حاجة مش واضحة سيبها.',
+    instructionEn: 'This is a photo of a structural element. Write a very short visual description (one or two sentences, under 25 words) suitable as an image-generation prompt, for an "exploded view": start immediately with the clear structural noun (column, isolated footing, beam, slab...) then name the 2-3 most visually distinct components that actually need to be shown separated (reinforcement bars, formwork, stirrups, footing base...) — use exactly these ordinary structural-engineering terms, not translated visual substitutes. Absolutely no numbers, text, or written labels of any kind. No preamble like "the description is" or "this shows" — start directly with the content. Describe only what is clearly visible; omit anything unclear.',
   },
   section: {
-    instructionAr: 'اكتب وصفًا بصريًا تفصيليًا لقطاع رأسي هندسي (Cross-Section) لهذا العنصر الإنشائي كما يظهر فعليًا في الصورة المرفقة: أظهر الترتيب الداخلي الظاهر لحديد التسليح والأبعاد النسبية الظاهرة، بأسلوب رسم فني هندسي تعليمي نظيف بخلفية بسيطة موحدة اللون. صِف فقط ما تراه فعليًا في الصورة؛ لا تخترع تفاصيل إنشائية غير ظاهرة بثقة زائدة.',
-    instructionEn: 'Write a detailed visual description, for an image-generation model, of a vertical cross-section engineering illustration of the structural element actually shown in the attached photo: show the visible internal arrangement of reinforcement and the visible relative dimensions, in a clean technical-illustration style on a simple flat background. Describe only what is actually visible in the photo; do not confidently invent structural details that are not visible.',
+    // Same v2 fixes as explode above, applied to the cross-section case.
+    instructionAr: 'دي صورة لعنصر إنشائي. اكتب وصفًا بصريًا قصيرًا جدًا (جملة أو جملتين، أقل من 25 كلمة) يصلح كـ prompt لموديل توليد صور، لقطاع رأسي (Cross-Section): ابدأ مباشرة باسم العنصر الهندسي الواضح (عمود، قاعدة منفردة، كمرة، بلاطة...) ثم اذكر ترتيب حديد التسليح الظاهر فعليًا (زي: صفوف، تكرار، توزيع) — استخدم المصطلحات الهندسية العادية دي بالذات. ممنوع تمامًا ذكر أي رقم أو نص أو تسمية مكتوبة. من غير أي مقدمة — ابدأ بالمحتوى على طول. صِف بس اللي واضح فعليًا؛ لو حاجة مش واضحة سيبها.',
+    instructionEn: 'This is a photo of a structural element. Write a very short visual description (one or two sentences, under 25 words) suitable as an image-generation prompt, for a vertical cross-section: start immediately with the clear structural noun (column, isolated footing, beam, slab...) then describe the actually-visible arrangement of reinforcement (e.g. rows, spacing, distribution) — use exactly these ordinary structural-engineering terms. Absolutely no numbers, text, or written labels of any kind. No preamble — start directly with the content. Describe only what is clearly visible; omit anything unclear.',
   },
 };
 
@@ -468,7 +505,15 @@ async function describeImageForVisualDecompose(geminiKey, base64Image, mimeType,
         { inline_data: { mime_type: mimeType, data: base64Image } },
       ],
     }],
-    generationConfig: { temperature: 0.4, maxOutputTokens: 700 },
+    // maxOutputTokens cut 700->90 to match the instruction above (~25
+    // words). This is now a genuine ceiling, not routine headroom: at 700
+    // Gemini could (and per live feedback, did) produce a multi-hundred-
+    // word paragraph that blew past imageGen.mjs's own validateImagePrompt()
+    // 500-char cap before ever reaching that file's buildEngineeringPrompt()
+    // wrapping. 90 tokens keeps the fallback slice below finalPrompt (see
+    // its own comment at the call site) a rare safety net instead of the
+    // routine path it was likely hitting before.
+    generationConfig: { temperature: 0.25, maxOutputTokens: 90 },
   };
 
   const attempt = async (model) => {
@@ -2000,13 +2045,28 @@ export async function onRequestPost(context) {
     // validateImagePrompt enforces the same length/content gate the
     // free-text /image path already applies — run here too since Stage 2
     // is the same generator, even though this text was Gemini-written
-    // rather than user-typed. Falls back to a hard slice (not a hard
-    // failure) on a length miss only: Gemini's own output is already one
-    // model's sanity-checked description, not attacker-controlled input,
-    // so a soft truncation is the right failure mode here, unlike the
-    // free-text path where validateImagePrompt failing IS the answer.
+    // rather than user-typed. With maxOutputTokens trimmed to 90 (see the
+    // describe-step config above), this should pass cleanly in the normal
+    // case; a hit here now means the instruction's length ask was ignored,
+    // which is worth knowing about rather than silently absorbing, so it's
+    // logged. Falls back to a word-boundary slice (not a hard failure) —
+    // Gemini's own output is already one model's sanity-checked
+    // description, not attacker-controlled input, so a soft truncation is
+    // the right failure mode here, unlike the free-text path where
+    // validateImagePrompt failing IS the answer. Word-boundary, not a raw
+    // character cut: a description trimmed mid-word right before reaching
+    // a second prompt template is exactly the kind of corruption this
+    // whole revision was meant to stop causing.
     const promptCheck = validateImagePrompt(described.text);
-    const finalPrompt = promptCheck.ok ? promptCheck.prompt : described.text.slice(0, 480);
+    let finalPrompt = promptCheck.prompt;
+    if (!promptCheck.ok) {
+      console.warn('[vision.js] visual-decompose description exceeded', promptCheck.maxChars,
+        'chars despite the 90-token instruction — truncating at a word boundary:', described.text.length, 'chars');
+      const hardCap = promptCheck.maxChars || 480;
+      const slice = described.text.slice(0, hardCap);
+      const lastSpace = slice.lastIndexOf(' ');
+      finalPrompt = lastSpace > 0 ? slice.slice(0, lastSpace) : slice;
+    }
 
     const imageResult = await generateImageWorkersAI(env.AI, finalPrompt);
     if (!imageResult.ok) {
