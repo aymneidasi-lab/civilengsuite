@@ -364,33 +364,62 @@ export async function generateImageWorkersAI(aiBinding, prompt, opts = {}) {
 //   call to get real photo-conditioning. Fixed groundedness, reintroduced
 //   a cost every other image path in this app has never had.
 //   v3 (this function) — @cf/runwayml/stable-diffusion-v1-5-img2img,
-//   confirmed $0.00 per step on Cloudflare's own Workers AI pricing table
-//   (developers.cloudflare.com/workers-ai/models/stable-diffusion-v1-5-img2img,
-//   checked Sept 2026) — genuinely free, same env.AI binding as
-//   generateImageWorkersAI above, no new account/key/billing surface. It
-//   takes the real photo directly via its image_b64 parameter, so output
-//   is actually conditioned on it, closing the v1 gap without v2's cost.
+//   plausibly free (Cloudflare's own model catalog still tags it Beta,
+//   and Beta-tagged Workers AI models have historically shipped without
+//   neuron pricing — this model does not appear on Cloudflare's current
+//   per-model pricing page at all, consistent with "not yet billed," but
+//   that is an inference from absence, not a line on the pricing page
+//   that says $0 — treat "free" here as "no confirmed charge today," not
+//   a guarantee, and re-check the pricing page if this model ever leaves
+//   Beta) — genuinely takes the real photo directly, so output is
+//   actually conditioned on it, closing the v1 gap without v2's cost.
+//
+//   [CORRECTION — this function arrived at this file already written, not
+//   authored fresh here, and had a real bug worth naming rather than
+//   quietly fixing: it sent the photo as `image_b64: <base64 string>`.
+//   Cloudflare's own model page for this exact model
+//   (developers.cloudflare.com/workers-ai/models/stable-diffusion-v1-5-img2img)
+//   documents the field as `image` — an array of raw 8-bit-unsigned-
+//   integer byte values, i.e. [...new Uint8Array(bytes)], not a base64
+//   string, and not named image_b64 at all. A field the API doesn't
+//   recognize is typically just ignored server-side, not rejected — which
+//   means the earlier version of this function most likely ran in silent
+//   blind-text-to-image mode against this model, reproducing the exact v1
+//   bug it was written to fix, without erroring in a way that would have
+//   surfaced the mistake. base64ToByteArray() below does the correct
+//   conversion. Also added: detection for this specific model's own
+//   documented failure mode — an independent report (Cloudflare Workers AI
+//   img2img producing an all-black output on some fraction of calls,
+//   flagged by its unusually small resulting byte size) that a bare
+//   normalizeImageResult() pass-through would accept as a valid success.]
+//
 //   Not "Partner"-tagged on Cloudflare's catalog (unlike the newer
-//   FLUX.2 [klein] family, which also unifies generation+editing but
-//   carries non-zero per-tile pricing and a multipart request shape this
-//   file's own docs review could not fully confirm field-for-field) — a
-//   plain Cloudflare-hosted Beta model, which is the more conservative
-//   pick for "confirmed free" specifically, at some cost in raw image
-//   quality versus FLUX.2. Revisit if Cloudflare moves this model's
-//   pricing or Beta status.
+//   FLUX.2 [klein] family, which also unifies generation+editing and is
+//   CONFIRMED against Cloudflare's current pricing page to carry non-zero
+//   per-tile Neuron pricing, with a genuinely different multipart-
+//   FormData binding call shape, not this model's plain params object) —
+//   a plain Cloudflare-hosted Beta model, the more conservative pick for
+//   "no confirmed charge today" specifically, at some cost in raw image
+//   quality versus FLUX.2 (Stable Diffusion 1.5 is a considerably older,
+//   smaller model). If output quality here disappoints, flux-2-klein-4b
+//   is the documented, confirmed-working, small-non-zero-cost upgrade
+//   path — a separate, deliberate choice to make, not a silent fallback.
 //
 // Reuses buildEngineeringPrompt/NEGATIVE_PROMPT from the text-to-image
 // path above rather than duplicating prompt logic — same glossary
 // translation, same "no fake dimensions/text" steering, same three rounds
 // of live-traffic tuning already paid for once.
 //
-// Single confirmed-free img2img model, so unlike MODEL_ATTEMPTS above this
-// has no cross-model fallback chain — deliberately: silently falling back
-// to blind text-to-image on failure would just reintroduce the v1 bug
-// under a different code path. One retry of the SAME model (transient-
-// failure recovery only, RETRY_DELAY_MS pacing, same as the loop above) is
-// as far as this goes; a real failure surfaces as ok:false, not a worse
-// image.
+// Single confirmed-available img2img model, so unlike MODEL_ATTEMPTS above
+// this has no cross-model fallback chain of its own — deliberately:
+// silently falling back to blind text-to-image INSIDE this function would
+// just reintroduce the v1 bug under a different code path without the
+// caller ever knowing it happened. One retry of the SAME model (transient-
+// failure recovery, RETRY_DELAY_MS pacing, same as the loop above) is as
+// far as this function goes; a real failure surfaces as ok:false so the
+// CALLER (vision.js) can decide whether to fall back to the blind
+// text-to-image path explicitly and visibly, not have that decision made
+// silently in here.
 //
 // strength=0.55 is a starting point, not a measured constant — no
 // empirical tuning data existed when this was written. Lower keeps output
@@ -400,6 +429,43 @@ export async function generateImageWorkersAI(aiBinding, prompt, opts = {}) {
 // highest-leverage constant in this function for output quality — tune it
 // against real /explode and /section results before touching prompt
 // wording.
+// FIX: this previously assumed `base64` was already a bare base64 payload.
+// If a caller ever passes a full data URI ("data:image/jpeg;base64,...") --
+// vision.js's own image-parsing step upstream was not part of the reviewed
+// set for this file, so that shape cannot be ruled out from here — atob()
+// throws a synchronous DOMException on the ':' / '/' / ';' / ',' characters
+// in the "data:image/jpeg;base64," prefix, since none of them are valid
+// base64 alphabet. That throw happened at the CALL SITE below (inside the
+// `params` object literal), OUTSIDE generateImageWorkersAI_img2img's own
+// try block — an uncaught rejection out of an async function, not this
+// module's normal { ok:false, errStatus, errBody } contract, and NOT
+// something vision.js's own `if (!imageResult.ok)` check on the other end
+// could ever catch. Stripping a leading data-URI prefix here is a strict
+// superset of the old behaviour (a bare base64 string with no prefix is
+// untouched, since the regex simply won't match) and costs nothing on the
+// happy path.
+function base64ToByteArray(base64) {
+  const clean = String(base64).replace(/^data:[^;]+;base64,/, '');
+  const binary = atob(clean);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return Array.from(bytes);
+}
+
+// Cloudflare's Stable-Diffusion-family img2img binding has an independently
+// documented failure mode: some fraction of calls return a fully-black
+// image instead of erroring — a "success" a bare normalizeImageResult()
+// pass-through would happily accept. A genuine black/near-black PNG
+// encodes to a suspiciously tiny byte count regardless of the requested
+// resolution (uniform pixel data compresses extremely well); a real
+// generated illustration at any reasonable size does not. 4000 bytes is a
+// conservative floor chosen to catch that failure pattern without risking
+// false positives on a legitimately simple/sparse real result — not a
+// number taken from Cloudflare's own documentation (no such number is
+// published), and worth revisiting against real /explode and /section
+// output sizes once this has run against live traffic.
+const SUSPICIOUSLY_SMALL_IMAGE_BYTES = 4000;
+
 export async function generateImageWorkersAI_img2img(aiBinding, base64Image, prompt, opts = {}) {
   if (!aiBinding) {
     return { ok: false, httpStatus: 0, errStatus: 'NOT_BOUND', errBody: 'env.AI is not bound on this Pages project.' };
@@ -412,27 +478,35 @@ export async function generateImageWorkersAI_img2img(aiBinding, base64Image, pro
   const params = {
     prompt: buildEngineeringPrompt(prompt),
     negative_prompt: NEGATIVE_PROMPT,
-    image_b64: base64Image,
+    image: base64ToByteArray(base64Image),
     strength: opts.strength ?? 0.55,
     num_steps: opts.numSteps ?? 20,
     guidance: opts.guidance ?? 7.5,
   };
 
-  const attemptOnce = () => runOnce(aiBinding, model, params, timeoutMs);
+  const attemptOnce = async () => {
+    const raw = await runOnce(aiBinding, model, params, timeoutMs);
+    const base64 = await normalizeImageResult(raw);
+    if (!base64) {
+      throw new Error(`${model}: response had no recognizable image payload`);
+    }
+    if (base64.length < SUSPICIOUSLY_SMALL_IMAGE_BYTES) {
+      throw new Error(`${model}: output suspiciously small (${base64.length} base64 chars) — likely the documented black-image failure, not a real result`);
+    }
+    return base64;
+  };
+
   try {
-    let raw;
+    let base64;
     try {
-      raw = await attemptOnce();
+      base64 = await attemptOnce();
     } catch (firstErr) {
+      console.warn('[imageGen.mjs] img2img first attempt failed, retrying once —', firstErr.message);
       // One retry only, same model — see header comment for why there is
       // no cross-model fallback here. A second failure propagates to the
       // outer catch below.
       await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
-      raw = await attemptOnce();
-    }
-    const base64 = await normalizeImageResult(raw);
-    if (!base64) {
-      return { ok: false, httpStatus: 0, errStatus: 'WORKERS_AI_IMAGE_ERROR', errBody: `${model}: response had no recognizable image payload` };
+      base64 = await attemptOnce();
     }
     return { ok: true, base64, mime: 'image/jpeg', model };
   } catch (err) {
