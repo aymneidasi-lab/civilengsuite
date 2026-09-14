@@ -25,6 +25,8 @@
     "/robots.txt",
     "/.well-known/*",
     "/payment/*",
-    "/api/payment/*"
+    "/api/payment/*",
+    "/vendor/howler.min.js",
+    "/sounds/*"
   ]
 }

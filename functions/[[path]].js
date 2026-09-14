@@ -1283,7 +1283,7 @@ export async function onRequest(context) {
   //      surfaced in the front end as "Could not generate the DXF file right
   //      now." Paired with the matching /vendor/dxf-kit/* entries in
   //      _routes.json's exclude list and _headers' new [K3] cache block.
-  const STATIC_PASSTHROUGH = /^\/(?:robots\.txt|manifest\.json|favicon\.ico|og-image\.png|images\/.*|footing-pro\/images\/.*|footing-pro\/engineers\/?.*|footing-pro\/offices\/?.*|footing-pro\/students\/?.*|beam-pro\/images\/.*|column-pro\/images\/.*|deflection-pro\/images\/.*|earthquake-pro\/images\/.*|mur-pro\/images\/.*|add-reft-pro\/images\/.*|section-property-pro\/images\/.*|google[0-9a-f]+\.html|sitemap\.xsl|fonts\/.*|vendor\/katex\/.*|vendor\/mermaid\/.*|vendor\/dxf-kit\/.*|\.well-known\/.*|payment(?:\/.*)?|api\/payment\/.*|api\/track)$/i;
+  const STATIC_PASSTHROUGH = /^\/(?:robots\.txt|manifest\.json|favicon\.ico|og-image\.png|images\/.*|footing-pro\/images\/.*|footing-pro\/engineers\/?.*|footing-pro\/offices\/?.*|footing-pro\/students\/?.*|beam-pro\/images\/.*|column-pro\/images\/.*|deflection-pro\/images\/.*|earthquake-pro\/images\/.*|mur-pro\/images\/.*|add-reft-pro\/images\/.*|section-property-pro\/images\/.*|google[0-9a-f]+\.html|sitemap\.xsl|fonts\/.*|vendor\/katex\/.*|vendor\/mermaid\/.*|vendor\/dxf-kit\/.*|\.well-known\/.*|payment(?:\/.*)?|api\/payment\/.*|api\/track|vendor\/howler\.min\.js|sounds\/.*)$/i;
   if (STATIC_PASSTHROUGH.test(path)) return context.next();
 
   // ── [S1] Sitemap — explicit handler with clean minimal headers ───────────
