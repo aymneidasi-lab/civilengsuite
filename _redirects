@@ -89,10 +89,36 @@
 #   omission. Left as explicit per-folder lines below for now to match
 #   the existing K1/K2 style without changing behavior beyond the fix.
 
+# FIX K4 — Sound-system assets: /vendor/howler.min.js → /public/vendor/howler.min.js
+#          and /sounds/* → /public/sounds/:splat
+#   Physical location: public/vendor/howler.min.js, public/sounds/ces-sprites.{webm,mp3}
+#   Browser requests:  /vendor/howler.min.js, /sounds/ces-sprites.webm, /sounds/ces-sprites.mp3
+#   FOURTH occurrence of the identical K2/K2-M/K3 bug, same root cause: _routes.json
+#   excludes /vendor/howler.min.js and /sounds/* from the Function (confirmed present)
+#   and _headers sets long-term immutable caching on both via the [K4] block (confirmed
+#   present) — but this file had NO rewrite rule for either, so every request 404'd
+#   before either of those ever mattered. Confirmed on disk: both files physically
+#   exist at public/vendor/howler.min.js and public/sounds/ces-sprites.{webm,mp3} —
+#   this was never a missing-file problem, only a missing-rewrite problem, identical
+#   to K2/K2-M/K3. Symptom: GET /vendor/howler.min.js and GET /sounds/ces-sprites.webm
+#   both returned Cloudflare's static-resolver 404 page as Content-Type: text/html
+#   (confirmed via network log), which then made the browser refuse to execute
+#   howler.min.js as a script ("MIME type ('text/html') is not executable") and
+#   left the sprite preload permanently unconsumed. Client-side onerror/onloaderror
+#   handlers caught both failures and fell through to the synthesized-SFX fallback
+#   correctly (window.CES_SOUNDS_FALLBACK = true) — so nothing crashed, real audio
+#   was just silently never reachable. This is the fourth time this exact class of
+#   bug has shipped (K1 katex, K2 mermaid, K3 dxf-kit, now K4 sound) — the
+#   /vendor/*  /public/vendor/:splat  200 wildcard rule K3's own note above proposed
+#   would have prevented this recurrence too. Still left as an explicit per-folder
+#   line below for now, same reasoning as K3.
+
 /fonts/*                    /public/fonts/:splat                    200
 /vendor/katex/*             /public/vendor/katex/:splat             200
 /vendor/mermaid/*           /public/vendor/mermaid/:splat           200
 /vendor/dxf-kit/*           /public/vendor/dxf-kit/:splat           200
+/vendor/howler.min.js       /public/vendor/howler.min.js            200
+/sounds/*                   /public/sounds/:splat                   200
 /images/*                   /public/images/:splat                   200
 /footing-pro/images/*       /public/footing-pro/images/:splat       200
 /beam-pro/images/*          /public/beam-pro/images/:splat          200
