@@ -5,8 +5,6 @@
     "/images/*",
     "/fonts/*",
     "/vendor/katex/*",
-    "/vendor/mermaid/*",
-    "/vendor/dxf-kit/*",
     "/footing-pro/images/*",
     "/footing-pro/engineers/*",
     "/footing-pro/offices/*",
@@ -25,8 +23,6 @@
     "/robots.txt",
     "/.well-known/*",
     "/payment/*",
-    "/api/payment/*",
-    "/vendor/howler.min.js",
-    "/sounds/*"
+    "/api/payment/*"
   ]
 }
