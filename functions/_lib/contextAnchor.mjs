@@ -72,6 +72,20 @@ const LABEL_MULTI_RE  = /\[Attached \d+ text files: (.+?)\]/g;
 // silence with confidently-formatted, unrelated internal reference content.
 const SHARE_LABEL_RE = /\[Shared ([^:\]]+)(?::[^\]]*)?\]/g;
 
+// [PATCH — real filename] footing_pro_v116.html/pc_suite_v116.html's
+// docLabel now reads "a PDF document (" + doc.name + ")" instead of the
+// bare "a PDF document" — doc.name is client-validated in processPdfFile()
+// and re-capped server-side in documentGuard.mjs (200 chars, no special
+// escaping needed here, same trust level as any other filename already
+// flowing through history). Matched against SHARE_LABEL_RE's OWN capture
+// group (the media-description text), not the raw turn text, so it only
+// ever fires on an already-confirmed share label. Old-format history
+// entries from before this client patch shipped ("a PDF document", no
+// parens) simply don't match — falls through to the generic
+// sharedMediaMentions bucket below exactly as before this patch; this is
+// additive, not a breaking change for in-flight conversations.
+const PDF_LABEL_WITH_NAME_RE = /a PDF document \(([^)]+)\)/g;
+
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -128,7 +142,33 @@ function scanFileHistory(fullHistory) {
     SHARE_LABEL_RE.lastIndex = 0;
     let shm;
     while ((shm = SHARE_LABEL_RE.exec(text)) !== null) {
-      sharedMediaMentions.set(shm[1].trim(), turnsAgo); // later turn (smaller turnsAgo) overwrites
+      const rawDescription = shm[1].trim();
+
+      PDF_LABEL_WITH_NAME_RE.lastIndex = 0;
+      let pdfNameMatch;
+      let sawNamedPdf = false;
+      while ((pdfNameMatch = PDF_LABEL_WITH_NAME_RE.exec(rawDescription)) !== null) {
+        sawNamedPdf = true;
+        const pdfName = pdfNameMatch[1].trim();
+        // Real name recovered -> same bucket/messaging as a text-file
+        // stale label ("mentioned earlier but content is no longer
+        // available... say so, ask them to re-share"), not the generic
+        // no-name note below. A full anchor (anchors.has) still wins if
+        // this exact name ALSO appears as a genuine text-file block
+        // somewhere (unlikely for a .pdf name, kept for safety/symmetry
+        // with the existing LABEL_SINGLE_RE/LABEL_MULTI_RE handling).
+        if (!anchors.has(pdfName)) staleLabelsOnly.add(pdfName);
+      }
+
+      // The common case — one file picked, one message sent — is now a
+      // SOLO named PDF ("a PDF document (NAME)" and nothing else joined
+      // in); that's fully covered above with the real name, so also
+      // filing it into the generic bucket would just be a redundant
+      // second note about the same file. Anything else (an unnamed
+      // image, a compound share mixing types, or pre-patch history with
+      // no parens at all) still needs the generic fallback.
+      const isSoloNamedPdf = sawNamedPdf && /^a PDF document \([^)]+\)$/.test(rawDescription);
+      if (!isSoloNamedPdf) sharedMediaMentions.set(rawDescription, turnsAgo);
     }
   }
 
