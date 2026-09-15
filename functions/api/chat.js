@@ -2503,7 +2503,7 @@ function buildTieredKbEntry(chunk, budget) {
   return full.slice(0, budget - 1).trimEnd() + '…';
 }
 
-function packKbFactsBlock(scored, maxChars) {
+function packKbFactsBlock(scored, maxChars, hasAttachedFileContext = false) {
   if (!scored || scored.length === 0) return '';
 
   // v_pack2: Top-1 Guarantee. The single highest-scored match is always
@@ -2530,10 +2530,39 @@ function packKbFactsBlock(scored, maxChars) {
   }
   if (picked.length === 0) return '';
 
+  // [PATCH — file/KB provenance] Root cause: this block's own chunks carry
+  // "Source Document"/"PDF Page" fields (see KB_FIELD_TIER) that read exactly
+  // like "I am looking at a specific document with page numbers" — so when a
+  // chunk's Source Document title happens to match what the user calls their
+  // own upload (both legitimately titled "دليل التفاصيل الإنشائية", different
+  // copies/pages of the same real-world guide), the model has no textual
+  // signal telling it these are two different documents. hasAttachedFileContext
+  // is true whenever this turn has live attached-file content, a KV-staged
+  // file, a history-anchored file, or a rejected attachment — i.e. whenever a
+  // file is genuinely part of this exchange and confusion is possible at all.
+  const provenanceRule = hasAttachedFileContext ? (
+    '\nFILE PROVENANCE — READ BEFORE ANSWERING ABOUT AN ATTACHMENT: every chunk below is CES\'s own\n' +
+    'internal reference library (product docs, code/equation excerpts) — it is never the file the\n' +
+    'user attached in this conversation, even when a chunk\'s Source Document / PDF Page looks like a\n' +
+    'citation from a real document, and even when its title matches the user\'s own file closely or\n' +
+    'exactly (e.g. both called "دليل التفاصيل الإنشائية"). If the question is about what is IN an\n' +
+    'attached file, answer only from that file\'s own "--- Attached file ---" block in the user turn\n' +
+    'or the "PREVIOUSLY SHARED FILES" block if present — never from a chunk below, and never blend the\n' +
+    'two. If neither block has usable content for that file (missing, or listed under excluded\n' +
+    'attachments), say plainly that you cannot read that file\'s content — do not reach for a chunk\n' +
+    'below that merely resembles the topic and present it as the attachment\'s content. This overrides\n' +
+    'this block\'s own "do not contradict them" line whenever the two conflict: that line governs\n' +
+    'product/code facts, not what a specific uploaded file contains. If a prior reply this turn or\n' +
+    'earlier already described an attachment using a chunk below, that reply was wrong — retract the\n' +
+    'specific claim in one sentence and re-answer from the actual attached-file block instead of\n' +
+    'restating it, even more confidently, a second time.\n'
+  ) : '';
+
   return (
     '\n\n════════════════════════════════════════\n' +
     'RETRIEVED FACTS (Footing Pro / PC Suite / ECP 203 / ACI 318 / ECP 203 Structural Details — grounded, may be partial)\n' +
     '════════════════════════════════════════\n' +
+    provenanceRule +
     'Use these if relevant to the question. Do not contradict them. If the answer\n' +
     "isn't in these facts or in the rules above, say you don't have that exact\n" +
     'detail rather than guessing — same rule as the rest of this prompt.\n\n' +
@@ -2863,6 +2892,20 @@ const MAX_TEXT_FILES            = 3;
 const MAX_CHARS_PER_TEXT_FILE   = 6000;
 const MAX_TOTAL_TEXT_FILE_CHARS = 12000;
 
+// [PATCH — PDF-as-text gap] looksLikeBinaryContent() below is a >15%-
+// suspicious-character heuristic and is reliably tripped by a COMPRESSED
+// PDF stream (confirmed: FlateDecode content ~21% suspicious chars after a
+// naive UTF-8 decode) — but an UNCOMPRESSED pdf (small/simple writers,
+// print-to-PDF tools that skip stream compression) decodes to 0% suspicious
+// chars: pure ASCII PDF syntax ("obj", "stream", "/Type/Catalog", raw
+// "(text) Tj" operators) that passes the heuristic outright while still
+// being unusable as "the file's content" — confirmed by direct test, not
+// theoretical. Checking the extension first closes that gap unconditionally
+// instead of trusting a content heuristic that a small enough/simple enough
+// binary file can pass by chance. This is a text-attachment endpoint; a
+// binary format belongs on the image/document (vision.js) path instead.
+const BINARY_EXTENSION_RE = /\.(pdf|docx?|xlsx?|pptx?|zip|rar|7z|exe|dll|png|jpe?g|gif|webp|bmp|tiff?|ico|mp3|mp4|wav|mov|avi|bin|dat)$/i;
+
 // No application-imposed limit once isDeveloperMode is true — explicit
 // developer choice (Infinity, not just "elevated"). The three comparisons
 // below (maxFiles/maxCharsPer/maxCharsTotal, inside extractTextFiles) are
@@ -2947,6 +2990,15 @@ function extractTextFiles(body, likelyArabicMsg, isDeveloperMode) {
     const name = typeof raw?.name === 'string' && raw.name.trim()
       ? raw.name.trim().slice(0, 200)
       : 'attachment.txt';
+    if (BINARY_EXTENSION_RE.test(name)) {
+      rejected.push({
+        name,
+        error: likelyArabicMsg
+          ? `"${name}" مش ملف نصي (PDF/Word/Excel/صورة/إلخ) — استخدم زر إرفاق الصور أو المستندات بدل زر إرفاق النص، عشان يترفع بالطريقة الصح.`
+          : `"${name}" isn't a plain-text file (PDF/Word/Excel/image/etc.) — use the image/document attach button instead of the text-file one so it's read correctly.`,
+      });
+      continue;
+    }
     let content = typeof raw?.content === 'string' ? raw.content : '';
     if (!content.trim()) continue; // empty file — skip, not a rejection reason
     const originalLength = content.length;
@@ -8159,7 +8211,25 @@ export async function onRequestPost(context) {
   // fragility risk (see CONTINUATION_PROMPT.md's own conclusion) —
   // semantic (Vectorize) retrieval is the actual fix for this specific
   // remaining class of issue, not another scoring patch.
-  const geminiKbFacts = packKbFactsBlock(kbScored, 6000);
+  // [PATCH — file/KB provenance] True whenever a file is genuinely part of
+  // THIS exchange — live this turn, staged in KV, anchored from earlier
+  // history, or rejected outright — so packKbFactsBlock knows to disambiguate
+  // itself from an attachment even on the turn where the attachment failed.
+  // [PATCH — cross-wire] fileAnchorResult.mediaMentions requires the
+  // contextAnchor.mjs update (SHARE_LABEL_RE) shipped alongside this file —
+  // without it, mediaMentions is simply absent/undefined and this line is a
+  // no-op, so applying this patch before that one is safe, just incomplete
+  // until both land. This is the exact signal the reported bug needed: a
+  // PDF shared via vision.js on an earlier turn has no attached-file block,
+  // no KV file, no named anchor — mediaMentions is the ONLY place that a
+  // file was ever part of this conversation shows up at all.
+  const hasAttachedFileContext =
+    textFilesResult.files.length > 0 ||
+    kvFilesResult.files.length > 0 ||
+    fileAnchorResult.anchoredFiles.length > 0 ||
+    textFilesResult.rejected.length > 0 ||
+    (fileAnchorResult.mediaMentions && fileAnchorResult.mediaMentions.length > 0);
+  const geminiKbFacts = packKbFactsBlock(kbScored, 6000, hasAttachedFileContext);
 
   // [NEW] Grounding-adequacy signal, computed once, reused for (a) the prompt
   // note below and (b) the terminal SSE event's `grounded` field the

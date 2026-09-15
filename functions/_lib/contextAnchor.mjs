@@ -54,6 +54,24 @@ const FULL_BLOCK_OPEN_RE = /--- Attached file: (.+?)(?: \(truncated\))? ---\n/g;
 const LABEL_SINGLE_RE = /\[Attached text file: (.+?)\]/g;
 const LABEL_MULTI_RE  = /\[Attached \d+ text files: (.+?)\]/g;
 
+// [PATCH — media-share blind spot] Matches the client's content-free
+// image/PDF share label (footing_pro_v116.html/pc_suite_v116.html's
+// sendImageMessage(), confirmed identical in both: "var shareLabel =
+// '[Shared ' + mediaLabels.join(' and '); history.push({role:'user',
+// text: shareLabel + (caption ? ': '+caption : '') + ']'})") — e.g.
+// "[Shared a PDF document]", "[Shared an image: عايز اعرف محتواه]",
+// "[Shared 2 images and a text file: ...]". Confirmed: vision.js's own
+// request body is {images, document, files, prompt, extract} — no
+// `history` field at all — and its reply is never persisted server-side,
+// so unlike LABEL_SINGLE_RE/LABEL_MULTI_RE above there is no filename to
+// anchor by; a PDF/image turn carries no name through to this module at
+// all. Before this pattern existed, such a label matched NEITHER
+// FULL_BLOCK_OPEN_RE nor LABEL_SINGLE_RE/LABEL_MULTI_RE — it was invisible
+// to this module, so a later text-only turn asking about that file got no
+// honesty nudge whatsoever, only chat.js's own KB retrieval filling the
+// silence with confidently-formatted, unrelated internal reference content.
+const SHARE_LABEL_RE = /\[Shared ([^:\]]+)(?::[^\]]*)?\]/g;
+
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -69,6 +87,10 @@ function escapeRegExp(s) {
 function scanFileHistory(fullHistory) {
   const anchors = new Map();
   const staleLabelsOnly = new Set();
+  // description -> turnsAgo of its most recent sighting (last write wins,
+  // same convention as `anchors`). No filename exists for this label shape
+  // (see SHARE_LABEL_RE's comment), so dedup is by description text.
+  const sharedMediaMentions = new Map();
 
   for (let i = 0; i < fullHistory.length; i++) {
     const turn = fullHistory[i];
@@ -102,13 +124,19 @@ function scanFileHistory(fullHistory) {
         if (!anchors.has(name)) staleLabelsOnly.add(name);
       }
     }
+
+    SHARE_LABEL_RE.lastIndex = 0;
+    let shm;
+    while ((shm = SHARE_LABEL_RE.exec(text)) !== null) {
+      sharedMediaMentions.set(shm[1].trim(), turnsAgo); // later turn (smaller turnsAgo) overwrites
+    }
   }
 
   // Full content recovered anywhere in the scan always wins over a
   // label-only sighting, regardless of chronological order between them.
   for (const name of anchors.keys()) staleLabelsOnly.delete(name);
 
-  return { anchors, staleLabelsOnly };
+  return { anchors, staleLabelsOnly, sharedMediaMentions };
 }
 
 // ~1,500 tokens — bounded like promptBudget.mjs's other tiers. Large enough
@@ -140,8 +168,15 @@ export function extractPersistentFileAnchors(fullHistory, currentlyAttachedNames
   }
 
   const liveNames = new Set(currentlyAttachedNames);
-  const { anchors, staleLabelsOnly } = scanFileHistory(fullHistory);
+  const { anchors, staleLabelsOnly, sharedMediaMentions } = scanFileHistory(fullHistory);
   for (const name of liveNames) { anchors.delete(name); staleLabelsOnly.delete(name); }
+  // Most-recent-first, capped — bounds prompt growth in a long conversation
+  // with many separate image/PDF shares; the note is a blanket honesty
+  // reminder, not a per-item ledger, so older entries add little value.
+  const mediaMentions = [...sharedMediaMentions.entries()]
+    .sort((a, b) => a[1] - b[1])
+    .slice(0, 5)
+    .map(([description, turnsAgo]) => ({ description, turnsAgo }));
 
   // Most-recently-touched first, so budget eviction below drops the OLDEST
   // material first, not an arbitrary map-insertion order.
@@ -167,7 +202,7 @@ export function extractPersistentFileAnchors(fullHistory, currentlyAttachedNames
 
   const staleList = [...staleLabelsOnly];
   let block = '';
-  if (parts.length > 0 || staleList.length > 0 || evictedFiles.length > 0) {
+  if (parts.length > 0 || staleList.length > 0 || evictedFiles.length > 0 || mediaMentions.length > 0) {
     block += `\n\n════════════════════════════════════════\n`;
     block += `PREVIOUSLY SHARED FILES — CURRENT CONTENT, NOT THIS TURN'S UPLOAD\n`;
     block += `════════════════════════════════════════\n`;
@@ -189,9 +224,18 @@ export function extractPersistentFileAnchors(fullHistory, currentlyAttachedNames
         evictedFiles.map(f => `${f.name} (${f.turnsAgo} turns ago)`).join(', ') + `.\n`;
       block += `Ask the user to re-attach one of these if the current question needs it.\n`;
     }
+    if (mediaMentions.length > 0) {
+      block += `\n\nNOTE — image(s)/PDF(s) shared earlier in this conversation (analyzed once, at share\n`;
+      block += `time, on a path that does not persist content here — nothing above recovers it): ` +
+        mediaMentions.map(m => `${m.description} (${m.turnsAgo} turn(s) ago)`).join(', ') + `.\n`;
+      block += `If the current question depends on what was in one of those, say plainly that you\n`;
+      block += `don't have that content in front of you now — never describe it from memory of your\n`;
+      block += `own earlier reply about it, even if that reply sounded specific. Ask the user to\n`;
+      block += `re-attach it if the question needs it.\n`;
+    }
   }
 
-  return { promptBlock: block, anchoredFiles, evictedFiles, staleLabelsOnly: staleList };
+  return { promptBlock: block, anchoredFiles, evictedFiles, staleLabelsOnly: staleList, mediaMentions };
 }
 
 // Exposed for contextAnchor.test.mjs only — not part of the public surface
