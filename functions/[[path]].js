@@ -778,7 +778,7 @@ const ROUTES = [
   },
 ];
 
-// ── CSP common (matches api/decrypt.js CSP_COMMON exactly) ───────────────────
+// ── CSP common — single source of truth for this project's CSP ──────────────
 // [P2] form-action: added site origin explicitly to support payment initiation
 //      fetch() calls from encrypted app pages (belt-and-suspenders; same-origin
 //      fetch is already permitted by connect-src 'self', but form-action governs
@@ -801,7 +801,16 @@ const CSP_COMMON = [
   "media-src 'self' data:",
   "style-src 'self' 'unsafe-inline'",
   "font-src 'self'",
-  "img-src 'self' data: https://www.google-analytics.com https://*.clarity.ms",
+  // [V25-CSP] FIX (2026-09-15): img-src was missing https://c.bing.com.
+  // connect-src already carries it (v23/V24-CSP, for Clarity's XHR/fetch
+  // collection calls), but Clarity's own beacon also fires a plain <img>
+  // pixel at https://c.bing.com/c.gif for cross-network bounce tracking —
+  // that load is governed by img-src, not connect-src. Console evidence:
+  // "Refused to load the image 'https://c.bing.com/c.gif?...' because it
+  // violates ... img-src 'self' data: https://www.google-analytics.com
+  // https://*.clarity.ms" — the exact pre-fix directive string, confirming
+  // this line (not connect-src, not script-src) was the blocking policy.
+  "img-src 'self' data: https://www.google-analytics.com https://*.clarity.ms https://c.bing.com",
   // [V24-CSP] FIX (2026-06-23): connect-src was missing two required hosts:
   //   1. https://api.web3forms.com — contact form (cpContactForm, both '/' and
   //      '/footing-pro') POSTs here via fetch(). Without this host, Chromium
@@ -1701,7 +1710,7 @@ export async function onRequest(context) {
   // touch <style> blocks inside <noscript> or <script> tags.
   html = minifyBotCSS(html);
 
-  // XOR + base64 obfuscation (same algorithm as api/decrypt.js)
+  // XOR + base64 obfuscation
   const raw   = new TextEncoder().encode(html);
   const xored = new Uint8Array(raw.length);
   for (let i = 0; i < raw.length; i++) xored[i] = raw[i] ^ XOR_KEY;
