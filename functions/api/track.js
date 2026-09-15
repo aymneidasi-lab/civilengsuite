@@ -34,6 +34,25 @@
  * v1  — initial release (page, event, country, device, referrer, lang)
  * v2  — [V23-SID] added blobs[6] = session ID from body.s
  *        GA4 client_id now uses session ID instead of time-bucketed fallback
+ * v3  — [V24-CTXFIX] CRITICAL FIX: onRequestPost destructured `ctx` from the
+ *        Pages Functions context object and called ctx.waitUntil(...) for the
+ *        GA4 relay. Pages Functions do NOT expose a `ctx` property — the
+ *        context object is { request, env, params, waitUntil, next, data },
+ *        with waitUntil as a direct top-level method (this differs from the
+ *        plain Workers module `fetch(request, env, ctx)` signature, where
+ *        ctx.waitUntil is correct). `ctx` was therefore always undefined here,
+ *        so every POST with CES_GA4_ID + CES_GA4_SECRET configured AND a
+ *        pageview event (the default when body.e/body.event is omitted, which
+ *        is what bootstrapBeacon sends) threw "Cannot read properties of
+ *        undefined (reading 'waitUntil')" — an uncaught exception, surfaced to
+ *        the client as an opaque non-204 failure with no diagnostic body.
+ *        Fix: destructure `waitUntil` directly and call it un-namespaced.
+ *        [V24-GUARD] Added a top-level try/catch around the entire handler so
+ *        any future uncaught exception degrades to a logged, no-op 204
+ *        instead of an opaque platform error page — sendBeacon/fetch(keepalive)
+ *        callers already ignore the response, so failing loud server-side
+ *        (console.error, visible in Cloudflare real-time Functions logs) beats
+ *        failing opaque client-side.
  */
 
 const DEFAULT_HOST = 'civilengsuite.pages.dev';
@@ -77,103 +96,120 @@ export async function onRequestOptions({ request, env }) {
 }
 
 // ── POST handler ──────────────────────────────────────────────────────────────
-export async function onRequestPost({ request, env, ctx }) {
+// [V24-CTXFIX] `waitUntil` destructured directly -- Pages Functions context has
+// no `ctx` property (see change-log v3 above).
+export async function onRequestPost({ request, env, waitUntil }) {
   const canonicalHost = (env.CANONICAL_HOST || DEFAULT_HOST).trim();
   const origin        = request.headers.get('Origin') || '';
 
-  // Reject requests from disallowed origins
-  if (origin && !isAllowedOrigin(origin, canonicalHost)) {
-    return new Response(null, { status: 403 });
-  }
-
-  // Reject non-same-origin fetch context (belt-and-suspenders)
-  const secFetchSite = request.headers.get('Sec-Fetch-Site') || '';
-  if (secFetchSite && secFetchSite !== 'same-origin' && secFetchSite !== 'none') {
-    return new Response(null, { status: 403 });
-  }
-
-  // Parse body — sendBeacon sends Content-Type: text/plain; keep lenient
-  let body;
+  // [V24-GUARD] Every code path below can now fail loud-but-safe: any thrown
+  // error is caught, logged, and still resolves the beacon with 204/no-store
+  // instead of letting Cloudflare's generic exception page reach the client.
   try {
-    const raw = await request.text();
-    if (!raw || raw.length > 4096) return new Response(null, { status: 400 });
-    body = JSON.parse(raw);
-    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    // Reject requests from disallowed origins
+    if (origin && !isAllowedOrigin(origin, canonicalHost)) {
+      return new Response(null, { status: 403 });
+    }
+
+    // Reject non-same-origin fetch context (belt-and-suspenders)
+    const secFetchSite = request.headers.get('Sec-Fetch-Site') || '';
+    if (secFetchSite && secFetchSite !== 'same-origin' && secFetchSite !== 'none') {
+      return new Response(null, { status: 403 });
+    }
+
+    // Parse body — sendBeacon sends Content-Type: text/plain; keep lenient
+    let body;
+    try {
+      const raw = await request.text();
+      if (!raw || raw.length > 4096) return new Response(null, { status: 400 });
+      body = JSON.parse(raw);
+      if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+        return new Response(null, { status: 400 });
+      }
+    } catch (e) {
       return new Response(null, { status: 400 });
     }
-  } catch (e) {
-    return new Response(null, { status: 400 });
-  }
 
-  // ── Extract and sanitize all fields ──────────────────────────────────────
-  const page      = String(body.p || body.page    || '').slice(0, 100)  || '/unknown';
-  const event     = String(body.e || body.event   || 'pageview').slice(0, 50);
-  const referrer  = String(body.r || body.referrer|| '').slice(0, 200);
-  const lang      = String(body.l || body.lang    || '').slice(0, 20);
-  const width     = Math.min(Math.max(Number(body.w || body.width)  || 0, 0), 9999);
-  // [V23-SID] session ID from sessionStorage._ces_sid (set by bootstrapBeacon)
-  const sessionId = String(body.s || body.session || '').replace(/[^a-z0-9]/gi, '').slice(0, 32);
+    // ── Extract and sanitize all fields ──────────────────────────────────────
+    const page      = String(body.p || body.page    || '').slice(0, 100)  || '/unknown';
+    const event     = String(body.e || body.event   || 'pageview').slice(0, 50);
+    const referrer  = String(body.r || body.referrer|| '').slice(0, 200);
+    const lang      = String(body.l || body.lang    || '').slice(0, 20);
+    const width     = Math.min(Math.max(Number(body.w || body.width)  || 0, 0), 9999);
+    // [V23-SID] session ID from sessionStorage._ces_sid (set by bootstrapBeacon)
+    const sessionId = String(body.s || body.session || '').replace(/[^a-z0-9]/gi, '').slice(0, 32);
 
-  // Server-enriched context (never trust client for these)
-  const country   = request.headers.get('CF-IPCountry') || 'XX';
-  const ua        = (request.headers.get('User-Agent') || '').slice(0, 200);
-  const isMobile  = /mobile|android|iphone|ipad|phone/i.test(ua);
-  const device    = isMobile ? 'mobile' : 'desktop';
+    // Server-enriched context (never trust client for these)
+    const country   = request.headers.get('CF-IPCountry') || 'XX';
+    const ua        = (request.headers.get('User-Agent') || '').slice(0, 200);
+    const isMobile  = /mobile|android|iphone|ipad|phone/i.test(ua);
+    const device    = isMobile ? 'mobile' : 'desktop';
 
-  // ── Write to Cloudflare Analytics Engine ──────────────────────────────────
-  // writeDataPoint() is synchronous — no await, no latency on response path
-  if (env.CES_ANALYTICS) {
-    try {
-      env.CES_ANALYTICS.writeDataPoint({
-        blobs:   [page, event, country, device, referrer, lang, sessionId],
-        doubles: [Date.now(), width],
-        indexes: [page],
-      });
-    } catch (e) {
-      // AE failure must never break the 204 response
-      console.warn('[ces:track] AE write failed:', e && e.message);
+    // ── Write to Cloudflare Analytics Engine ──────────────────────────────────
+    // writeDataPoint() is synchronous — no await, no latency on response path
+    if (env.CES_ANALYTICS) {
+      try {
+        env.CES_ANALYTICS.writeDataPoint({
+          blobs:   [page, event, country, device, referrer, lang, sessionId],
+          doubles: [Date.now(), width],
+          indexes: [page],
+        });
+      } catch (e) {
+        // AE failure must never break the 204 response
+        console.warn('[ces:track] AE write failed:', e && e.message);
+      }
     }
+
+    // ── Optional: GA4 Measurement Protocol relay ──────────────────────────────
+    // Only for pageview events. client_id = session ID (v23) or country fallback.
+    // Uses waitUntil so the fetch completes without blocking the 204 response.
+    if (env.CES_GA4_ID && env.CES_GA4_SECRET && event === 'pageview') {
+      const ga4ClientId = sessionId
+        ? `ces.${sessionId}`
+        : `anon.${country}.${Math.floor(Date.now() / 86400000)}`; // daily bucket fallback
+
+      waitUntil(
+        fetch(
+          `${GA4_ENDPOINT}?measurement_id=${encodeURIComponent(env.CES_GA4_ID)}`
+          + `&api_secret=${encodeURIComponent(env.CES_GA4_SECRET)}`,
+          {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              client_id: ga4ClientId,
+              events: [{
+                name: 'page_view',
+                params: {
+                  page_location:         `https://${canonicalHost}${page}`,
+                  page_referrer:         referrer,
+                  language:              lang,
+                  screen_width:          width,
+                  session_id:            sessionId || undefined,
+                  engagement_time_msec:  100,
+                },
+              }],
+            }),
+          }
+        ).catch(e => console.warn('[ces:track] GA4 relay failed:', e && e.message))
+      );
+    }
+
+    return new Response(null, {
+      status: 204,
+      headers: {
+        ...corsHeaders(origin, canonicalHost),
+        'Cache-Control': 'no-store',
+      },
+    });
+  } catch (e) {
+    // [V24-GUARD] Last-resort safety net. Logs to Cloudflare real-time Functions
+    // logs (Dashboard → Workers & Pages → Functions) instead of surfacing an
+    // opaque platform error page to sendBeacon/fetch(keepalive) callers, which
+    // ignore the response body/status anyway.
+    console.error('[ces:track] Uncaught exception:', e && e.message, e && e.stack);
+    return new Response(null, {
+      status: 204,
+      headers: { ...corsHeaders(origin, canonicalHost), 'Cache-Control': 'no-store' },
+    });
   }
-
-  // ── Optional: GA4 Measurement Protocol relay ──────────────────────────────
-  // Only for pageview events. client_id = session ID (v23) or country fallback.
-  // Uses ctx.waitUntil so the fetch completes without blocking the 204 response.
-  if (env.CES_GA4_ID && env.CES_GA4_SECRET && event === 'pageview') {
-    const ga4ClientId = sessionId
-      ? `ces.${sessionId}`
-      : `anon.${country}.${Math.floor(Date.now() / 86400000)}`; // daily bucket fallback
-
-    ctx.waitUntil(
-      fetch(
-        `${GA4_ENDPOINT}?measurement_id=${encodeURIComponent(env.CES_GA4_ID)}`
-        + `&api_secret=${encodeURIComponent(env.CES_GA4_SECRET)}`,
-        {
-          method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            client_id: ga4ClientId,
-            events: [{
-              name: 'page_view',
-              params: {
-                page_location:         `https://${canonicalHost}${page}`,
-                page_referrer:         referrer,
-                language:              lang,
-                screen_width:          width,
-                session_id:            sessionId || undefined,
-                engagement_time_msec:  100,
-              },
-            }],
-          }),
-        }
-      ).catch(e => console.warn('[ces:track] GA4 relay failed:', e && e.message))
-    );
-  }
-
-  return new Response(null, {
-    status: 204,
-    headers: {
-      ...corsHeaders(origin, canonicalHost),
-      'Cache-Control': 'no-store',
-    },
-  });
 }
