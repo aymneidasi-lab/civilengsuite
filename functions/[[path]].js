@@ -801,7 +801,7 @@ const CSP_COMMON = [
   "media-src 'self' data:",
   "style-src 'self' 'unsafe-inline'",
   "font-src 'self'",
-  "img-src 'self' data: https://www.google-analytics.com",
+  "img-src 'self' data: https://www.google-analytics.com https://*.clarity.ms",
   // [V24-CSP] FIX (2026-06-23): connect-src was missing two required hosts:
   //   1. https://api.web3forms.com — contact form (cpContactForm, both '/' and
   //      '/footing-pro') POSTs here via fetch(). Without this host, Chromium
@@ -815,7 +815,7 @@ const CSP_COMMON = [
   //      Net effect before this fix: Clarity loaded and ran, but every
   //      telemetry/collect call it made was silently CSP-blocked — recording
   //      nothing. Same root cause as (1), different consumer.
-  "connect-src 'self' https://cloudflareinsights.com https://www.google-analytics.com https://region1.google-analytics.com https://api.web3forms.com https://*.clarity.ms https://c.bing.com https://cloudflare-dns.com https://emailvalidation.abstractapi.com",
+  "connect-src 'self' https://cloudflareinsights.com https://www.google-analytics.com https://www.google.com https://region1.google-analytics.com https://api.web3forms.com https://*.clarity.ms https://c.bing.com https://cloudflare-dns.com https://emailvalidation.abstractapi.com",
   "frame-ancestors 'none'",
   "base-uri 'self'",
   "form-action 'self' https://civilengsuite.is-a.dev",
