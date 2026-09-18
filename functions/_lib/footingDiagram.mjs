@@ -45,18 +45,59 @@
 //
 // This is a schematic, not a shop/construction drawing. Reinforcement is
 // shown as one representative bottom-mesh layer only — no top steel, no
-// hooks, no dowels, no development-length extensions, no stirrups/ties.
-// Column-to-footing dowelling is not shown. renderFootingDiagramSVG()
-// always appends a fixed caption saying so; treat that caption as load-
-// bearing UX, not decoration — see appendBotDiagramBubble() in the
-// footing_pro/pc_suite integration notes for why it must never be
-// stripped out by a caller.
+// full development-length extensions. renderFootingDiagramSVG() always
+// appends a fixed caption saying so; treat that caption as load-bearing
+// UX, not decoration — see appendBotDiagramBubble() in the footing_pro/
+// pc_suite integration notes for why it must never be stripped out by a
+// caller.
 //
 // [Step 14] The paragraph above describes the DEFAULT drawing. pedestal/
-// dowels/mesh are now optional inputs (see computeFootingExtras()) that
-// ARE drawn when the caller explicitly supplies them — captionComputed
-// in structuralLabels.mjs was reworded at the same step to stay accurate
-// in both cases rather than describing only the no-extras default.
+// dowels/mesh are optional inputs (see computeFootingExtras()) that ARE
+// drawn when the caller explicitly supplies them — captionComputed in
+// structuralLabels.mjs was reworded at the same step to stay accurate in
+// both cases rather than describing only the no-extras default.
+//
+// [This session — ECP 203 detailing-guide parity] Two more optional
+// groups joined pedestal/dowels/mesh in computeFootingExtras(), closing
+// the specific gap a direct comparison against the Egyptian code's own
+// "دليل التفاصيل الانشائية" isolated-footing figure (شكل ٢-١٦) surfaced:
+//   - blinding — the plain/lean concrete (سمك الخرسانة العادية) layer
+//     under the structural footing, its own wider plan projection drawn
+//     as a second, outer outline in both views (طول/عرض القاعدة العادية
+//     vs طول/عرض القاعدة المسلحة in the guide's own labels).
+//   - ties — column confinement ties (كانات العمود) drawn as tick marks
+//     at the footing/column interface, reusing the same tieTickH-style
+//     3-segment mark structuralDrawingKit.mjs already exports for other
+//     elements (see renderSectionView's own comment on why THIS file's
+//     copy is local rather than an import — the kit file itself was not
+//     available to verify the real signature against when this change
+//     was made; flagged as technical debt alongside the file's existing
+//     local dimensionLine/hatchDefs/esc duplicates).
+// The existing dowels group also gained a real drawn vertical leg (from
+// the footing-top interface up into the column, length = the caller's
+// own dowels.projection, dimensioned on-drawing as "Dowel Lap Length")
+// and a hooked foot at the bottom bar layer — previously
+// dowels.projectionMM was computed and reported in the Step 14.3 summary
+// table but never actually drawn as geometry; the dowel was a bare row
+// of circles with no visible bar. Both additions follow the file's
+// existing all-or-nothing-per-group gate and its "never draw a number
+// the caller didn't give us" rule: the hook FOOT length is a fixed,
+// unlabeled illustrative convention (see DOWEL_HOOK_FOOT_FACTOR below),
+// never presented as a computed or code-mandated value, for the same
+// reason MAX_* constants are documented as tool limits, not engineering
+// limits.
+//
+// NOT carried over from the guide figure in this pass, deliberately: the
+// guide's plan-view note tying a concentrated reinforcement band (a
+// percentage of steel within a band width at the column) to a specific
+// bond/anchorage-length clause. The exact fraction and band-width rule
+// is a real ECP 203 provision, not read with enough confidence off a
+// photographed page to hardcode as this tool's own default without
+// risking exactly the "confident but wrong" number this file's header
+// already commits never to produce — see PROMPT ITERATION 2 in
+// imageGen.mjs, cited elsewhere in this header. Left for a follow-up
+// session where the clause can be confirmed against the code text
+// itself, not an image of it.
 //
 // ── Step 17 addendum ────────────────────────────────────────────────────
 // Fully deterministic: no `env.AI`, no model call, no network fetch, no
@@ -115,16 +156,8 @@
 // <style> block over to kitStyleBlock() — only the specific classes
 // these two functions need (.bar-dot-dowel, .table-*) are added to the
 // local block below, verbatim-copied from kitStyleBlock's own values.
-// [Step 20] tieTickH/assertNoIntervalOverlap added to the existing
-// DiagramError/assertInt/barDot/scheduleTable import — both reused
-// verbatim from the shared kit rather than hand-rolled a second time.
-// tieTickH already exists there for columnDiagram.mjs's elevation view
-// ("the member runs VERTICALLY... tie bands cross the member
-// horizontally" — that function's own header) — exactly this file's own
-// column-stub-above-the-footing geometry, so no new kit primitive is
-// needed for column ties, only a new call site here.
 import {
-  DiagramError, assertInt, barDot, scheduleTable, tieTickH, assertNoIntervalOverlap,
+  DiagramError, assertInt, scheduleTable,
 } from './structuralDrawingKit.mjs';
 export { DiagramError };
 // [Step 4 — translation] footingTitle/columnTag/sectionTitle replace
@@ -160,21 +193,51 @@ const MAX_COLUMNS = 12;
 // string, not a CAD system.
 const MAX_DOWELS = 20;
 
-// [Step 20] Same philosophy again, applied to ties.count. A column tie
-// zone in a real design can call for a confinement tie every 50-75mm —
-// drawing every single one would both clutter this schematic's small
-// fixed section box and cost needless SVG bytes for zero added
-// legibility over a representative-tick + spacing-callout convention,
-// same reasoning distributeTicks()'s own cap in structuralDrawingKit.mjs
-// already documents for beam stirrups.
-const MAX_TIES = 12;
+// [This session] Same cap philosophy as MAX_DOWELS, applied to
+// ties.count — a column showing 30 confinement ties in a single
+// schematic section is already well past what this tool's fixed-height
+// column stub can lay out legibly; a real tie schedule needs a real
+// drafting tool, not this one.
+const MAX_TIES = 30;
 
-// [Step 20] Bounds the number of EXTRA transverse bars drawn inside one
-// column's concentration band (computeBandGeometry below) — a schematic-
-// tool cap on the same axis MAX_DOWELS already caps for dowels, not a
-// structural limit. A band this dense would be illegible at this
-// canvas's fixed scale regardless of how structurally real the count is.
-const MAX_BAND_BARS_PER_ZONE = 20;
+// [This session] The dowel's hooked FOOT at the bottom bar layer is
+// drawn at a fixed length proportional to bar diameter — a common
+// schematic convention for "this bar is hooked here", NOT a computed
+// standard-hook length per any specific ECP 203 / ACI 318 hook-geometry
+// table (those tables key off hook angle, bar grade, and cover in ways
+// this tool is never given). Never labeled with a number on the drawing
+// for exactly that reason — see this file's header, "NOT carried over"
+// note, for the same never-assert-an-unverified-figure rule applied to
+// the reinforcement band the guide figure also shows. Only the VERTICAL
+// leg (real input: dowels.projectionMM) gets a dimensioned label.
+const DOWEL_HOOK_FOOT_FACTOR = 6; // foot length = 6 x dowel dia, purely illustrative
+
+// [This session — column main bars / break symbol] Fixed pixel gap
+// between the break symbol and the column stub's own top edge — same
+// "schematic mark, not a to-scale anything" convention as
+// DOWEL_HOOK_FOOT_FACTOR just above (a break symbol has no real-world
+// length to be proportional to; it is a drafting convention meaning
+// "this bar continues, not drawn to its real height"), so a fixed
+// pixel constant is honest here in a way a computed one would not be.
+// [This session — column main bars] Deliberately SMALLER than
+// STUB_MARGIN_PX (15, inline below in renderSectionView) — this is the
+// gap between colTop and the break symbol, and keeping it under
+// STUB_MARGIN_PX guarantees the break always sits ABOVE the dowel bend
+// point with room to spare WITHOUT columnBars ever having to grow the
+// stub itself (see the deliberate absence of any columnBars term in
+// stubH's own Math.max() calls, and that block's comment, for why: an
+// earlier version of this feature added a dedicated
+// MIN_COLUMN_BAR_VISIBLE_PX term to stubH so the visible bar run could
+// be longer, but for a realistic large dowel.projectionMM — 600mm, a
+// plausible ECP 203 tension lap length for a 16mm bar, not an
+// adversarial input — that extra growth pushed colTop up far enough to
+// visually collide with the plan-view title above SECTION_BOX, found by
+// rendering exactly that case to PNG. Reusing the dowel's own existing
+// headroom instead of asking for more keeps colTop provably unchanged
+// from the dowels-only case (byte-identical stubH), at the cost of a
+// shorter, but always positive and always collision-free, visible bar
+// run above the bend.
+const BREAK_SYMBOL_MARGIN_PX = 8;
 
 function toMm(value, unit) {
   const factor = MM_PER_UNIT[unit];
@@ -191,6 +254,17 @@ function fromMm(mm, unit) {
 function assertFinitePositive(name, value) {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
     throw new DiagramError('BAD_PARAM', `"${name}" must be a positive finite number, got ${JSON.stringify(value)}.`);
+  }
+}
+
+// [This session] blinding.projection is legitimately 0 (blinding poured
+// flush with the footing edge, no projection) — assertFinitePositive
+// would wrongly BAD_PARAM that valid case. Local, not imported, for the
+// same Step 17 reason every other assert*/toMm/fromMm/fmt helper in this
+// file is a local duplicate rather than a kit import.
+function assertFiniteNonNegative(name, value) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new DiagramError('BAD_PARAM', `"${name}" must be a non-negative finite number, got ${JSON.stringify(value)}.`);
   }
 }
 
@@ -323,88 +397,19 @@ function computeMeshLayer({ hostWidthMM, cover, diaMM, spacingMM }) {
   return { diaMM, spacingMM, actualSpacingMM, barCount, barCentersMM };
 }
 
-// ── Step 20: reinforcement concentration band (شريحة تركيز التسليح) ────
-// The Egyptian code's own detailing guide (دليل التفاصيل الانشائية,
-// شكل ١٦-٣) shows a combined footing's TRANSVERSE bottom steel as denser
-// directly under each column ("شريحة تركيز التسليح") than in the general
-// field between/beyond them (labelled there at a flat 0.5% minimum,
-// itself the guide's own value, not this tool's invention). This
-// function draws that second, ADDITIVE layer — never a replacement for
-// the field mesh renderPlanView already draws unconditionally — because
-// deciding whether concentrated bars replace or supplement a portion of
-// the field mesh is a real design choice this tool has no basis to make
-// silently; showing both, clearly distinguished, lets the caller's own
-// design govern that bookkeeping instead of this schematic guessing it.
-//
-// widthMM is a REQUIRED explicit input (rawParams.band.width — see
-// computeFootingExtras below), never derived from colWidthMM times some
-// unverified multiplier: this file's own house rule ("no number you
-// can't defend" — see this file's Step 17 header addendum) applies here
-// exactly as it does to every dia/spacing value elsewhere, and no
-// version of this codebase has ever had the actual ECP 203 clause text
-// in hand to derive a band-width formula from. The caller supplies it.
-//
-// One zone per column, centered on that column's own centerLongMM,
-// clipped against the footing's own L extent and checked against every
-// other zone for overlap (assertNoIntervalOverlap, reused from the kit)
-// — the same "zones must tile without crossing" guarantee beam stirrup
-// zones already rely on elsewhere in this codebase.
-function computeBandGeometry({
-  columnCentersMM, footingLongMM, widthMM, coverMM, diaMM, spacingMM,
-}) {
-  assertFinitePositive('band width', widthMM);
-  assertFinitePositive('band cover', coverMM);
-  assertFinitePositive('band.dia', diaMM);
-  assertFinitePositive('band.spacing', spacingMM);
-
-  // De-duplicate identical centers BEFORE building zones. Every caller
-  // except raft's already guarantees distinct centers here (combined/
-  // strip's own COLUMNS_OVERLAP check rejects two columns sharing one L
-  // position outright, since two positive-length footprints centered on
-  // the same point always overlap) — but a raft can legitimately place
-  // two columns at the same offx (same L) and different offy (different
-  // B), which is not a real footing overlap at all, just two columns
-  // that happen to sit under the same transverse cut. Found by testing
-  // raft's own 2x2 column grid directly, not assumed from reading the
-  // 1-D combined/strip case alone: without this dedupe step, those two
-  // columns would generate two IDENTICAL zones and fail the overlap
-  // check below on a false positive.
-  const uniqueCentersMM = [...new Set(columnCentersMM)];
-
-  const rawZones = uniqueCentersMM.map((centerLongMM) => {
-    const startMM = centerLongMM - widthMM / 2;
-    const endMM = centerLongMM + widthMM / 2;
-    if (startMM < 0 || endMM > footingLongMM) {
-      throw new DiagramError(
-        'BAND_OUT_OF_BOUNDS',
-        `Concentration band centered at L=${centerLongMM}mm (width ${widthMM}mm) extends outside the footing's L=${footingLongMM}mm extent.`,
-      );
-    }
-    return {
-      centerLongMM, startMM, endMM,
-    };
-  });
-  assertNoIntervalOverlap(rawZones, { startKey: 'startMM', endKey: 'endMM', label: 'concentration band' });
-
-  const zones = rawZones.map(({ centerLongMM, startMM, endMM }) => {
-    // Same "no room for even one bar" guard computeSectionGeometry/
-    // computeMeshLayer already apply to a footing width, applied here to
-    // one zone's own (narrower) width instead.
-    const envelope = (endMM - startMM) - diaMM;
-    if (envelope <= 0) {
-      throw new DiagramError('NO_ROOM_FOR_BARS', `Band width (${(endMM - startMM).toFixed(0)}mm) leaves no room for a ${diaMM}mm bar.`);
-    }
-    const rawCount = Math.floor(envelope / spacingMM) + 1;
-    const barCount = Math.max(1, Math.min(rawCount, MAX_BAND_BARS_PER_ZONE));
-    const firstMM = startMM + diaMM / 2;
-    const lastMM = endMM - diaMM / 2;
-    const { centersMM: barCentersMM, actualSpacingMM } = distributeCenters(firstMM, lastMM, barCount);
-    return {
-      centerLongMM, startMM, endMM, barCount, barCentersMM, actualSpacingMM,
-    };
-  });
-
-  return { widthMM, diaMM, spacingMM, zones };
+// computeTieGeometry: N ties, evenly spaced at the caller's own spacing,
+// starting AT the footing/column interface (offset 0) and marching UP
+// into the column — mirrors the guide figure's own callout, which shows
+// the confinement ties beginning right at "منسوب ظهر القاعدة المسلحة"
+// (the reinforced footing's own top level) and continuing upward. Unlike
+// computeDowelGeometry (an X-axis envelope distribution), this is a 1-D
+// arithmetic sequence — no cover/host-width envelope applies to a
+// vertical position along the column.
+function computeTieGeometry({ spacingMM, count }) {
+  assertFinitePositive('ties.spacing', spacingMM);
+  assertInt('ties.count', count, { min: 1, max: MAX_TIES });
+  const offsetsMM = Array.from({ length: count }, (_, i) => i * spacingMM);
+  return { offsetsMM };
 }
 
 // computeFootingExtras: shared "all sub-fields of a group or none"
@@ -436,12 +441,7 @@ function computeBandGeometry({
 // by reading the compute code alone. Fixed by taking the footing's full
 // section width as its own explicit parameter instead of overloading
 // the column-width one.
-// [Step 20] footingLongMM/columnCentersMM added for `band` only — every
-// existing caller of this function already has both values in scope at
-// its own call site (see each compute*FootingGeometry function's own
-// updated call below); ties needs neither (see the `ties` branch's own
-// comment on why tie positions are computed later, per-renderer).
-function computeFootingExtras(rawParams, unit, colWidthMM, footingWidthMM, coverMM, footingLongMM, columnCentersMM) {
+function computeFootingExtras(rawParams, unit, colWidthMM, footingWidthMM, coverMM) {
   const extras = {};
 
   if (rawParams.pedestal != null) {
@@ -492,20 +492,26 @@ function computeFootingExtras(rawParams, unit, colWidthMM, footingWidthMM, cover
     extras.mesh = computeMeshLayer({ hostWidthMM: footingWidthMM, cover: coverMM, diaMM: meshDiaMM, spacingMM: meshSpacingMM });
   }
 
-  // [Step 20] Ties: dia/spacing/count are LABEL values only — positions
-  // are deliberately NOT computed here. The column stub ties are drawn
-  // against is a fixed DECORATIVE height (SECTION_STUB_NO_PEDESTAL_MM in
-  // this file / its own analogue in footingDiagram.dxf.mjs) — a render-
-  // time display constant, never a real user-supplied column height
-  // (same reason that stub itself has never been drawn to scale — see
-  // this file's Step 14.3 comments) — and it differs between the SVG and
-  // DXF renderers. Computing tie Y-positions here against one renderer's
-  // stub height would silently be wrong for the other. Each renderer
-  // instead distributes `count` representative ticks across whatever
-  // height IT actually draws, using this same file's own
-  // distributeCenters() helper — one geometric rule, applied twice,
-  // rather than two different fixed heights baked into one compute-time
-  // answer.
+  // [This session] blinding — plain/lean concrete under the footing.
+  // "thickness" and "projection" required together, same shape as
+  // pedestal's width+height: a thickness with no stated projection (or
+  // vice versa) is an ambiguous drawing request, not a defaultable one.
+  if (rawParams.blinding != null) {
+    const { thickness, projection } = rawParams.blinding;
+    if (thickness == null || projection == null) {
+      throw new DiagramError('BAD_PARAM', `"blinding" requires both "thickness" and "projection" together, got ${JSON.stringify(rawParams.blinding)}.`);
+    }
+    const thicknessMM = toMm(thickness, unit);
+    const projectionMM = toMm(projection, unit);
+    assertFinitePositive('blinding.thickness', thicknessMM);
+    assertFiniteNonNegative('blinding.projection', projectionMM); // 0 = flush with the footing edge, a valid design choice
+    extras.blinding = { thicknessMM, projectionMM };
+  }
+
+  // [This session] ties — column confinement ties at the footing/column
+  // interface. "dia", "spacing", and "count" required together, same
+  // shape as dowels' count+dia+projection: a spacing with no count (or
+  // vice versa) cannot be drawn without inventing the missing number.
   if (rawParams.ties != null) {
     const { dia, spacing, count } = rawParams.ties;
     if (dia == null || spacing == null || count == null) {
@@ -514,24 +520,39 @@ function computeFootingExtras(rawParams, unit, colWidthMM, footingWidthMM, cover
     const diaMM = toMm(dia, unit);
     const spacingMM = toMm(spacing, unit);
     assertFinitePositive('ties.dia', diaMM);
-    assertFinitePositive('ties.spacing', spacingMM);
-    assertInt('ties.count', count, { min: 2, max: MAX_TIES });
-    extras.ties = { diaMM, spacingMM, count };
+    const { offsetsMM } = computeTieGeometry({ spacingMM, count });
+    extras.ties = { diaMM, spacingMM, count, offsetsMM };
   }
 
-  // [Step 20] Band: widthMM is REQUIRED and always caller-supplied — see
-  // computeBandGeometry's own header on why this tool never derives it.
-  if (rawParams.band != null) {
-    const { width, dia, spacing } = rawParams.band;
-    if (width == null || dia == null || spacing == null) {
-      throw new DiagramError('BAD_PARAM', `"band" requires "width", "dia", and "spacing" together, got ${JSON.stringify(rawParams.band)}.`);
+  // [This session — column main bars / break symbol] columnBars — the
+  // column's OWN continuing longitudinal reinforcement (the guide
+  // figure's "١٦Φ" callout at the very top of the column, cut off by a
+  // break symbol since this schematic is never given a real column
+  // height), distinct from "أشاير العمود"/dowels just below it (the
+  // short starter/lap bars computed above). Deliberately reuses
+  // dowels.centersMM/count rather than taking its own count or an
+  // independent position input: in standard detailing the main bars and
+  // their own starter dowels occupy the SAME positions (that is what a
+  // lap splice means — one bar continuing where the other leaves off),
+  // so asking the caller for a second, independently-specified count/
+  // position here would let the two groups disagree in a way real
+  // construction never does, and this tool's own "never draw a number
+  // you can't defend" rule extends to positions, not just diameters.
+  // Only "dia" is a real new input; requiring dowels to already exist is
+  // enforced explicitly below rather than left as a silent no-op when
+  // dowels is absent, matching this function's existing style of
+  // throwing a named BAD_PARAM rather than degrading quietly.
+  if (rawParams.columnBars != null) {
+    if (!extras.dowels) {
+      throw new DiagramError('BAD_PARAM', '"columnBars" requires "dowels" to also be supplied — column bars are drawn continuing upward from the same dowel positions.');
     }
-    const widthMM = toMm(width, unit);
+    const { dia } = rawParams.columnBars;
+    if (dia == null) {
+      throw new DiagramError('BAD_PARAM', `"columnBars" requires "dia", got ${JSON.stringify(rawParams.columnBars)}.`);
+    }
     const diaMM = toMm(dia, unit);
-    const spacingMM = toMm(spacing, unit);
-    extras.band = computeBandGeometry({
-      columnCentersMM, footingLongMM, widthMM, coverMM: coverMM, diaMM, spacingMM,
-    });
+    assertFinitePositive('columnBars.dia', diaMM);
+    extras.columnBars = { diaMM };
   }
 
   return extras;
@@ -586,12 +607,7 @@ export function computeIsolatedFootingGeometry(rawParams) {
   // dowels/pedestal host width, unambiguously. shortMM (the footing's
   // own short-axis width) is passed separately for mesh — see Step
   // 14.3's fix note on computeFootingExtras.
-  // [Step 20] longMM/[longMM/2]: isolated's own long axis and its single
-  // (centered) column position, for the new `band` extra — a band on a
-  // single-column footing is a less common case than combined/strip/raft
-  // but not an invalid one, so it is supported uniformly rather than
-  // singled out as an exception.
-  const extras = computeFootingExtras(rawParams, unit, colShortMM, shortMM, cover, longMM, [longMM / 2]);
+  const extras = computeFootingExtras(rawParams, unit, colShortMM, shortMM, cover);
 
   return {
     type: 'isolated',
@@ -664,9 +680,7 @@ export function computeCombinedFootingGeometry(rawParams) {
   // [Step 14.1] dowels/pedestal belong to `chosen` — the same column the
   // section cut already shows — not both columns. B (footing width) is
   // passed separately for mesh — see Step 14.3's fix note.
-  // [Step 20] Unlike dowels/pedestal, `band` is drawn at EVERY column in
-  // plan, not just `chosen` — both col1.off/col2.off are passed.
-  const extras = computeFootingExtras(rawParams, unit, chosen.b, B, cover, L, [col1.off, col2.off]);
+  const extras = computeFootingExtras(rawParams, unit, chosen.b, B, cover);
 
   return {
     type: 'combined',
@@ -796,9 +810,7 @@ export function computeStripFootingGeometry(rawParams) {
   // [Step 14.1] dowels/pedestal belong to `chosen` only, same as combined.
   // B (footing width) is passed separately for mesh — see Step 14.3's
   // fix note.
-  // [Step 20] `band` is drawn at EVERY column in plan — every column's
-  // own .off, not just `chosen`'s.
-  const extras = computeFootingExtras(rawParams, unit, chosen.b, B, cover, L, columns.map((c) => c.off));
+  const extras = computeFootingExtras(rawParams, unit, chosen.b, B, cover);
 
   return {
     type: 'strip',
@@ -899,13 +911,7 @@ export function computeRaftFootingGeometry(rawParams) {
   // [Step 14.1] dowels/pedestal belong to `chosen` only, same as combined/strip.
   // B (footing width) is passed separately for mesh — see Step 14.3's
   // fix note.
-  // [Step 20] `band` is drawn at EVERY column in plan — every column's
-  // own .offx (its L-axis position; a raft band is a strip across the
-  // full B at that L position, same shape as combined/strip's own band,
-  // not a 2-D patch around the column's .offy too — a raft column can
-  // still need a locally concentrated CUT across the full width at its
-  // own L position, which is what this draws).
-  const extras = computeFootingExtras(rawParams, unit, chosen.b, B, cover, L, columns.map((c) => c.offx));
+  const extras = computeFootingExtras(rawParams, unit, chosen.b, B, cover);
 
   return {
     type: 'raft',
@@ -927,41 +933,61 @@ export function computeRaftFootingGeometry(rawParams) {
 const CANVAS = { w: 960, h: 760 };
 const PLAN_BOX = { x: 80, y: 60, w: 800, h: 280 };
 const SECTION_BOX = { x: 80, y: 420, w: 800, h: 240 };
-// [Step 21] combined/strip only (see DUAL_SECTION_TYPES below) — SECTION_BOX's
-// footprint split into a larger left zone for the new primary longitudinal
-// section and a smaller right zone for the pre-Step-21 section, kept as a
-// secondary "side" view per direct request rather than dropped. Same total
-// span as SECTION_BOX (540+20+240=800, x:80 to x:880) so the two-section
-// layout lines up under PLAN_BOX exactly like the single-section layout did.
-const LONG_SECTION_BOX = { x: 80, y: 420, w: 540, h: 240 };
-const TRANS_SECTION_BOX = { x: 640, y: 420, w: 240, h: 240 };
-// isolated: one column, no "span between columns" — a longitudinal section
-// is not a distinct view from the transverse one. raft: a 2-D column grid —
-// "the longitudinal section" is ambiguous (through which row?). Both keep
-// the single pre-Step-21 section, unchanged. combined/strip: columns lie on
-// one line, so "through the column line" is unambiguous, matching the
-// Egyptian code guide's own قطاع رأس ١-١ (both columns + the span between).
-const DUAL_SECTION_TYPES = new Set(['combined', 'strip']);
-
-// [Step 21] Shared by renderPlanView's short-way (transverse) blocks AND
-// the new renderLongSectionView's transverse-bar-as-circles blocks below —
-// previously duplicated inline in renderPlanView for the bottom layer and
-// again for the top-mesh layer; a third and fourth near-identical copy for
-// the longitudinal section was the point at which "just copy it again"
-// stopped being defensible. Pure function of the values every caller
-// already has (plan.longMM, cover, a layer's own dia/spacing) — same
-// floor(envelope/spacing)+1 rule computeMeshLayer/computeSectionGeometry
-// already use, applied along L instead of across B/colWidth.
-function computeTransverseXPositionsMM(longMM, coverMM, diaMM, spacingMM) {
-  const env = longMM - 2 * coverMM - diaMM;
-  const count = Math.max(2, Math.floor(env / spacingMM) + 1);
-  const first = coverMM + diaMM / 2;
-  const last = longMM - coverMM - diaMM / 2;
-  const step = count > 1 ? (last - first) / (count - 1) : 0;
-  return Array.from({ length: count }, (_, i) => (count === 1 ? longMM / 2 : first + i * step));
-}
 const MIN_BAR_PX_R = 3.2;      // bars stay legible even when geometry scales tiny
 const MIN_STROKE_PX = 1.2;
+
+// [Bugfix, this session — reviewer feedback] The bottom bar row's clear
+// cover from the footing's own underside (barY = baseY - cover*scale,
+// just below) had no pixel floor, unlike every other real-but-small
+// dimension in this file (MIN_BAR_PX_R/MIN_STROKE_PX just above,
+// MIN_COLUMN_BAR_VISIBLE_PX's own former role). At typical scale a
+// 50mm cover renders as a ~6-7px gap, and the bar dot's own radius
+// (MIN_BAR_PX_R=3.2px floor) eats most of that — the bars visually read
+// as sitting almost exactly on the bottom face, i.e. no cover at all,
+// which is wrong at ANY scale (cover is never zero on a real footing).
+// Flagged directly against a rendered PNG, not inferred from the
+// coordinate math. 12px keeps the gap unambiguous at this file's usual
+// render sizes without being so large it reads as a second dimension
+// needing its own callout.
+const MIN_COVER_GAP_PX = 12;
+
+// [Bugfix, this session round 8 — reviewer feedback, supersedes round 7's
+// fixed-tick version] "رجل الحديد هي عبارة عن ارتفاع القاعدة مطروح منه
+// الكفر العلوي والسفلي" — round 7's PLAN_HOOK_TICK_PX (a fixed 14px
+// in-plane bend, same idea as DOWEL_HOOK_FOOT_FACTOR/BREAK_SYMBOL_MARGIN_PX)
+// was wrong in KIND, not degree: this leg is not an illustrative mark at
+// all, it is the SAME real, already-correctly-computed quantity
+// renderSectionView's own bottom-bar hook uses (barY to legTopY spans
+// exactly depthMM - 2*coverMM — see that block's own comment) — bar-
+// bending-schedule convention draws an out-of-plane leg true-length,
+// "unfolded" into the plane of the page, not foreshortened to a token
+// tick. renderPlanView now computes this directly from geometry.section
+// (depthMM, coverMM) rather than using this constant as the value; the
+// constant below is kept only as a floor for the degenerate case
+// (cover so large relative to depth that depthMM - 2*coverMM is small or
+// negative), the same role MIN_BAR_PX_R/MIN_COVER_GAP_PX already play for
+// other real-but-occasionally-tiny quantities in this file, not a
+// default.
+const MIN_PLAN_HOOK_PX = 8;
+
+// [This session — visual-style pass] Palette matched against a color
+// scan of the ECP 203 detailing guide's own figure (شكل ٢-١٦), not
+// invented: background cream, main reinforcement (bottom bars, dowels)
+// a dark maroon, secondary reinforcement (ties, transverse callouts) a
+// mustard gold, plain concrete flat light gray, reinforced concrete a
+// stippled mid gray. One named constant per role rather than the hex
+// literal repeated at each use site, so a future correction is a
+// one-line change instead of a find-and-replace across the file.
+const CANVAS_BG = '#F9F8F3';
+const REBAR_MAIN = '#800000';
+const REBAR_MAIN_STROKE = '#5c0000';
+const REBAR_SECONDARY = '#D4A017';
+const PC_FILL = '#E5E5E5';
+const RC_FILL_BG = '#d3d3d3';
+const RC_FILL_DOT = '#9a9fa5';
+const LEVEL_MARKER = '#87CEEB';
+const LEVEL_MARKER_STROKE = '#4a90a4';
+const CENTERLINE_COLOR = '#7fa8c9';
 
 // Types whose plan view carries more than one tagged column, and whose
 // section view is therefore "through col<N>" rather than an unlabeled
@@ -972,31 +998,240 @@ const NUMBERED_COLUMN_TYPES = new Set(['combined', 'strip', 'raft']);
 // Local duplicates of structuralDrawingKit.mjs's esc/dimensionLine/
 // hatchDefs — see this file's Step 17 header addendum for why. All three
 // verified functionally identical to the kit's exported versions.
+// [Bugfix, this session] No real font metrics are available at SVG-
+// generation time — same limitation wrapText's own header already
+// documents for this file, applied here to a second problem. Used only
+// to size the RIGHT-side dimension-label gutter in renderSectionView
+// (see rightGutterPx there) against the two CENTERED labels
+// (cover=.../N Ø.. @ ..) that can otherwise reach into it on a small or
+// near-square footing — never to lay out real glyphs. 0.62 x font-size
+// per character is a generous average advance width for the Latin+
+// digit engineering strings this is ever called on (B=/D=/cover=/Ø/mm/
+// @only — never an Arabic phrase, which this file's own scriptPrefix
+// convention keeps on separate <text> lines specifically so a case like
+// this one never has to estimate Arabic glyph widths); slightly
+// over-wide is the safe direction for a gutter-clearance calculation,
+// under-wide is what caused the bug this exists to fix.
+function estimateTextWidthPx(str, fontSizePx = 15) {
+  return String(str).length * fontSizePx * 0.62;
+}
+
 function esc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// [This session] opts.script: set true ONLY when `label` carries a
+// translated phrase (dowel lap length, blinding thickness) rather than
+// pure engineering notation (B=/D=/cover=/mm/Ø, always Latin+digits by
+// convention regardless of lang — see this file's own header on that
+// point). Every pre-existing call site omits opts.script and keeps
+// rendering through .dim-label/defaultFontStack exactly as before —
+// this is a strictly additive branch, not a behavior change to any
+// existing caller. Needed because defaultFontStack puts Arial first:
+// this file's own renderFootingDiagramSVG comment documents that at
+// least one real SVG renderer (cairosvg) resolves a font-family list by
+// matching only the FIRST token and never falls back for a missing
+// glyph — an Arabic phrase under .dim-label would render as tofu there,
+// the identical bug Step 4 fixed for view-title/col-tag/cut-label/
+// sheet-title/sheet-caption. Those all use scriptFontStack; a label
+// this function draws should follow the same rule when it is one of
+// them, which opts.script now lets a caller declare.
+// [This session] opts.labelT: where along the line (0=start, 1=end,
+// default 0.5=exact center) the label sits. Every pre-existing call site
+// omits it, so midX/midY below reduce to the exact original (x1+x2)/2,
+// (y1+y2)/2 formula — mathematically identical, not just visually.
+// Needed for one specific new case: the blinding-footprint plan
+// dimension and the pre-existing footing plan dimension are concentric
+// rectangles, so their default-centered labels land on the IDENTICAL
+// midpoint regardless of how long either string is — found by actually
+// rendering the extras case to PNG and looking at it, not from the
+// coordinate math alone (see renderPlanView's own call for the fix).
+// [This session, revised] opts.script alone (previous paragraph) turned
+// out insufficient: rendering this file's own output to PNG (cairosvg +
+// real Noto Naskh Arabic, not assumed) showed that font is missing far
+// more than parentheses/dashes — it has no Latin LETTERS and no "="/":"
+// either. A single class on a string mixing "طول ربط أسياخ الانتظار"
+// with "= 600mm" tofus the ENTIRE thing under a non-fallback renderer,
+// not just the punctuation. opts.scriptPrefix is the actual fix: the
+// Arabic phrase and the Latin "= value" become two separate <tspan>s,
+// each with its OWN explicit class/font — correct regardless of whether
+// the renderer falls back through a font-family list at all, rather
+// than depending on it. opts.script (no prefix, one class on the whole
+// string) is left in place as a fallback path — nothing currently calls
+// it that way after this revision, but removing it serves no purpose
+// and widens the diff for no benefit.
+// [This session, revised again] The tspan-concatenation approach above
+// (opts.scriptPrefix as two <tspan> children of one <text>) turned out
+// to have the SAME class of problem one level down: rendering to PNG
+// showed the phrase and value tspans landing on TOP of each other
+// rather than flowing in sequence, even though each had its own correct
+// class/font. Root cause, confirmed by elimination (repositioning every
+// SURROUNDING element did nothing — the bug travels with the text
+// element itself): cairosvg/Pango does not implement multi-tspan flow
+// under text-anchor="end" + dir="rtl" the way the SVG spec describes:
+// un-positioned sibling tspans should continue inline from where the
+// previous one ended, but here both anchor independently at the same
+// point. Fix: two fully independent <text> elements (phrase above,
+// value below), each with its own x/y/anchor, no flow relationship for
+// a renderer to get wrong. Costs a second line of vertical space, which
+// every call site below now accounts for.
 function dimensionLine(x1, y1, x2, y2, label, opts = {}) {
   const orientation = opts.orientation || (Math.abs(x1 - x2) >= Math.abs(y1 - y2) ? 'h' : 'v');
   const tick = 6;
-  const midX = (x1 + x2) / 2, midY = (y1 + y2) / 2;
+  const t = opts.labelT != null ? opts.labelT : 0.5;
+  const midX = x1 + (x2 - x1) * t, midY = y1 + (y2 - y1) * t;
   const labelDx = orientation === 'h' ? 0 : -10;
   const labelDy = orientation === 'h' ? -6 : 4;
   const anchor = orientation === 'h' ? 'middle' : 'end';
-  return `
+  const lines = `
     <line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" class="dim-line"/>
     <line x1="${x1}" y1="${y1 - tick}" x2="${x1}" y2="${y1 + tick}" class="dim-tick"/>
-    <line x1="${x2}" y1="${y2 - tick}" x2="${x2}" y2="${y2 + tick}" class="dim-tick"/>
-    <text x="${midX + labelDx}" y="${midY + labelDy}" text-anchor="${anchor}" class="dim-label">${esc(label)}</text>`;
+    <line x1="${x2}" y1="${y2 - tick}" x2="${x2}" y2="${y2 + tick}" class="dim-tick"/>`;
+  if (opts.scriptPrefix) {
+    const px = midX + labelDx, py = midY + labelDy;
+    return `${lines}
+    <text x="${px}" y="${py - 9}" text-anchor="${anchor}" dir="rtl" class="dim-label-script">${esc(opts.scriptPrefix)}</text>
+    <text x="${px}" y="${py + 9}" text-anchor="${anchor}" class="dim-label">${esc(label)}</text>`;
+  }
+  const textClass = opts.script ? 'dim-label-script' : 'dim-label';
+  const dirAttr = opts.script ? ' dir="rtl"' : '';
+  return `${lines}
+    <text x="${midX + labelDx}" y="${midY + labelDy}" text-anchor="${anchor}"${dirAttr} class="${textClass}">${esc(label)}</text>`;
 }
 
+// [This session] Level marker (منسوب) — inverted triangle sitting on a
+// short horizontal line, matching the guide figure's own symbol for
+// calling out an elevation (used there for founding level and the
+// reinforced footing's own top face). `side` is about DRAWING position
+// (label extends further left or right of the marker), independent of
+// `lang` (RTL Arabic still reads naturally growing away from the
+// marker in either direction — only text-anchor changes, not the
+// underlying geometry).
+function levelMarker(x, y, label, lang, side) {
+  const halfLine = 15, triW = 9, triH = 13;
+  const labelClass = lang === 'ar' ? 'dim-label-script' : 'dim-label';
+  const dirAttr = lang === 'ar' ? ' dir="rtl"' : '';
+  const anchor = side === 'left' ? 'end' : 'start';
+  const labelX = side === 'left' ? x - halfLine - 6 : x + halfLine + 6;
+  return `
+    <line x1="${x - halfLine}" y1="${y}" x2="${x + halfLine}" y2="${y}" class="level-line"/>
+    <path d="M${x - triW / 2},${(y - triH).toFixed(2)} L${x + triW / 2},${(y - triH).toFixed(2)} L${x},${y} Z" class="level-marker"/>
+    <text x="${labelX}" y="${y - 4}" text-anchor="${anchor}"${dirAttr} class="${labelClass}">${esc(label)}</text>`;
+}
+
+// [This session] Column/confinement tie mark — 3 segments (one main
+// line + two end-cap hashes), same visual structure
+// structuralDrawingDxfKit.mjs's tieTickHDXF documents for the real
+// tieTickH() in structuralDrawingKit.mjs (the SVG kit). NOT imported
+// from that kit: the kit file itself was not available in this session
+// to confirm tieTickH()'s actual parameter order/signature against, and
+// guessing one wrong would silently draw something-shaped-like-a-tie at
+// runtime rather than fail loudly — worse than a known, flagged local
+// duplicate. This is exactly the same "local copy, kit import deferred"
+// tradeoff this file's own Step 17 header addendum already documents
+// for esc/dimensionLine/hatchDefs, extended here to a fourth function
+// for the same reason. Capped end-cap length (not proportional to
+// anything) — a tie tick is a schematic mark, not a to-scale hoop bend.
+function tieTick(xLeftPx, xRightPx, yPx, capPx = 5) {
+  return `
+    <line x1="${xLeftPx}" y1="${yPx}" x2="${xRightPx}" y2="${yPx}" class="tie-tick"/>
+    <line x1="${xLeftPx}" y1="${yPx - capPx}" x2="${xLeftPx}" y2="${yPx + capPx}" class="tie-tick"/>
+    <line x1="${xRightPx}" y1="${yPx - capPx}" x2="${xRightPx}" y2="${yPx + capPx}" class="tie-tick"/>`;
+}
+
+// [This session — column main bars] A standard drafting "break" mark
+// (two opposed zigzags) meaning "this element continues past this
+// point, not drawn to its real extent" — the SAME convention the
+// generic (no-numbers) path's own gBreakSymbol() already draws for the
+// identical reason, ported here as a section-view-local twin using this
+// path's own stroke class (column-outline's stroke color) rather than
+// gBreakSymbol's hardcoded '#1c2b3a', since the computed and generic
+// paths keep independent styling throughout this file (see this file's
+// header on tieTick being a local copy for the same kind of reason).
+function breakSymbol(cx, y, halfW) {
+  const x1 = cx - halfW - 4, x2 = cx + halfW + 4;
+  return `
+    <path d="M${x1},${y} L${x1 + 6},${y - 7} L${x1 + 14},${y + 7} L${x1 + 22},${y - 7} L${x1 + 30},${y}
+      M${x2 - 30},${y} L${x2 - 22},${y - 7} L${x2 - 14},${y + 7} L${x2 - 6},${y - 7} L${x2},${y}"
+      fill="none" stroke="#1a1a1a" stroke-width="1.4"/>`;
+}
+
+// [This session — visual-style pass] Recolored/reshaped to match the
+// ECP 203 detailing-guide figure's own actual rendering (شكل ٢-١٦),
+// confirmed against a color scan, not the black-and-white one used
+// earlier: RC gets a stipple/dot fill (the guide draws reinforced
+// concrete as dots-on-gray, not diagonal hatch lines).
+// [Bugfix, this session round 5 — reviewer feedback, supersedes the PC
+// claim above] "هل لديك القدرة على وضع تهشير للخرسانة العادية؟ تهشير
+// الخرسانة العادية مختلف تماماً عن تهشير الخرسانة المسلحة" — PC
+// (plainConcreteHatch) was flat solid PC_FILL with no line texture at
+// all, on the theory above that the guide figure draws it that way.
+// Explicit, current, on-the-actual-render feedback overrides that
+// undocumented color-scan claim from a prior session this file has no
+// way to re-verify. PC now keeps the same light PC_FILL background
+// (still visually "concrete-family", not a different material) but
+// gains sparse diagonal line hatching — and at rotate(135), the
+// OPPOSITE diagonal from soilHatch's rotate(45) just above, not merely
+// a different color, since blinding sits directly adjacent to soil in
+// this drawing and an opposite angle keeps the two unmistakable at a
+// glance even before reading either one's color.
+// [Second half of the same bug] Defining the pattern correctly was not
+// sufficient on its own: `fill="url(#plainConcreteHatch)"` was already
+// present on both `<rect class="blinding-outline">` elements (plan
+// projection ring, section band) BEFORE this fix, but .blinding-outline
+// in the <style> block below carried `fill:none` — an SVG presentation
+// attribute is lower specificity than a CSS class rule from a <style>
+// element, so that stylesheet rule was silently winning and suppressing
+// whatever the rect's own fill attribute said, pattern or otherwise.
+// Fixed by dropping fill:none from .blinding-outline itself (see that
+// rule, further down) — the attribute alone was never going to work
+// while the class kept overriding it, regardless of what the pattern
+// contained.
+// [Bugfix, this session round 6 — reviewer feedback, supersedes round 5's
+// diagonal-line version above] "هذا التهشير يستخدم للخرسانة المسلحة
+// وليس العادية. تهشير الخرسانة العادية مختلف. انظر للرسم" — round 5's
+// rotate(135) diagonal lines were themselves wrong, not just the earlier
+// flat fill: per the newly-supplied reference figure, plain/blinding
+// concrete is a dense irregular AGGREGATE SPECKLE texture (small dark
+// dots scattered at non-grid-aligned positions), and diagonal line
+// hatching reads as the REINFORCED-concrete convention instead in that
+// same reference. plainConcreteHatch below is redesigned to that
+// speckle look: 8 small circles at deliberately uneven (not evenly
+// spaced/grid-aligned) positions within one 8x8 tile, two close-but-
+// distinct dark grays (#333/#444) for a bit of visual noise rather than
+// one flat dot color — the same repeating-tile-with-irregular-placement
+// technique standard CAD hatch libraries use for a "concrete aggregate"
+// swatch, since a true non-repeating random texture is not something an
+// SVG <pattern> (inherently one tile, tiled identically) can produce.
+// Left deliberately denser/smaller (8x8, r 0.4-0.55) than concreteHatch's
+// own 9x9/r-0.85 two-dot tile just above, so the two stay visually
+// distinct at a glance and not just "the same dot idea, different
+// count" — concreteHatch's own regular two-dot repeat is UNCHANGED by
+// this fix; nothing in this round's feedback was about how reinforced
+// concrete looks, only about plain concrete needing to look different
+// from it, which it already did before this round in a different way
+// (flat vs diagonal-hatched) and does again now (regular two-dot repeat
+// vs irregular eight-speck repeat).
 function hatchDefs() {
   return `
     <pattern id="soilHatch" width="10" height="10" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
       <line x1="0" y1="0" x2="0" y2="10" stroke="#8a7350" stroke-width="1.4"/>
     </pattern>
-    <pattern id="concreteHatch" width="8" height="8" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
-      <line x1="0" y1="0" x2="0" y2="8" stroke="#9aa0a6" stroke-width="1"/>
+    <pattern id="concreteHatch" width="9" height="9" patternUnits="userSpaceOnUse">
+      <rect width="9" height="9" fill="${RC_FILL_BG}"/>
+      <circle cx="2.25" cy="2.25" r="0.85" fill="${RC_FILL_DOT}"/>
+      <circle cx="6.75" cy="6.75" r="0.85" fill="${RC_FILL_DOT}"/>
+    </pattern>
+    <pattern id="plainConcreteHatch" width="8" height="8" patternUnits="userSpaceOnUse">
+      <rect width="8" height="8" fill="${PC_FILL}"/>
+      <circle cx="1.2" cy="1.5" r="0.5" fill="#333"/>
+      <circle cx="4.5" cy="0.8" r="0.4" fill="#444"/>
+      <circle cx="6.8" cy="2.3" r="0.55" fill="#333"/>
+      <circle cx="2.7" cy="3.8" r="0.45" fill="#444"/>
+      <circle cx="6" cy="5" r="0.5" fill="#333"/>
+      <circle cx="0.8" cy="6.2" r="0.4" fill="#444"/>
+      <circle cx="3.8" cy="6.8" r="0.55" fill="#333"/>
+      <circle cx="7" cy="7.2" r="0.4" fill="#444"/>
     </pattern>`;
 }
 
@@ -1017,75 +1252,168 @@ function renderPlanView(geometry, scale, lang) {
   const wPx = plan.longMM * scale, hPx = plan.shortMM * scale;
 
   let svg = `<g class="plan-view">`;
-  svg += `<rect x="${originX}" y="${originY}" width="${wPx}" height="${hPx}" class="footing-outline"/>`;
 
-  // Reinforcement mesh — lines only in plan (real bar count/spacing, not
-  // decorative): bars running the long way, spaced across the short
-  // axis == geometry.section.barCentersMM (the same set the section view
-  // draws as circles — one source of truth for that direction).
-  for (const cMM of geometry.section.barCentersMM) {
-    const y = originY + cMM * scale;
-    svg += `<line x1="${originX + 2}" y1="${y}" x2="${originX + wPx - 2}" y2="${y}" class="mesh-line"/>`;
+  // [This session] Blinding (plain concrete) footprint — drawn BEHIND the
+  // reinforced-footing outline below, offset outward by the caller's own
+  // blinding.projectionMM on all four sides. Matches the guide figure's
+  // own plan view, which dimensions the plain-concrete footprint
+  // (طول/عرض القاعدة العادية) as a distinct, wider outline around the
+  // reinforced footing's own footprint (طول/عرض القاعدة المسلحة) — not a
+  // single outline, the way this drawing's plan view was before this
+  // group existed.
+  if (geometry.blinding) {
+    const projPx = geometry.blinding.projectionMM * scale;
+    const bx = originX - projPx, by = originY - projPx;
+    const bw = wPx + 2 * projPx, bh = hPx + 2 * projPx;
+    svg += `<rect x="${bx}" y="${by}" width="${bw}" height="${bh}" class="blinding-outline" fill="url(#plainConcreteHatch)"/>`;
+    // [This session] NOT a second stacked dimensionLine, unlike the B
+    // (vertical) case just below: PLAN_BOX leaves roughly 45px between
+    // the plan view's own top edge and the sheet title, which the ONE
+    // pre-existing L-dimension already uses nearly all of — a second
+    // stacked horizontal dimension line has no headroom left at any
+    // offset and collides with the title regardless (found by rendering
+    // to PNG). A left-anchored corner label needs no extra vertical band
+    // of its own, so it sidesteps the headroom limit instead of fighting
+    // it.
+    // [This session] L folded into the SAME vertical-dimension label as
+    // B, not a separate stacked horizontal line of its own: PLAN_BOX
+    // leaves too little room between the plan view's own top edge and
+    // the sheet title for a second horizontal dimension line at ANY
+    // offset (found by rendering to PNG — labelT only shifts a label
+    // ALONG its own line, which does nothing for a collision on the
+    // cross-axis). The vertical B-dimension had genuine room once
+    // de-centered (labelT: 0.68, below), so both values ride on it.
+    // [This session] Projection alone, not a combined "L=..., B=..."
+    // string: that longer form, with an internal comma, broke tspan
+    // positioning under cairosvg (found by rendering to PNG — both
+    // tspans landed stacked at the same X instead of flowing in
+    // sequence), even though the identical scriptPrefix/label split
+    // works correctly for the shorter labels just below. Projection is
+    // the one new fact this outline doesn't already show on its own;
+    // the outer L/B are visible from its drawn proportions.
+    svg += dimensionLine(
+      bx - 46, by, bx - 46, by + bh,
+      lang === 'ar' ? `= ${fmt(geometry.blinding.projectionMM, geometry.unit, 0)}` : `${translate('blindingProjection', lang)} = ${fmt(geometry.blinding.projectionMM, geometry.unit, 0)}`,
+      { orientation: 'v', scriptPrefix: lang === 'ar' ? translate('blindingProjection', lang) : undefined, labelT: 0.68 },
+    );
   }
-  // Bars running the short way: spaced across the long axis at the same
-  // nominal spacing (independent count derived the same way, but not the
-  // section's job to track — computed inline here since it's plan-only).
+
+  svg += `<rect x="${originX}" y="${originY}" width="${wPx}" height="${hPx}" class="footing-outline" fill="url(#concreteHatch)"/>`;
+
+  // [Bugfix, this session round 7 — reviewer feedback] "حديد الشبكة في
+  // المسقط الأفقي، قم بإزالته، واكتفِ فقط برسم الحديد المرسوم بالمسقط
+  // الأفقي الموضح [بالمرجع]" — this used to loop every barCentersMM
+  // position in BOTH directions, drawing a full literal N x M grid (for
+  // this file's own 12 Ø16 @ 153mm running example, a dense 12-line by
+  // several-line mesh). The reference figure's own plan view is
+  // schematic, not literal: only the OUTERMOST bar in each direction is
+  // drawn, each with its own hooked ends bent 90 deg IN-PLANE toward the
+  // interior — the reference's rounded-corner "frame" look is two
+  // straight bars' hook returns landing close together at each corner,
+  // not one continuous loop or a real mesh. Interior bars are not drawn
+  // individually at all: the section view's own "N Ø D @ S" callout and
+  // the summary table already carry the real count/spacing, so
+  // redrawing every one of them here a second time was pure duplication,
+  // not information the plan view uniquely provided.
+  // [Bugfix, this session round 9 — reviewer feedback, extends round 8]
+  // "ما مشكلتك في أن تصنع مثل هذا تماماً" — a closer crop of the same
+  // reference shows the outer hooked bar is NOT alone at each edge: a
+  // second, PLAIN (unhooked) bar runs immediately alongside it, and a
+  // bar-spec label ("تسليح طولي * <spacing>") sits next to that pair —
+  // round 7/8 only ever drew the single outer hooked bar per direction.
+  // innerLongYs/innerTransXs below are the REAL second-bar-from-each-edge
+  // positions already present in barCentersMM/the transverse count this
+  // block computes anyway — not a second invented offset — so the inner
+  // line lands exactly where that actual bar sits, not at an arbitrary
+  // schematic gap from the outer one. Guarded (length > 2 / count > 2)
+  // so a footing with too few bars to HAVE a distinct second position
+  // does not draw the same line twice on top of itself.
+  const planHookLegPx = Math.max(MIN_PLAN_HOOK_PX, (geometry.section.depthMM - 2 * geometry.section.coverMM) * scale);
   {
-    const xs = computeTransverseXPositionsMM(plan.longMM, geometry.meta.cover, geometry.meta.dia, geometry.meta.spacingLong ?? geometry.meta.spacing);
-    for (const posMM of xs) {
-      const x = originX + posMM * scale;
-      svg += `<line x1="${x}" y1="${originY + 2}" x2="${x}" y2="${originY + hPx - 2}" class="mesh-line"/>`;
+    const centers = geometry.section.barCentersMM;
+    const outerYs = [centers[0], centers[centers.length - 1]].map((cMM) => originY + cMM * scale);
+    for (const y of outerYs) {
+      const x1 = originX + 2, x2 = originX + wPx - 2;
+      const tickDir = y < originY + hPx / 2 ? 1 : -1; // bend toward the interior
+      const yTick = (y + tickDir * planHookLegPx).toFixed(2);
+      svg += `<path d="M${x1},${yTick} L${x1},${y.toFixed(2)} L${x2},${y.toFixed(2)} L${x2},${yTick}" fill="none" class="mesh-line"/>`;
     }
-  }
-
-  // [Step 20] Top mesh, both directions — the plan-view counterpart of
-  // the section's existing top-mesh layer (Step 14.3). Only drawn when
-  // `mesh` was supplied. Dashed + blue (.bar-top/.bar-dot-top, added to
-  // this file's own <style> block below) rather than reusing .mesh-line:
-  // in SECTION, position alone (inset from the top face) already tells
-  // top from bottom apart, which is why Step 14.3 could reuse one color
-  // there — but a top-down PLAN view has no position cue at all (top and
-  // bottom bars project onto the exact same plane), so color/dash is the
-  // only honest way to keep the two layers visually distinguishable here.
-  // Long-way (top longitudinal) reuses geometry.mesh.barCentersMM
-  // exactly as the bottom layer above reuses geometry.section's — one
-  // source of truth per layer. Short-way (top transverse) is derived
-  // inline the same way the bottom layer's own short-way block just did,
-  // against geometry.mesh's own dia/spacing instead of geometry.meta's.
-  if (geometry.mesh) {
-    for (const cMM of geometry.mesh.barCentersMM) {
-      const y = originY + cMM * scale;
-      svg += `<line x1="${originX + 2}" y1="${y}" x2="${originX + wPx - 2}" y2="${y}" class="bar-top" stroke-dasharray="6,3"/>`;
-    }
-    const xs = computeTransverseXPositionsMM(plan.longMM, geometry.meta.cover, geometry.mesh.diaMM, geometry.mesh.spacingMM);
-    for (const posMM of xs) {
-      const x = originX + posMM * scale;
-      svg += `<line x1="${x}" y1="${originY + 2}" x2="${x}" y2="${originY + hPx - 2}" class="bar-top" stroke-dasharray="6,3"/>`;
-    }
-  }
-
-  // [Step 20] Concentration band(s) — ADDITIVE transverse bars inside
-  // each column's own band zone, plus a dashed boundary marking the zone
-  // itself (same visual device the pedestal footprint overlay above
-  // already uses for "this outline marks an extent, not a poured edge").
-  // Bold red (.band-outline/.mesh-line-band) rather than a new hue: this
-  // is still bottom-family transverse steel, just concentrated — a new
-  // color would visually suggest an unrelated element the way this kit's
-  // other hues each do (green=ties, purple=wall-horizontal, teal=
-  // movement-joint dowels — see structuralDrawingDxfKit.mjs's own LAYERS
-  // comments), which concentrated bottom steel is not. See
-  // computeBandGeometry's own header for why these bars are additive,
-  // never a replacement for the field mesh drawn above.
-  if (geometry.band) {
-    for (const zone of geometry.band.zones) {
-      const xStart = originX + zone.startMM * scale;
-      const xEnd = originX + zone.endMM * scale;
-      svg += `<rect x="${xStart}" y="${originY}" width="${xEnd - xStart}" height="${hPx}" class="band-outline"/>`;
-      for (const cMM of zone.barCentersMM) {
-        const x = originX + cMM * scale;
-        svg += `<line x1="${x}" y1="${originY + 2}" x2="${x}" y2="${originY + hPx - 2}" class="mesh-line-band"/>`;
+    if (centers.length > 2) {
+      const innerYs = [centers[1], centers[centers.length - 2]].map((cMM) => originY + cMM * scale);
+      for (const y of innerYs) {
+        svg += `<line x1="${originX + 2}" y1="${y.toFixed(2)}" x2="${originX + wPx - 2}" y2="${y.toFixed(2)}" class="mesh-line"/>`;
       }
+      const labelStr = `${centers.length} \u00d8${fmt(geometry.section.diaMM, geometry.unit, 0)} @ ${fmt(geometry.section.actualSpacingMM, geometry.unit, 0)}`;
+      svg += `<text x="${originX + wPx / 2}" y="${(innerYs[1] + 16).toFixed(2)}" text-anchor="middle" class="dim-label">${esc(labelStr)}</text>`;
     }
+  }
+  {
+    const env = plan.longMM - 2 * geometry.meta.cover - geometry.meta.dia;
+    const spacingLong = geometry.meta.spacingLong ?? geometry.meta.spacing;
+    const count = Math.max(2, Math.floor(env / spacingLong) + 1);
+    const first = geometry.meta.cover + geometry.meta.dia / 2;
+    const last = plan.longMM - geometry.meta.cover - geometry.meta.dia / 2;
+    const step = count > 1 ? (last - first) / (count - 1) : 0;
+    const outerMM = count > 1 ? [first, last] : [plan.longMM / 2];
+    for (const posMM of outerMM) {
+      const x = originX + posMM * scale;
+      const y1 = originY + 2, y2 = originY + hPx - 2;
+      const tickDir = x < originX + wPx / 2 ? 1 : -1; // bend toward the interior
+      const xTick = (x + tickDir * planHookLegPx).toFixed(2);
+      svg += `<path d="M${xTick},${y1} L${x.toFixed(2)},${y1} L${x.toFixed(2)},${y2} L${xTick},${y2}" fill="none" class="mesh-line"/>`;
+    }
+    if (count > 2) {
+      const innerMM = [first + step, last - step];
+      const innerXs = innerMM.map((posMM) => originX + posMM * scale);
+      for (const x of innerXs) {
+        svg += `<line x1="${x.toFixed(2)}" y1="${originY + 2}" x2="${x.toFixed(2)}" y2="${originY + hPx - 2}" class="mesh-line"/>`;
+      }
+      // BUGFIX [PLAN-LONGAXIS-LABEL-SPACING]: was `fmt(spacingLong, ...)`,
+      // the raw nominal/target spacing straight from the input -- not what
+      // distributeCenters' even-distribution actually produced (`step`,
+      // the exact long-axis analogue of the short axis's own
+      // actualSpacingMM, used correctly in labelStr just above). For a
+      // square footing (longMM === shortMM) both axes run the identical
+      // formula on identical inputs, so they must produce identical actual
+      // spacing -- yet this label showed the untouched nominal value
+      // (e.g. "150mm") while the short-axis label a few lines up showed
+      // the real distributed value (e.g. "153mm") for the SAME footing,
+      // visibly contradicting a drawing that is actually symmetric.
+      // Violates this file's own "no number you can't defend" rule (see
+      // the computeFootingExtras header comment on the same principle):
+      // `step` is what the bars above are actually drawn at; `spacingLong`
+      // is only ever the pre-distribution target.
+      const labelStr2 = `${count} \u00d8${fmt(geometry.meta.dia, geometry.unit, 0)} @ ${fmt(step, geometry.unit, 0)}`;
+      svg += `<text x="${(innerXs[1] - 12).toFixed(2)}" y="${originY + hPx / 2}" text-anchor="middle" class="dim-label" transform="rotate(-90 ${(innerXs[1] - 12).toFixed(2)} ${originY + hPx / 2})">${esc(labelStr2)}</text>`;
+    }
+  }
+
+  // [This session] Grid centerlines (محاور) — dash-dot, extending past
+  // the outermost drawn footprint (blinding's, if present, else the
+  // reinforced footing's) on all four sides, matching the guide
+  // figure's own plan-view convention exactly: the horizontal axis gets
+  // an open (unfilled) circle at BOTH ends; the vertical axis gets one
+  // ONLY at the bottom end, not the top (confirmed against the source
+  // description, not guessed for symmetry). Drawn through each column's
+  // own center — for isolated (exactly one column) this reduces to the
+  // single cross through the middle the figure shows; combined/strip/
+  // raft draw one per column, which overlap into a shared line wherever
+  // those columns share an axis (harmless, not deduplicated — a lower
+  // priority than getting isolated right, out of scope for this pass).
+  {
+    const clMargin = 40;
+    const projPx = geometry.blinding ? geometry.blinding.projectionMM * scale : 0;
+    const oLeft = originX - projPx - clMargin, oRight = originX + wPx + projPx + clMargin;
+    const oTop = originY - projPx - clMargin, oBottom = originY + hPx + projPx + clMargin;
+    plan.columns.forEach((col) => {
+      const cx = originX + col.centerLongMM * scale;
+      const cy = col.centerShortMM != null ? originY + col.centerShortMM * scale : originY + hPx / 2;
+      svg += `<line x1="${oLeft}" y1="${cy}" x2="${oRight}" y2="${cy}" class="centerline"/>`;
+      svg += `<line x1="${cx}" y1="${oTop}" x2="${cx}" y2="${oBottom}" class="centerline"/>`;
+      svg += `<circle cx="${oLeft}" cy="${cy}" r="8" class="centerline-dot"/>`;
+      svg += `<circle cx="${oRight}" cy="${cy}" r="8" class="centerline-dot"/>`;
+      svg += `<circle cx="${cx}" cy="${oBottom}" r="8" class="centerline-dot"/>`;
+    });
   }
 
   // Columns
@@ -1133,33 +1461,8 @@ function renderPlanView(geometry, scale, lang) {
     svg += `<text x="${cx}" y="${originY - 18}" text-anchor="middle" class="cut-label">${cutLetter}</text>`;
     svg += `<text x="${cx}" y="${originY + hPx + 28}" text-anchor="middle" class="cut-label">${cutLetter}</text>`;
   }
-  // [Step 21] Second marker for the new PRIMARY longitudinal section —
-  // horizontal, through the column centerline (B/2), spanning past both
-  // edges the same way the vertical marker above spans past top/bottom.
-  // Numeral '1', not a translated letter: digits are Latin-by-convention
-  // regardless of `lang` throughout this file (same rule bar counts/
-  // B=/L=/D=/cover= already follow), and a numeral cut label is exactly
-  // what the Egyptian code guide's own قطاع رأس ١-١ uses for this type of
-  // cut (a plane through a column LINE), as distinct from the lettered
-  // A-A this file already uses for a plane through one column.
-  if (DUAL_SECTION_TYPES.has(geometry.type)) {
-    const cy = originY + hPx / 2;
-    svg += `<line x1="${originX - 14}" y1="${cy}" x2="${originX + wPx + 14}" y2="${cy}" class="cut-line"/>`;
-    svg += `<text x="${originX - 22}" y="${cy + 5}" text-anchor="middle" class="cut-label">1</text>`;
-    svg += `<text x="${originX + wPx + 22}" y="${cy + 5}" text-anchor="middle" class="cut-label">1</text>`;
-  }
 
-  // Overall dimensions. [Step 20] A stacked second dimension line here
-  // for the cover-inset ("reinforced-extent") measurement was tried and
-  // rejected after actually rendering it: at any spacing tight enough to
-  // fit this fixed-size plan box, the vertical pair's un-rotated text
-  // labels overlapped almost completely, and the horizontal pair crowded
-  // the sheet title on tall/narrow inputs. See renderFootingDiagramSVG's
-  // caption assembly below for where that same information (طول/عرض
-  // القاعدة المسلحة, matching the guide's own paired gross/net callout)
-  // is reported instead — as text, using the caption's own wrapText
-  // machinery, which already exists to solve exactly this class of
-  // collision rather than introducing a second, competing solution here.
+  // Overall dimensions
   svg += dimensionLine(originX, originY - 26, originX + wPx, originY - 26, `${plan.longLabel} = ${fmt(plan.longMM, geometry.unit, 2)}`, { orientation: 'h' });
   svg += dimensionLine(originX - 26, originY, originX - 26, originY + hPx, `${plan.shortLabel} = ${fmt(plan.shortMM, geometry.unit, 2)}`, { orientation: 'v' });
 
@@ -1168,322 +1471,463 @@ function renderPlanView(geometry, scale, lang) {
   return svg;
 }
 
-// Draws the vertical cut: soil hatch, footing body, the column/pedestal
-// stack rising from the footing top (real-scale pedestal when supplied,
-// else a fixed 90px decorative stub — see the Step 14.3 comment inline
-// below for why that split exists), dowel circles at the footing-top
-// interface when supplied, the bottom reinforcement layer (real
-// count/spacing from computeSectionGeometry), the optional top mesh
-// layer, and the depth/width/cover/bar-spec dimension callouts. Same
-// schematic-not-photographic scope as renderPlanView above.
-function renderSectionView(geometry, scale, lang, box = SECTION_BOX) {
+// Draws the vertical cut: blinding (when supplied) + soil hatch, footing
+// body, the column/pedestal stack rising from the footing top (real-
+// scale pedestal when supplied, else a fixed decorative stub — see the
+// Step 14.3 comment inline below for why that split exists, now sized
+// to also clear any real dowel-leg/tie extent — see this session's own
+// comment on stubH), column ties at the footing/column interface when
+// supplied, a bent dowel leg + hooked foot per dowel when supplied (not
+// just a row of circles — see this session's own comment inline), the
+// bottom reinforcement layer (real count/spacing from
+// computeSectionGeometry), the optional top mesh layer, and the depth/
+// width/cover/bar-spec/blinding-thickness/dowel-lap-length dimension
+// callouts. Same schematic-not-photographic scope as renderPlanView
+// above.
+function renderSectionView(geometry, scale, lang) {
   const { section } = geometry;
-  const originX = box.x + (box.w - section.widthMM * scale) / 2;
-  const baseY = box.y + box.h - 60; // leave room for soil hatch + labels below
+  const originX = SECTION_BOX.x + (SECTION_BOX.w - section.widthMM * scale) / 2;
+  const baseY = SECTION_BOX.y + SECTION_BOX.h - 60; // leave room for soil hatch + labels below — footing's own bottom face
   const topY = baseY - section.depthMM * scale;
   const wPx = section.widthMM * scale;
+  // [This session] Hoisted to the top of the function: barY (the bottom
+  // reinforcement layer's Y) used to sit right before the block that
+  // draws that layer; the new dowel foot below also anchors to it, so it
+  // is computed once, early, rather than duplicated.
+  // [Bugfix, this session — reviewer feedback round 2] coverPx factored
+  // out to a named constant (was inline in barY's own expression only):
+  // the bottom-bar hook legs now need the SAME cover-in-pixels value to
+  // compute where they stop at the TOP face (topY + coverPx — see that
+  // block below), and reusing this one value keeps "cover" meaning the
+  // same visual quantity everywhere it is drawn, rather than risking a
+  // second, differently-floored copy of the same concept.
+  const coverPx = Math.max(MIN_COVER_GAP_PX, section.coverMM * scale);
+  const barY = baseY - coverPx;
+  const sectionMidX = originX + wPx / 2;
 
   let svg = `<g class="section-view">`;
-  // Soil band under the footing
-  svg += `<rect x="${originX - 20}" y="${baseY}" width="${wPx + 40}" height="26" fill="url(#soilHatch)" stroke="#8a7350" stroke-width="1"/>`;
+
+  // [This session] Blinding (plain/lean concrete, سمك الخرسانة العادية)
+  // — a second material layer BELOW the structural footing, projecting
+  // outward by blinding.projectionMM on each side, distinct hatch
+  // (plainConcreteHatch) from the structural concreteHatch above it.
+  // Pushes the soil band down by the blinding's own thickness so the
+  // stacking order matches the guide figure's own (reinforced concrete,
+  // then plain concrete, then منسوب التأسيس/founding level at the soil
+  // interface) instead of soil sitting directly under the structural
+  // footing as it did before this group existed. blindPx is 0 (and
+  // soilTopY reduces to exactly baseY) whenever blinding is absent, so
+  // every position computed FROM soilTopY below is byte-identical to the
+  // pre-existing baseY-based expression in that case.
+  const blindPx = geometry.blinding ? geometry.blinding.thicknessMM * scale : 0;
+  const soilTopY = baseY + blindPx;
+  if (geometry.blinding) {
+    const projPx = geometry.blinding.projectionMM * scale;
+    svg += `<rect x="${originX - projPx}" y="${baseY}" width="${wPx + 2 * projPx}" height="${blindPx}" class="blinding-outline" fill="url(#plainConcreteHatch)"/>`;
+  }
+  // Soil band under everything
+  // [Bugfix, this session — reviewer feedback] "هذا يوحي بوجود خرسانه
+  // أسفل العاديه" — was `fill="url(#soilHatch)" stroke="#8a7350"
+  // stroke-width="1"`. A full 4-sided stroked rectangle reads as a
+  // defined material block regardless of which hatch pattern fills it —
+  // visually the same "bordered rectangle" language this file uses for
+  // every real concrete layer (.footing-outline/.blinding-outline both
+  // stroke+fill). Below the blinding is undifferentiated soil, not
+  // another engineered layer with a real thickness, so it should not
+  // share that visual language. Dropping the stroke keeps the hatch
+  // texture (there IS soil there, worth showing) without the enclosing
+  // border that implied a second concrete course — the less destructive
+  // of the two fixes suggested, keeping information the fully-removed
+  // option would lose.
+  svg += `<rect x="${originX - 20}" y="${soilTopY}" width="${wPx + 40}" height="26" fill="url(#soilHatch)"/>`;
   // Footing body
   svg += `<rect x="${originX}" y="${topY}" width="${wPx}" height="${section.depthMM * scale}" class="footing-outline" fill="url(#concreteHatch)"/>`;
 
+  // [This session] Level markers — see the guide figure's own placement:
+  // top-of-footing on the LEFT at the footing's own top face; founding
+  // level on the RIGHT at the founding surface (soilTopY — bottom of
+  // blinding when supplied, else the footing's own bottom; this already
+  // reduces correctly with or without geometry.blinding since soilTopY
+  // itself does).
+  svg += levelMarker(originX - 20, topY, translate('topFootingLevel', lang), lang, 'left');
+  // [Bugfix, this session round 3] foundingLevel's marker used to sit at
+  // a fixed originX+wPx+95 regardless of what the D/blinding-thickness
+  // gutter (rightGutterX, computed later in this function — see that
+  // block) actually needed. In English specifically, "Blinding
+  // Thickness = 100mm" is a much wider combined string than Arabic's
+  // short "= 100mm" value-only line (dimensionLine's scriptPrefix
+  // branch is Arabic-only — see that option's own header), so
+  // rightGutterX grows well past +95px whenever both an English render
+  // AND blinding are present, and the blinding label's own text (which
+  // extends LEFTWARD from rightGutterX by its own width) swept directly
+  // into "Founding Level" — confirmed by rendering the English
+  // full-extras case to PNG specifically (this had only ever been
+  // checked in Arabic before, where the short value-only line never
+  // reached far enough to collide). The call is DEFERRED to just after
+  // rightGutterX is computed (same visual result — SVG paint order does
+  // not affect two non-overlapping-by-position elements like this one
+  // and the column/dowel/tie group drawn in between) rather than moving
+  // rightGutterX's whole computation block earlier, to keep this a
+  // small, isolated relocation instead of restructuring an
+  // already-verified block.
+
   // [Step 14.3] Column/pedestal stack rising from the footing top.
-  // Default (no pedestal): a single FIXED 90px decorative stub, exactly
-  // as before Step 14 — it was never drawn to scale (this module is
-  // never given a real column height), just a "the column continues
-  // here" cue. When a pedestal IS supplied, its width/height are real
-  // user inputs and ARE drawn to this section's real `scale`, with a
-  // short fixed decorative stub above it so the stack still reads as
+  // Default (no pedestal): a single decorative stub, exactly as before
+  // Step 14 in the common case — it was never drawn to scale (this
+  // module is never given a real column height), just a "the column
+  // continues here" cue. When a pedestal IS supplied, its width/height
+  // are real user inputs and ARE drawn to this section's real `scale`,
+  // with a short decorative stub above it so the stack still reads as
   // "column continues out of the pedestal" — see خطة_تجزئة_الخطوة_14.md
   // ("دمج البرمة مع رسم العمود المستمر"). Known, documented limitation:
   // PLAN_BOX/SECTION_BOX are fixed screen regions, not re-fitted around
   // pedestal height, so a pedestal tall relative to `scale` can visually
   // approach the plan view above — the same "representative, not a
   // layout solver" limitation this file already accepted for the fixed
-  // 90px stub, now reachable by a much wider range of real inputs.
+  // stub, now reachable by a much wider range of real inputs.
+  //
+  // [This session] stubH additionally clears whichever of the dowel
+  // leg's real height (dowels.projectionMM, measured from topY — a
+  // dowel pierces the pedestal on its way from footing to column, so
+  // its own reference point never moves) or the tie stack's real extent
+  // (ties.offsetsMM's last entry, measured from tieRefY — ties confine
+  // the COLUMN, so their reference point is pedTop, not topY, when a
+  // pedestal exists) is tallest, so neither is ever silently clipped by
+  // the old fixed-stub assumption. STUB_MARGIN_PX keeps a leg/tie ending
+  // exactly at the stub's own top edge from reading as truncated.
+  const dowelLegPx = geometry.dowels ? geometry.dowels.projectionMM * scale : 0;
+  const tieExtentPx = geometry.ties ? geometry.ties.offsetsMM[geometry.ties.offsetsMM.length - 1] * scale : 0;
+  const STUB_MARGIN_PX = 15;
+  // [This session] columnBars deliberately contributes NO term of its
+  // own to either stubH Math.max() below — see BREAK_SYMBOL_MARGIN_PX's
+  // own comment above for why growing the stub specifically for
+  // columnBars turned out to risk crowding the plan view on a realistic
+  // input. columnBars is drawn entirely within the headroom the dowel
+  // term already reserves (dowelLegPx + STUB_MARGIN_PX), which is
+  // always present whenever columnBars is (computeFootingExtras
+  // requires dowels alongside it).
+
   const colW = section.colWidthMM * scale;
   const colX = originX + wPx / 2 - colW / 2;
-  let colTop, dowelHostXPx, colSegBottomPx;
+  let colTop, dowelHostXPx, tieRefY;
   if (geometry.pedestal) {
     const pedWPx = geometry.pedestal.widthMM * scale;
     const pedHPx = geometry.pedestal.heightMM * scale;
     const pedX = originX + wPx / 2 - pedWPx / 2;
     const pedTop = topY - pedHPx;
     svg += `<rect x="${pedX}" y="${pedTop}" width="${pedWPx}" height="${pedHPx}" class="column-outline" fill="url(#concreteHatch)"/>`;
-    const stubH = 40; // fixed decorative "column continues" stub, same role the 90px default plays
+    const stubH = Math.max(40, dowelLegPx - pedHPx + STUB_MARGIN_PX, tieExtentPx + STUB_MARGIN_PX);
     colTop = pedTop - stubH;
     svg += `<rect x="${colX}" y="${colTop}" width="${colW}" height="${pedTop - colTop}" class="column-outline" fill="url(#concreteHatch)"/>`;
     dowelHostXPx = pedX;
-    colSegBottomPx = pedTop; // [Step 20] bottom edge of the drawn COLUMN segment (above the pedestal) — see the ties block below
+    tieRefY = pedTop;
   } else {
-    colTop = topY - 90;
+    const stubH = Math.max(90, dowelLegPx + STUB_MARGIN_PX, tieExtentPx + STUB_MARGIN_PX);
+    colTop = topY - stubH;
     svg += `<rect x="${colX}" y="${colTop}" width="${colW}" height="${topY - colTop}" class="column-outline" fill="url(#concreteHatch)"/>`;
     dowelHostXPx = colX;
-    colSegBottomPx = topY; // [Step 20] no pedestal — the column segment runs straight down to the footing top
+    tieRefY = topY;
   }
 
-  // [Step 20] Column ties: representative horizontal tie ticks across
-  // the drawn COLUMN segment specifically (colTop..colSegBottomPx) —
-  // never the pedestal segment, in either branch above. A pedestal
-  // commonly ties differently from the column it carries (or not at
-  // all, by design), and this tool has no input telling it which — the
-  // column segment is the one member every combined/isolated/strip/raft
-  // section always draws unambiguously, pedestal or not, so it is the
-  // only one this schematic ties. `count` ticks are spread evenly across
-  // whatever height is actually drawn here (real when geometry.pedestal
-  // is absent and this is the full decorative stub, short when a
-  // pedestal is present — see the file-level Step 14.3 comment on why
-  // that stub itself is never to real scale) via this file's own
-  // distributeCenters() — reused here for a PIXEL range exactly as it is
-  // for MM ranges elsewhere in this file (the function is dimensionless
-  // arithmetic; naming its destructured result tieYsPx, not the
-  // function's own centersMM, keeps that reuse honest at the call site).
+  // [This session] Column ties (كانات العمود) — one 3-segment tick per
+  // offset in geometry.ties.offsetsMM, spanning the COLUMN's own width
+  // (not the pedestal's — the guide figure itself draws the pedestal as
+  // the enlarged, separately-detailed base, distinct from the column's
+  // own confinement steel), starting at tieRefY and marching up into the
+  // column. tieTick() is a LOCAL implementation, not a kit import — see
+  // that function's own comment for why (structuralDrawingKit.mjs, the
+  // SVG kit, was not available in this session to verify tieTickH()'s
+  // real signature against).
+  // [Bugfix, this session — reviewer feedback] Was tieTick(colX, colX +
+  // colW, y) — the tie drawn from the OUTER CONCRETE FACE on one side to
+  // the outer concrete face on the other. A real tie wraps the column's
+  // own longitudinal bars, not the concrete surface — it sits just
+  // outside the bar cage, itself covered by concrete, so its legs must
+  // stop at the bars' own X positions, not run all the way to the
+  // column face. Uses the SAME centersMM/dowelHostXPx geometry.dowels
+  // already provides (the column's outermost longitudinal bars are, by
+  // construction here, the outermost dowels — see computeFootingExtras'
+  // own columnBars comment on why the two positions are never allowed
+  // to disagree). computeFootingExtras validates ties independently of
+  // dowels, so a ties-without-dowels combination is possible even though
+  // it is not the common case this file's own guide-figure reference
+  // uses; the cover-based inset below is the fallback for exactly that
+  // combination — the best available proxy for "just inside the main
+  // bars" without a bar-position input to reference, not a fabricated
+  // constant.
+  let tieLeftX, tieRightX;
+  if (geometry.dowels && geometry.dowels.centersMM.length >= 2) {
+    const xs = geometry.dowels.centersMM.map((cMM) => dowelHostXPx + cMM * scale);
+    tieLeftX = Math.min(...xs);
+    tieRightX = Math.max(...xs);
+  } else {
+    const insetPx = section.coverMM * scale;
+    tieLeftX = colX + insetPx;
+    tieRightX = colX + colW - insetPx;
+  }
   if (geometry.ties) {
-    const tieInsetPx = 8; // keep the outermost ticks off the column's own top/bottom edges
-    const { centersMM: tieYsPx } = distributeCenters(colTop + tieInsetPx, colSegBottomPx - tieInsetPx, geometry.ties.count);
-    for (const y of tieYsPx) {
-      svg += tieTickH(colX, colX + colW, y);
+    for (const offMM of geometry.ties.offsetsMM) {
+      const y = tieRefY - offMM * scale;
+      svg += tieTick(tieLeftX, tieRightX, y);
     }
   }
 
-  // [Step 14.3] Dowels: one representative row of circles at the
-  // footing-top / column-or-pedestal-bottom interface (topY) — where
-  // real dowels start and project upward, per خطة_تجزئة_الخطوة_14.md
-  // ("dowels تُرسم كصف دوائر واحد ... عند أعلى القاعدة/أسفل البرمة").
-  // dowels.centersMM are already relative to the DOWEL HOST's own width
-  // envelope (computeDowelGeometry), so they map onto dowelHostXPx here
-  // — NOT onto originX/wPx, which is the full footing width and would
-  // misplace every dot when a pedestal narrower than the footing exists.
+  // [Step 14.3, extended this session] Dowels: a representative row of
+  // circles at the footing-top interface (topY), as before — PLUS (new)
+  // an actual bent-bar leg per dowel: a vertical run from the bottom bar
+  // layer (barY) up to topY - dowels.projectionMM (the real lap zone
+  // inside the column/pedestal), with a short hooked foot at the bottom
+  // bending away from the section's own centerline — same hook-direction
+  // convention genSectionIsolated's own gDowels() already uses on the
+  // generic (no-numbers) path below, reused here so the two paths read
+  // as the same family of drawing. Previously dowels.projectionMM was
+  // computed and reported in the Step 14.3 summary table but never
+  // actually drawn as geometry — a bare row of circles with no visible
+  // bar above or below them. dowels.centersMM are relative to the DOWEL
+  // HOST's own width envelope (computeDowelGeometry), so they map onto
+  // dowelHostXPx here — NOT onto originX/wPx, the full footing width,
+  // which would misplace every bar when a pedestal narrower than the
+  // footing exists (unchanged reasoning from before this session). The
+  // hook foot's length is a fixed illustrative convention
+  // (DOWEL_HOOK_FOOT_FACTOR), never labeled with a number — see that
+  // constant's own header comment.
+  // [Bugfix, this session round 4 — reviewer feedback] "ازل هذه الاسياخ
+  // الدائري... فلا معنى لها" — this loop used to also draw
+  // barDot(cx, topY, ..., 'dowel') for each dowel: a filled circle at
+  // the footing/column interface. Every dowel is ALREADY drawn as one
+  // continuous path (hook foot -> barY -> dowelLegTopY, immediately
+  // below) that passes straight through topY on its way up — topY is
+  // not where the bar starts, ends, or changes anything, just a point
+  // partway along a line already fully drawn. Unlike the bottom bar-dot
+  // row (a real cross-section: those bars run PERPENDICULAR to this
+  // cut, so a circle there depicts an actual cut face), a dowel runs
+  // PARALLEL to this cut — we see it in elevation, not cross-section —
+  // so a circle on top of its own already-visible line adds no
+  // information. Removed outright, not repositioned: there is no
+  // Y-coordinate where this mark WOULD mean something.
   if (geometry.dowels) {
+    const dowelLegTopY = topY - geometry.dowels.projectionMM * scale;
+    const hookFootPx = DOWEL_HOOK_FOOT_FACTOR * geometry.dowels.diaMM * scale;
     for (const cMM of geometry.dowels.centersMM) {
       const cx = dowelHostXPx + cMM * scale;
-      svg += barDot(cx, topY, geometry.dowels.diaMM, scale, 'dowel');
+      const hookDir = cx < sectionMidX ? -1 : 1;
+      svg += `<path d="M${(cx + hookDir * hookFootPx).toFixed(2)},${barY.toFixed(2)} L${cx.toFixed(2)},${barY.toFixed(2)} L${cx.toFixed(2)},${dowelLegTopY.toFixed(2)}" class="dowel-bar"/>`;
+    }
+    // One shared lap-length callout for the whole group (every dowel in
+    // it shares the same projectionMM) — anchored just left of the
+    // column, clear of the D=/B=/cover= callouts already on this view.
+    // This is the drawn, dimensioned counterpart of the Step 14.3
+    // summary table's existing dowelProjection column — same number,
+    // now also shown directly on the geometry it describes.
+    svg += dimensionLine(
+      colX - 24, topY, colX - 24, dowelLegTopY,
+      lang === 'ar' ? `= ${fmt(geometry.dowels.projectionMM, geometry.unit, 0)}` : `${translate('dowelLapLength', lang)} = ${fmt(geometry.dowels.projectionMM, geometry.unit, 0)}`,
+      { orientation: 'v', scriptPrefix: lang === 'ar' ? translate('dowelLapLength', lang) : undefined },
+    );
+
+    // [This session — column main bars / break symbol] The guide
+    // figure's own "١٦Φ" callout: the column's CONTINUING main
+    // longitudinal bars, straight (no hook — a hook belongs to the
+    // dowel's own bottom anchorage, already drawn above, not to a bar
+    // that keeps running), rising from the SAME dowel bend point
+    // (dowelLegTopY) up to a break symbol near the stub's own top edge.
+    // computeFootingExtras already guarantees geometry.dowels exists
+    // whenever geometry.columnBars does, so reusing dowels.centersMM/
+    // dowelHostXPx here (rather than recomputing an independent
+    // position set) is always safe, not an unchecked assumption.
+    if (geometry.columnBars) {
+      const breakY = colTop + BREAK_SYMBOL_MARGIN_PX;
+      for (const cMM of geometry.dowels.centersMM) {
+        const cx = dowelHostXPx + cMM * scale;
+        svg += `<line x1="${cx.toFixed(2)}" y1="${dowelLegTopY.toFixed(2)}" x2="${cx.toFixed(2)}" y2="${breakY.toFixed(2)}" class="dowel-bar"/>`;
+      }
+      svg += breakSymbol(sectionMidX, breakY, colW * 0.3);
+      svg += `<text x="${sectionMidX}" y="${(breakY - 10).toFixed(2)}" text-anchor="middle" class="dim-label">${geometry.dowels.count} \u00d8${fmt(geometry.columnBars.diaMM, geometry.unit, 0)}</text>`;
     }
   }
 
-  // Bottom reinforcement layer. The representative line is the TRANSVERSE
-  // direction (this section's cut is perpendicular to L, so transverse
-  // bars — running parallel to the cut plane — are seen in profile, one
-  // representative line; longitudinal bars — pierced by the cut plane —
-  // are seen end-on, as circles at their true across-B spacing).
-  // [Bug fix, found via review against the reference drawing] The two
-  // are two DIFFERENT bars crossing at that point, not one bar drawn
-  // twice — they cannot occupy the same point. Convention adopted here
-  // (documented, not derivable from these two reference images alone):
-  // transverse sits closest to the face (the shorter-span direction,
-  // conventionally placed outermost for maximum effective depth in that
-  // direction); longitudinal sits one bar-radius further toward
-  // mid-depth. The circles, not the line, move.
-  const barY = baseY - section.coverMM * scale;
-  svg += `<line x1="${originX + 8}" y1="${barY}" x2="${originX + wPx - 8}" y2="${barY}" class="mesh-line"/>`;
+  // Bottom reinforcement layer: representative Family-B line + Family-A
+  // bar circles at their true spacing/positions. (barY is now computed
+  // at this function's own top — see that declaration's comment.)
   const rPx = Math.max(MIN_BAR_PX_R, (section.diaMM / 2) * scale);
-  const barDotY = barY - rPx; // toward mid-depth from the bottom face = smaller SVG y
-  for (const cMM of section.barCentersMM) {
-    svg += `<circle cx="${originX + cMM * scale}" cy="${barDotY}" r="${rPx}" class="bar-dot"/>`;
-  }
+  // [Round 10, reverted this session] A single continuous line with a
+  // hook at both ends was briefly split into two separate L-shaped runs
+  // meeting near center — that was a misapplied fix: the feedback it was
+  // based on described PLAN-VIEW bar distribution (renderPlanView, see
+  // that function's own round 7-9 comments), not this section-view line.
+  // Restored to the original single run, byte-for-byte the same as
+  // before round 10 (originX+8 to originX+wPx-8, no gap, no split).
+  svg += `<line x1="${originX + 8}" y1="${barY}" x2="${originX + wPx - 8}" y2="${barY}" class="mesh-line"/>`;
+  // [Bugfix, this session — reviewer feedback round 2, replaces round 1's
+  // illustrative hook] "الأرجل تمتد لأعلى حتى منسوب الخرسانة المسلحة
+  // العلوي مطروح منه الكفر الخرساني" — round 1 drew a short, fixed-length
+  // illustrative tick (DOWEL_HOOK_FOOT_FACTOR x dia, the same convention
+  // used for the UNRELATED dowel hook). That was wrong in kind, not just
+  // degree: this leg's height is not illustrative at all — it is a real,
+  // fully-determined quantity, the clear run between the bottom bar level
+  // and the top face minus its own cover, same idea as barY's own offset
+  // from the BOTTOM face, mirrored at the top. legTopY replaces the old
+  // capped bottomHookLegPx entirely. Math.min guards only the pathological
+  // case (D too shallow for cover top AND bottom to both fit) from
+  // inverting the line — not a stylistic cap, a last-resort guard.
+  const legTopY = Math.min(topY + coverPx, barY - 4);
+  // [Bugfix, this session — reviewer feedback round 2] "دوائر التسليح
+  // العرضي مازالت مرسومة على سنترلاين الخط، والمفروض ترحل بقيمة القطر
+  // على 2 لأعلى وللجوانب للداخل" — the circles (bars running PERPENDICULAR
+  // to this cut, i.e. cut cross-section) and the two L-shaped runs above
+  // (the bar running PARALLEL to this cut) are two DIFFERENT physical
+  // bars that cross and stack, not one bar drawn twice. The line's layer
+  // sits first (lower, at barY, touching the chairs); the circles' layer
+  // sits on top of it, so its centers belong one (rendered) radius higher
+  // — dotY, not barY. The two EDGE circles additionally shift inward by
+  // that same radius: their unshifted X exactly coincides with the
+  // line-layer's own hook-leg X (both come from the same barCentersMM
+  // entry), and since the two are now different bars stacked rather than
+  // one bar drawn once, they should not sit exactly on top of one
+  // another at the edge either. Interior circles keep their X — only the
+  // vertical (all circles) and the edge horizontal (first/last only)
+  // shifts are asked for.
+  const dotY = barY - rPx;
+  const lastBarIdx = section.barCentersMM.length - 1;
+  const edgeIndices = new Set([0, lastBarIdx]);
+  section.barCentersMM.forEach((cMM, i) => {
+    const lineX = originX + cMM * scale; // the longitudinal/line layer's own X — unshifted
+    if (edgeIndices.has(i)) {
+      svg += `<line x1="${lineX.toFixed(2)}" y1="${barY.toFixed(2)}" x2="${lineX.toFixed(2)}" y2="${legTopY.toFixed(2)}" class="mesh-line"/>`;
+    }
+    let dotX = lineX;
+    if (i === 0) dotX += rPx;
+    else if (i === lastBarIdx) dotX -= rPx;
+    svg += `<circle cx="${dotX.toFixed(2)}" cy="${dotY.toFixed(2)}" r="${rPx}" class="bar-dot"/>`;
+  });
 
-  // [Step 14.3, restyled at Step 20] Independent top mesh layer
-  // (interpretation A resolved in خطة_تجزئة_الخطوة_14.md's "سؤال مفتوح"
-  // — see computeMeshLayer's own header). Originally reused the bottom
-  // layer's .mesh-line/.bar-dot classes, distinguished only by POSITION
-  // — safe while this layer was section-only, since position alone tells
-  // top from bottom apart there. Step 20 gives this same layer a plan-
-  // view presence too (renderPlanView above), where position carries NO
-  // such information (a top-down view collapses top/bottom onto the same
-  // plane) — so this section view is switched onto the SAME .bar-top/
-  // .bar-dot-top classes the plan view now uses, for one consistent
-  // color per layer across both views on one sheet, not two different
-  // conventions for the same physical bars. Gated on geometry.mesh
-  // exactly as before, so this is invisible whenever that extra is
-  // absent.
+  // [Step 14.3] Independent top mesh layer (interpretation A resolved in
+  // خطة_تجزئة_الخطوة_14.md's "سؤال مفتوح" — see computeMeshLayer's own
+  // header). Reuses the existing bottom layer's .mesh-line/.bar-dot
+  // classes rather than inventing a second color convention this file
+  // has never needed before; distinguished from the bottom layer by
+  // POSITION (inset from the footing's TOP face by the same cover) not
+  // by color.
   if (geometry.mesh) {
     const meshY = topY + section.coverMM * scale;
-    svg += `<line x1="${originX + 8}" y1="${meshY}" x2="${originX + wPx - 8}" y2="${meshY}" class="bar-top"/>`;
+    svg += `<line x1="${originX + 8}" y1="${meshY}" x2="${originX + wPx - 8}" y2="${meshY}" class="mesh-line"/>`;
     const rPxMesh = Math.max(MIN_BAR_PX_R, (geometry.mesh.diaMM / 2) * scale);
-    const meshDotY = meshY + rPxMesh; // toward mid-depth from the top face = larger SVG y
     for (const cMM of geometry.mesh.barCentersMM) {
-      svg += `<circle cx="${originX + cMM * scale}" cy="${meshDotY}" r="${rPxMesh}" class="bar-dot-top"/>`;
+      svg += `<circle cx="${originX + cMM * scale}" cy="${meshY}" r="${rPxMesh}" class="bar-dot"/>`;
     }
   }
 
-  // Dimensions: depth, width, cover, bar spec
-  svg += dimensionLine(originX + wPx + 40, topY, originX + wPx + 40, baseY, `D = ${fmt(section.depthMM, geometry.unit, 2)}`, { orientation: 'v' });
-  svg += dimensionLine(originX, baseY + 46, originX + wPx, baseY + 46, `${section.widthMM === geometry.meta.B ? 'B' : geometry.plan.shortLabel} = ${fmt(section.widthMM, geometry.unit, 2)}`, { orientation: 'h' });
+  // Dimensions: depth, [blinding thickness], width, cover, bar spec.
+  // The depth (D) and blinding-thickness dimension lines share one
+  // vertical offset (wPx+40) and chain end-to-end at baseY — standard
+  // stacked-dimension drafting convention, and exactly how this pair
+  // degenerates to just "D" alone (unchanged from before this session)
+  // when geometry.blinding is absent.
+  // [Bugfix, this session] Root cause (found by rendering several real
+  // combinations to PNG, not by reading the coordinate math alone): the
+  // D/blinding-thickness dimension labels sit at a FIXED x1=originX+wPx+40
+  // gutter with text-anchor="end" (dimensionLine's own default for a 'v'
+  // line grows the label LEFTWARD from x1, back toward the section), while
+  // the cover/N-Ø-@-spacing labels just below sit CENTERED at midX. On a
+  // small or near-square footing (small wPx at this render's scale) the
+  // horizontal gap between midX and that gutter shrinks to less than
+  // either label's own rendered width, so the two independently-positioned
+  // groups draw on top of each other regardless of which Y each picks —
+  // no labelT value fixes a collision whose real cause is horizontal, not
+  // vertical. rightGutterPx below is the actual fix: it grows the gutter
+  // offset (beyond the pre-existing, now-baseline 40) whenever the
+  // centered labels' own estimated half-width would otherwise reach past
+  // it, using estimateTextWidthPx's character-count estimate (this file's
+  // established no-real-font-metrics convention, see that function's own
+  // header) — byte-identical to the old fixed 40px offset whenever the
+  // footing is wide enough that the two groups were never going to
+  // collide in the first place.
+  // [Bugfix, this session, corrected] The first version of this fix
+  // (see the version-control history for this file) sized rightGutterPx
+  // only against how far the CENTERED cover/bar-spec text reaches
+  // rightward — and missed that the gutter label itself (text-anchor
+  // "end" at rightGutterX-10) then reads back LEFTWARD by its own full
+  // width, which can be ~120px for "D = 500.00mm" alone. That version
+  // still collided (confirmed by re-rendering, not assumed) whenever the
+  // gutter label's own width exceeded the small margin the first
+  // version left. dLabelStr/blindingLabelStr below are the ACTUAL
+  // strings that will be drawn at that gutter (not a separately-guessed
+  // constant), so gutterLabelFullWidthPx tracks whatever they really
+  // say — including the longer English combined "Blinding Thickness = ...mm"
+  // form, not just Arabic's shorter "= ...mm" value-only line.
+  const coverStr = `cover = ${fmt(section.coverMM, geometry.unit, 0)}`;
+  const barSpecStr = `${section.barCount} \u00d8${fmt(section.diaMM, geometry.unit, 0)} @ ${fmt(section.actualSpacingMM, geometry.unit, 0)}`;
+  const centeredHalfWidthPx = Math.max(estimateTextWidthPx(coverStr), estimateTextWidthPx(barSpecStr)) / 2;
+  const dLabelStr = `D = ${fmt(section.depthMM, geometry.unit, 2)}`;
+  const blindingLabelStr = geometry.blinding
+    ? (lang === 'ar' ? `= ${fmt(geometry.blinding.thicknessMM, geometry.unit, 0)}` : `${translate('blindingThickness', lang)} = ${fmt(geometry.blinding.thicknessMM, geometry.unit, 0)}`)
+    : '';
+  const gutterLabelFullWidthPx = Math.max(estimateTextWidthPx(dLabelStr), estimateTextWidthPx(blindingLabelStr));
+  const GUTTER_CLEARANCE_PX = 15;
+  // Solves for the gutter offset that keeps [gutter label's own left
+  // edge] >= [centered text's own right edge] + margin — see this
+  // block's own comment above for the inequality this reduces from.
+  // BUGFIX [SECTION-GUTTER-FOOTING-CLEARANCE]: this formula's clearance
+  // reference was centeredHalfWidthPx alone -- the cover/bar-spec labels'
+  // own half-width, NOT the footing rectangle's own half-width (wPx/2).
+  // Whenever the footing is wider than those labels (centeredHalfWidthPx
+  // < wPx/2 -- true for this file's own 1800mm running example: cover/
+  // bar-spec text half-width ~79px vs a ~119px half-width footing), the
+  // old `centeredHalfWidthPx + ... - wPx/2` arithmetic went NEGATIVE on
+  // that term, silently discounting clearance the FOOTING OUTLINE itself
+  // still needs regardless of how narrow the centered text is. Invisible
+  // in English only because gutterLabelFullWidthPx (sized off the long
+  // "Blinding Thickness = 100mm" form) happens to overshoot the resulting
+  // gap anyway; exposed in Arabic, where the translated blinding label
+  // ("= 100mm" -- value only, see blindingLabelStr's own lang branch
+  // above) is short enough that it no longer papers over the deficit, so
+  // the D-label's own left edge lands inside the footing outline (found
+  // by rendering isolatedFooting_demo_ar.svg to PNG and comparing against
+  // the English render side by side, not by reading the coordinate math
+  // alone -- see this function's own established convention for how
+  // every OTHER fix in this block was found). Math.max(wPx / 2, ...)
+  // makes the footing's own half-width a hard floor the formula can no
+  // longer discount below, independent of centeredHalfWidthPx.
+  const rightGutterPx = Math.max(40, Math.max(wPx / 2, centeredHalfWidthPx) + gutterLabelFullWidthPx + GUTTER_CLEARANCE_PX + 10 - wPx / 2);
+  const rightGutterX = originX + wPx + rightGutterPx;
+  // foundingLevelX must clear the blinding/D label's own right edge
+  // (rightGutterX - 10, per dimensionLine's labelDx=-10 for a 'v' line)
+  // by at least the level marker's own tick-to-label gap (halfLine+6=21,
+  // inlined in levelMarker above) plus a small safety margin — 20px
+  // here is deliberately more than the bare minimum, not a tight fit.
+  const foundingLevelX = Math.max(originX + wPx + 95, rightGutterX + 20);
+  svg += levelMarker(foundingLevelX, soilTopY, translate('foundingLevel', lang), lang, 'right');
+
+  svg += dimensionLine(rightGutterX, topY, rightGutterX, baseY, dLabelStr, { orientation: 'v' });
+  if (geometry.blinding) {
+    svg += dimensionLine(
+      rightGutterX, baseY, rightGutterX, soilTopY, blindingLabelStr,
+      { orientation: 'v', scriptPrefix: lang === 'ar' ? translate('blindingThickness', lang) : undefined, labelT: 0.5 },
+    );
+  }
+  svg += dimensionLine(originX, soilTopY + 46, originX + wPx, soilTopY + 46, `${section.widthMM === geometry.meta.B ? 'B' : geometry.plan.shortLabel} = ${fmt(section.widthMM, geometry.unit, 2)}`, { orientation: 'h' });
   // Stacked on two centered lines, not left/right on one line — at
   // narrow widths (e.g. B=1200mm) same-line opposite-anchored labels
   // collide in the middle; found by rendering Case 2 in the test suite
   // and inspecting the PNG, not by inspection of the code alone.
-  // [Step 21 fix — found by rendering at the new, much narrower
-  // secondary-view scale, not visible at this function's original
-  // single-large-box use] At TRANS_SECTION_BOX's width, text centered
-  // under the footing runs into the D= dimension line's own text
-  // (originX+wPx+40, right-anchored, extending leftward) — a collision
-  // the primary (large) box never produced, so it is fixed only for the
-  // secondary case rather than changing the look of the primary one.
-  const isSecondary = box === TRANS_SECTION_BOX;
+  // [Bugfix, this session] -34/-16 (was -26/-10) — a small additional
+  // margin above barY so this block's lower line keeps clear of the
+  // blinding-thickness label now centered in its own band just below
+  // baseY (labelT: 0.5 above) instead of pinned against it. coverStr/
+  // barSpecStr are the SAME variables rightGutterPx was already sized
+  // against above, not independently re-typed strings that could drift
+  // out of sync with what that clearance calculation actually measured.
   const midX = originX + wPx / 2;
-  if (isSecondary) {
-    svg += `<text x="${originX + 4}" y="${barY - 26}" text-anchor="start" class="dim-label">cover = ${fmt(section.coverMM, geometry.unit, 0)}</text>`;
-    svg += `<text x="${originX + 4}" y="${barY - 10}" text-anchor="start" class="dim-label">${section.barCount} \u00d8${fmt(section.diaMM, geometry.unit, 0)} @ ${fmt(section.actualSpacingMM, geometry.unit, 0)}</text>`;
-  } else {
-    svg += `<text x="${midX}" y="${barY - 26}" text-anchor="middle" class="dim-label">cover = ${fmt(section.coverMM, geometry.unit, 0)}</text>`;
-    svg += `<text x="${midX}" y="${barY - 10}" text-anchor="middle" class="dim-label">${section.barCount} \u00d8${fmt(section.diaMM, geometry.unit, 0)} @ ${fmt(section.actualSpacingMM, geometry.unit, 0)}</text>`;
-  }
+  svg += `<text x="${midX}" y="${barY - 34}" text-anchor="middle" class="dim-label">${esc(coverStr)}</text>`;
+  svg += `<text x="${midX}" y="${barY - 16}" text-anchor="middle" class="dim-label">${esc(barSpecStr)}</text>`;
 
-  // [Step 21] Secondary context: the short label alone, not the
-  // "through COLUMN X" detail — that combined string overflowed the
-  // canvas at this box's width when actually rendered, and the plan's
-  // own cut marker already identifies which column this cuts through,
-  // so the detail is not lost, only moved to where there is room for it.
-  const baseTitle = translatedSectionTitle(
+  const titleText = translatedSectionTitle(
     geometry.type,
     NUMBERED_COLUMN_TYPES.has(geometry.type) ? geometry.sectionThrough - 1 : null,
     lang,
   );
-  const titleText = isSecondary ? translate('transverseSectionTitle', lang) : baseTitle;
-  svg += `<text x="${originX + wPx / 2}" y="${baseY + 70}" text-anchor="middle" dir="${lang === 'ar' ? 'rtl' : 'ltr'}" class="view-title">${esc(titleText)}</text>`;
+  svg += `<text x="${originX + wPx / 2}" y="${soilTopY + 70}" text-anchor="middle" dir="${lang === 'ar' ? 'rtl' : 'ltr'}" class="view-title">${esc(titleText)}</text>`;
   svg += `</g>`;
-  return svg;
-}
-
-// ── Step 21: primary longitudinal section (combined/strip only) ────────
-// Cuts along the column line — through every column and the span between
-// them — matching the Egyptian code guide's own قطاع رأس ١-١, which shows
-// both columns together rather than one column in isolation. Shows L
-// horizontally, D vertically.
-//
-// Bar roles are the OPPOSITE of renderSectionView's: this cut is
-// perpendicular to B, not L, so TRANSVERSE bars (pierced by the cut) are
-// the circles here, and LONGITUDINAL bars (running parallel to the cut,
-// the length of the visible footing) are the representative line. Same
-// physical stacking rule as renderSectionView's own fix (a real crossing
-// layer cannot occupy the same point as the layer it crosses; transverse
-// is the reference layer at the true cover distance, longitudinal shifts
-// one bar-radius toward mid-depth) — only which element is "the circles"
-// and which is "the line" has swapped along with which direction the cut
-// exposes.
-//
-// Curtailment (top steel stopping short of mid-span, bottom steel lapped
-// at supports — the real moment-diagram-driven detailing a computed
-// design would show) is NOT modelled: neither reference image gives this
-// tool a defensible length to curtail at, and both show the longitudinal
-// bars running the full length uncurtailed — this draws the same. If a
-// real design calls for curtailment, that is a design output this
-// schematic cannot honestly infer from B/L/D/cover/dia/spacing alone.
-//
-// Column ties/dowels/pedestal: this tool has ONE global spec for each
-// (not per-column), so every column in `plan.columns` gets the SAME
-// pedestal/tie/dowel treatment — the same simplification dia/spacing/
-// cover already make for the whole footing.
-function renderLongSectionView(geometry, scale, lang, box) {
-  const { plan, meta } = geometry;
-  const wPx = plan.longMM * scale;
-  const originX = box.x + (box.w - wPx) / 2;
-  const baseY = box.y + box.h - 60;
-  const topY = baseY - meta.D * scale;
-  const depthPx = meta.D * scale;
-
-  let svg = '<g class="long-section-view">';
-  svg += `<rect x="${originX - 20}" y="${baseY}" width="${wPx + 40}" height="26" fill="url(#soilHatch)" stroke="#8a7350" stroke-width="1"/>`;
-  svg += `<rect x="${originX}" y="${topY}" width="${wPx}" height="${depthPx}" class="footing-outline" fill="url(#concreteHatch)"/>`;
-
-  // One column stack per geometry.plan.columns entry — see this
-  // function's own header on why every column shares one pedestal/tie/
-  // dowel spec. colSegBottomPx/dowelHostXPx/colTop mirror
-  // renderSectionView's own single-column version exactly, just inside
-  // a per-column loop and positioned at each column's own centerLongMM
-  // instead of the box's horizontal center.
-  plan.columns.forEach((col, i) => {
-    const colW = col.alongLongMM * scale;
-    const cx = originX + col.centerLongMM * scale;
-    const colX = cx - colW / 2;
-    let colTop, dowelHostXPx, colSegBottomPx, colTopMostPx;
-    if (geometry.pedestal) {
-      const pedWPx = geometry.pedestal.widthMM * scale;
-      const pedHPx = geometry.pedestal.heightMM * scale;
-      const pedX = cx - pedWPx / 2;
-      const pedTop = topY - pedHPx;
-      svg += `<rect x="${pedX}" y="${pedTop}" width="${pedWPx}" height="${pedHPx}" class="column-outline" fill="url(#concreteHatch)"/>`;
-      const stubH = 40;
-      colTop = pedTop - stubH;
-      svg += `<rect x="${colX}" y="${colTop}" width="${colW}" height="${pedTop - colTop}" class="column-outline" fill="url(#concreteHatch)"/>`;
-      dowelHostXPx = pedX;
-      colSegBottomPx = pedTop;
-      colTopMostPx = colTop;
-    } else {
-      colTop = topY - 90;
-      svg += `<rect x="${colX}" y="${colTop}" width="${colW}" height="${topY - colTop}" class="column-outline" fill="url(#concreteHatch)"/>`;
-      dowelHostXPx = colX;
-      colSegBottomPx = topY;
-      colTopMostPx = colTop;
-    }
-    if (geometry.ties) {
-      const tieInsetPx = 8;
-      const { centersMM: tieYsPx } = distributeCenters(colTop + tieInsetPx, colSegBottomPx - tieInsetPx, geometry.ties.count);
-      for (const y of tieYsPx) svg += tieTickH(colX, colX + colW, y);
-    }
-    if (geometry.dowels) {
-      for (const cMM of geometry.dowels.centersMM) {
-        svg += barDot(dowelHostXPx + cMM * scale, topY, geometry.dowels.diaMM, scale, 'dowel');
-      }
-    }
-    if (col.tag) {
-      const label = columnTag(geometry.type, i, lang);
-      svg += `<text x="${cx}" y="${colTopMostPx - 8}" text-anchor="middle" dir="${lang === 'ar' ? 'rtl' : 'ltr'}" class="col-tag">${esc(label)}</text>`;
-    }
-  });
-
-  // Bottom layer: transverse bars (circles) at true cover; longitudinal
-  // bar (line) shifted toward mid-depth. Reuses the SAME across-L x
-  // positions renderPlanView's own bottom short-way block computes —
-  // one source of truth (computeTransverseXPositionsMM) for where a
-  // transverse bar sits along L, drawn as a plan-view line there and as
-  // a section-view circle here.
-  const transYBottom = baseY - meta.cover * scale;
-  const rPx = Math.max(MIN_BAR_PX_R, (meta.dia / 2) * scale);
-  const longYBottom = transYBottom - rPx;
-  svg += `<line x1="${originX + 8}" y1="${longYBottom}" x2="${originX + wPx - 8}" y2="${longYBottom}" class="mesh-line"/>`;
-  const transXsBottom = computeTransverseXPositionsMM(plan.longMM, meta.cover, meta.dia, meta.spacingLong ?? meta.spacing);
-  for (const posMM of transXsBottom) {
-    svg += `<circle cx="${originX + posMM * scale}" cy="${transYBottom}" r="${rPx}" class="bar-dot"/>`;
-  }
-  // [Step 21] Concentration band — denser transverse circles inside each
-  // column's own zone, additive to the field circles just drawn (same
-  // additive-not-replacing convention as the plan view's own band
-  // overlay; see computeBandGeometry's header). Same Y as the field
-  // transverse circles: band bars are still transverse bars, just more
-  // of them near the column, not a different layer.
-  if (geometry.band) {
-    const rBandPx = Math.max(MIN_BAR_PX_R, (geometry.band.diaMM / 2) * scale);
-    for (const zone of geometry.band.zones) {
-      for (const cMM of zone.barCentersMM) {
-        svg += `<circle cx="${originX + cMM * scale}" cy="${transYBottom}" r="${rBandPx}" class="bar-dot-band"/>`;
-      }
-    }
-  }
-
-  // Top layer, mirrored — only when `mesh` was supplied.
-  if (geometry.mesh) {
-    const transYTop = topY + meta.cover * scale;
-    const rPxMesh = Math.max(MIN_BAR_PX_R, (geometry.mesh.diaMM / 2) * scale);
-    const longYTop = transYTop + rPxMesh;
-    svg += `<line x1="${originX + 8}" y1="${longYTop}" x2="${originX + wPx - 8}" y2="${longYTop}" class="bar-top"/>`;
-    const transXsTop = computeTransverseXPositionsMM(plan.longMM, meta.cover, geometry.mesh.diaMM, geometry.mesh.spacingMM);
-    for (const posMM of transXsTop) {
-      svg += `<circle cx="${originX + posMM * scale}" cy="${transYTop}" r="${rPxMesh}" class="bar-dot-top"/>`;
-    }
-  }
-
-  svg += dimensionLine(originX, topY - 26, originX + wPx, topY - 26, `${plan.longLabel} = ${fmt(plan.longMM, geometry.unit, 2)}`, { orientation: 'h' });
-  svg += dimensionLine(originX + wPx + 40, topY, originX + wPx + 40, baseY, `D = ${fmt(meta.D, geometry.unit, 2)}`, { orientation: 'v' });
-  const midX = originX + wPx / 2;
-  svg += `<text x="${midX}" y="${transYBottom + rPx + 20}" text-anchor="middle" class="dim-label">cover = ${fmt(meta.cover, geometry.unit, 0)}</text>`;
-
-  const titleText = translate('longitudinalSectionTitle', lang);
-  svg += `<text x="${originX + wPx / 2}" y="${baseY + 70}" text-anchor="middle" dir="${lang === 'ar' ? 'rtl' : 'ltr'}" class="view-title">${esc(titleText)}</text>`;
-  svg += '</g>';
   return svg;
 }
 
@@ -1523,66 +1967,37 @@ export function renderFootingDiagramSVG(geometry, opts = {}) {
   const scriptFontStack = lang === 'ar'
     ? `'Noto Naskh Arabic', 'Noto Sans Arabic', Tahoma, Arial, sans-serif`
     : defaultFontStack;
-  const isDual = DUAL_SECTION_TYPES.has(geometry.type);
-  // [Step 21] combined/strip: the plan and the new PRIMARY longitudinal
-  // section both show L, so they share one scale (a reader should be
-  // able to see the two views are the same length) computed against
-  // LONG_SECTION_BOX instead of the old single SECTION_BOX. The
-  // secondary transverse section gets its OWN independent, smaller
-  // scale fit to TRANS_SECTION_BOX — a smaller side/detail view is
-  // expected to use its own scale, same as a detail callout on a real
-  // drawing sheet would. isolated/raft: unchanged, one box, one scale,
-  // exactly as before Step 21.
   const scale = Math.min(
     PLAN_BOX.w / geometry.plan.longMM,
     PLAN_BOX.h / geometry.plan.shortMM,
-    (isDual ? LONG_SECTION_BOX.w : SECTION_BOX.w) / (isDual ? geometry.plan.longMM : geometry.section.widthMM),
-    ((isDual ? LONG_SECTION_BOX.h : SECTION_BOX.h) - 60) / geometry.meta.D,
+    SECTION_BOX.w / geometry.section.widthMM,
+    (SECTION_BOX.h - 60) / geometry.section.depthMM,
   ) * 0.85;
-  const transScale = isDual
-    ? Math.min(
-      TRANS_SECTION_BOX.w / geometry.section.widthMM,
-      (TRANS_SECTION_BOX.h - 60) / geometry.meta.D,
-    ) * 0.85
-    : scale;
 
+  const caption = translate('captionComputed', lang);
   const title = footingTitle(geometry.type, lang);
 
   // [Step 14.3] Workshop table + dynamic canvas height, ONLY when the
-  // caller supplied at least one of pedestal/dowels/mesh/ties/band. With
-  // none of the five, canvasH/tableSvg/captionBottomY below reduce to
-  // exactly CANVAS.h / '' / CANVAS.h-20 — the pre-Step-14 output,
-  // unchanged pixel-for-pixel. This conditional-only-when-needed approach
-  // is the backward-compatibility strategy خطة_تجزئة_الخطوة_14.md's point
-  // 5 calls for (no existing test pins an exact viewBox number, so this
+  // caller supplied at least one of pedestal/dowels/mesh. With none of
+  // the three, canvasH/tableSvg/captionBottomY below reduce to exactly
+  // CANVAS.h / '' / CANVAS.h-20 — the pre-Step-14 output, unchanged
+  // pixel-for-pixel. This conditional-only-when-needed approach is the
+  // backward-compatibility strategy خطة_تجزئة_الخطوة_14.md's point 5
+  // calls for (no existing test pins an exact viewBox number, so this
   // is safe, but keeping the no-extras path byte-identical removes any
   // risk of an untested silent visual regression on the common case).
-  // [Step 20] ties/band added to the same gate: both are opt-in extras
-  // exactly like pedestal/dowels/mesh, so they belong in the identical
-  // hasExtras umbrella rather than a second, parallel condition.
-  const hasExtras = !!(geometry.pedestal || geometry.dowels || geometry.mesh || geometry.ties || geometry.band);
-  // [Step 20] Caption moved below hasExtras (was previously computed
-  // before it existed) so the extras legend can be appended here, in one
-  // place, rather than the caller having to know to check hasExtras
-  // itself before choosing which caption string to use. The gross/net
-  // extent note is built here, not as a static structuralLabels.mjs
-  // string, because the two numbers are per-diagram (renderPlanView's
-  // own plan.longMM/shortMM and geometry.meta.cover) — reinforcedExtentNote
-  // supplies only the constant label text around them. Latin digits/
-  // "mm"/"=" mixed into this scriptFontStack (.sheet-caption) text node
-  // are safe in 'ar' mode: this file's Arabic-safety rule bans only
-  // '(', ')', '–', '—' (see structuralLabels.mjs's own header), not
-  // digits or "=" — unlike the abandoned drawn-dimension approach, which
-  // was rejected for a LAYOUT collision, not a glyph one.
-  let caption = translate('captionComputed', lang);
-  if (hasExtras) {
-    const netLongMM = geometry.plan.longMM - 2 * geometry.meta.cover;
-    const netShortMM = geometry.plan.shortMM - 2 * geometry.meta.cover;
-    const unit = geometry.unit;
-    caption += ` ${translate('captionExtrasLegend', lang)} ${translate('reinforcedExtentNote', lang)}: `
-      + `${geometry.plan.longLabel}=${fmt(netLongMM, unit, 0)}, ${geometry.plan.shortLabel}=${fmt(netShortMM, unit, 0)}.`;
-  }
+  // [This session] blinding joins pedestal in the OR-chain despite
+  // neither having its own dedicated table column below (blinding's
+  // thickness/projection are already dimensioned twice on-drawing — once
+  // in each view — so a third, textual repetition in the table would be
+  // pure redundancy; pedestal already set this exact precedent pre-this-
+  // session). ties DOES get dedicated columns just below: unlike
+  // blinding, a tie tick mark carries no on-drawing number at all, so
+  // without a table entry its dia/spacing/count would not appear as text
+  // anywhere on the sheet.
+  const hasExtras = !!(geometry.pedestal || geometry.dowels || geometry.mesh || geometry.blinding || geometry.ties);
   let canvasH = CANVAS.h;
+  let canvasWidth = CANVAS.w;
   let tableSvg = '';
   let captionBottomY = CANVAS.h - 20;
 
@@ -1593,42 +2008,22 @@ export function renderFootingDiagramSVG(geometry, opts = {}) {
     // summary row, one dedicated column per optional field, blank cell
     // ('—') when that field's group is absent — not a multi-row
     // schedule like beamDiagram.mjs's bar list. Decided during 14.2
-    // [Step 20 revision — found by rendering the actual SVG at 1600px:
-    // all twelve original-plus-new columns summed to 1600px against a
-    // 960px canvas and ran off the sheet edge, something none of the
-    // earlier string-content tests could catch since they never measured
-    // pixel width. Split into two stacked one-row tables instead of one
-    // wide one: the original six columns unchanged (still 880px, same
-    // as every pre-Step-20 render), and a second, new six-column row
-    // for ties/band beneath it. Each is independently centered via its
-    // own totalW, so neither depends on the other's width.]
-    const cols1 = [
+    // specifically so this session would not have to re-litigate table
+    // shape.
+    const cols = [
       { key: 'dowelCount', label: translate('dowelCount', lang), width: 120 },
       { key: 'dowelDia', label: translate('dowelDia', lang), width: 110 },
       { key: 'dowelProjection', label: translate('dowelProjection', lang), width: 150 },
       { key: 'meshDia', label: translate('meshDia', lang), width: 110 },
       { key: 'meshSpacing', label: translate('meshSpacing', lang), width: 140 },
+      // [This session] Same one-column-per-field convention, extended to
+      // ties. Placed after mesh/before concreteVolume — concreteVolume
+      // stays last since it is always populated (unconditional), same
+      // position it already held.
+      { key: 'tieCount', label: translate('tieCount', lang), width: 100 },
+      { key: 'tieDia', label: translate('tieDia', lang), width: 90 },
+      { key: 'tieSpacing', label: translate('tieSpacing', lang), width: 120 },
       { key: 'concreteVolume', label: translate('concreteVolume', lang), width: 250 },
-    ];
-    // [Step 20] tieCount/tieDia/tieSpacing/bandWidth/bandDia/bandSpacing
-    // — band's zones can differ per column (different actualSpacingMM at
-    // each, from computeBandGeometry's own per-zone distributeCenters
-    // call), so its three cells report the BAND SPEC (widthMM/diaMM/
-    // nominal spacingMM, shared by every zone by this function's own
-    // one-spec-for-every-column design — see computeBandGeometry's own
-    // header), not a per-zone breakdown a one-row table has no room for.
-    // Column widths sized generously against this table's own longest
-    // header ("Band Bar Spacing"/17 chars), not copied from table 1's
-    // shorter headers, after table 1's own widths turned out too tight
-    // for that string in the same rendering pass that found the
-    // 12-column overflow above.
-    const cols2 = [
-      { key: 'tieCount', label: translate('tieCount', lang), width: 110 },
-      { key: 'tieDia', label: translate('tieDia', lang), width: 100 },
-      { key: 'tieSpacing', label: translate('tieSpacing', lang), width: 140 },
-      { key: 'bandWidth', label: translate('bandWidth', lang), width: 140 },
-      { key: 'bandDia', label: translate('bandDia', lang), width: 130 },
-      { key: 'bandSpacing', label: translate('bandSpacing', lang), width: 160 },
     ];
     // Engineering notation (Ø, mm-derived numbers, m³) is Latin+digits
     // by convention regardless of `lang` (same rule this file already
@@ -1636,33 +2031,38 @@ export function renderFootingDiagramSVG(geometry, opts = {}) {
     // scheduleTable() renders every data cell with .table-text
     // (defaultFontStack), only the translated HEADER labels get
     // .table-header-txt (scriptFontStack).
-    const row1 = {
+    const row = {
       dowelCount: geometry.dowels ? String(geometry.dowels.count) : '\u2014',
       dowelDia: geometry.dowels ? `\u00d8${fmt(geometry.dowels.diaMM, unit, 0)}` : '\u2014',
       dowelProjection: geometry.dowels ? fmt(geometry.dowels.projectionMM, unit, 0) : '\u2014',
       meshDia: geometry.mesh ? `\u00d8${fmt(geometry.mesh.diaMM, unit, 0)}` : '\u2014',
       meshSpacing: geometry.mesh ? fmt(geometry.mesh.actualSpacingMM, unit, 0) : '\u2014',
-      concreteVolume: `${volumeM3.toFixed(2)} m\u00b3`,
-    };
-    const row2 = {
       tieCount: geometry.ties ? String(geometry.ties.count) : '\u2014',
       tieDia: geometry.ties ? `\u00d8${fmt(geometry.ties.diaMM, unit, 0)}` : '\u2014',
       tieSpacing: geometry.ties ? fmt(geometry.ties.spacingMM, unit, 0) : '\u2014',
-      bandWidth: geometry.band ? fmt(geometry.band.widthMM, unit, 0) : '\u2014',
-      bandDia: geometry.band ? `\u00d8${fmt(geometry.band.diaMM, unit, 0)}` : '\u2014',
-      bandSpacing: geometry.band ? fmt(geometry.band.spacingMM, unit, 0) : '\u2014',
+      concreteVolume: `${volumeM3.toFixed(2)} m\u00b3`,
     };
-    const table1X = (CANVAS.w - cols1.reduce((s, c) => s + c.width, 0)) / 2;
+    const totalW = cols.reduce((s, c) => s + c.width, 0);
+    // [This session] The pre-existing 6-column table (totalW=880) was
+    // already sized to fit CANVAS.w=960 with an 80px margin exactly —
+    // Math.max below reduces to precisely 960 in that case (0 change).
+    // The 3 new tie columns can push totalW past 960; when they do, the
+    // CANVAS.w CONSTANT is left untouched (PLAN_BOX/SECTION_BOX still
+    // reference it, unaffected) but this render's own local canvasWidth
+    // grows to keep the table centered and unclipped. Known cosmetic
+    // consequence, not fixed here: the two views stay anchored at their
+    // existing fixed x/w, so a wide-canvas render leaves visible margin
+    // to their right rather than re-centering them too — the same class
+    // of "fixed screen regions, not a layout solver" limitation this
+    // file already accepts for a tall pedestal (see renderSectionView's
+    // own comment on that).
+    canvasWidth = Math.max(CANVAS.w, totalW + 80);
+    const tableX = (canvasWidth - totalW) / 2;
     const tableY = SECTION_BOX.y + SECTION_BOX.h + 40;
-    const table1 = scheduleTable(table1X, tableY, cols1, [row1], { lang });
-    const table2Y = tableY + table1.height + 14;
-    const table2X = (CANVAS.w - cols2.reduce((s, c) => s + c.width, 0)) / 2;
-    const table2 = scheduleTable(table2X, table2Y, cols2, [row2], { lang });
-    const tableBottomEdge = table2Y + table2.height;
+    const table = scheduleTable(tableX, tableY, cols, [row], { lang });
     tableSvg = `
   <line x1="${PLAN_BOX.x}" y1="${tableY - 20}" x2="${PLAN_BOX.x + PLAN_BOX.w}" y2="${tableY - 20}" stroke="#ccc" stroke-width="1"/>
-  ${table1.svg}
-  ${table2.svg}`;
+  ${table.svg}`;
     // [Step 14.3 bug fix — found by rendering the actual SVG and
     // measuring pixel positions, not by the test suite: every check was
     // green while this still overlapped] The FIRST caption line's Y must
@@ -1676,14 +2076,11 @@ export function renderFootingDiagramSVG(geometry, opts = {}) {
     // check stayed green (nothing here checks pixel-level visual
     // overlap). Computing the bottom anchor FROM numLines instead keeps
     // the first line's Y constant regardless of line count.
-    // [Step 20] tableBottomEdge (this table's own stacked-pair bottom,
-    // computed above) replaces the single table's tableY+table.height —
-    // same anchor-from-the-bottom-edge strategy, now measured against
-    // whichever of the two stacked tables actually ends up lower.
     {
+      const tableBottom = tableY + table.height;
       const capMarginPx = 24;
       const numLines = wrapText(caption, 100).length;
-      captionBottomY = tableBottomEdge + capMarginPx + (numLines - 1) * 16;
+      captionBottomY = tableBottom + capMarginPx + (numLines - 1) * 16;
     }
     canvasH = captionBottomY + 20;
   }
@@ -1697,53 +2094,52 @@ export function renderFootingDiagramSVG(geometry, opts = {}) {
   // barDot()/scheduleTable() needed them and are harmless to always
   // emit (unused when hasExtras is false, since nothing references
   // them).
-  // [Step 20] .stirrup-tick/.bar-top/.bar-dot-top below are, likewise,
-  // copied verbatim from kitStyleBlock() (same #2f7a3d / #1f5aa6 hex
-  // values that file already uses for every other element's ties/top-
-  // steel) — not new colors invented for this file. .band-outline/
-  // .mesh-line-band have no kit precedent (no other element needs a
-  // "concentrated sub-layer of an existing layer" style) and are defined
-  // fresh here, deliberately kept in the SAME #c0392b red family as
-  // .mesh-line/.bar-dot — see renderPlanView's own comment on why a new
-  // hue would be the wrong call for this specific case. All five are
-  // harmless to always emit, unused whenever their extra is absent.
-  return `<svg viewBox="0 0 ${CANVAS.w} ${canvasH}" xmlns="http://www.w3.org/2000/svg" font-family="${defaultFontStack}">
+  // [This session] Four more classes join the six documented above, same
+  // "harmless to always emit, unused when the corresponding group is
+  // absent" reasoning: .blinding-outline / .tie-tick / .dowel-bar are new
+  // geometry, and .dim-label-script is the scriptFontStack twin of
+  // .dim-label (see dimensionLine's own opts.script comment for why a
+  // second class rather than a conditional font-family on the existing
+  // one — every pre-existing .dim-label caller must keep resolving to
+  // defaultFontStack unconditionally).
+  return `<svg viewBox="0 0 ${canvasWidth} ${canvasH}" xmlns="http://www.w3.org/2000/svg" font-family="${defaultFontStack}">
   <defs>${hatchDefs()}</defs>
   <style>
     text { font-family: ${defaultFontStack}; }
-    .footing-outline { fill:#f4f4f4; stroke:#1a1a1a; stroke-width:${MIN_STROKE_PX * 1.4}; }
-    .column-outline  { fill:#e2e2e2; stroke:#1a1a1a; stroke-width:${MIN_STROKE_PX * 1.4}; }
-    .mesh-line       { stroke:#c0392b; stroke-width:${MIN_STROKE_PX}; }
-    .bar-dot         { fill:#c0392b; stroke:#7a2015; stroke-width:0.6; }
+    .footing-outline { fill:${PC_FILL}; stroke:#1a1a1a; stroke-width:${MIN_STROKE_PX * 1.4}; }
+    .column-outline  { fill:${PC_FILL}; stroke:#1a1a1a; stroke-width:${MIN_STROKE_PX * 1.4}; }
+    .mesh-line       { stroke:${REBAR_MAIN}; stroke-width:${MIN_STROKE_PX * 1.6}; stroke-linecap:round; }
+    .bar-dot         { fill:${REBAR_SECONDARY}; stroke:${REBAR_MAIN_STROKE}; stroke-width:0.6; }
     .dim-line        { stroke:#333; stroke-width:1; }
     .dim-tick        { stroke:#333; stroke-width:1; }
     .dim-label       { font-size:15px; fill:#111; }
+    .dim-label-script{ font-size:15px; fill:#111; font-family: ${scriptFontStack}; }
     .view-title      { font-size:16px; font-weight:bold; fill:#111; letter-spacing:${lang === 'ar' ? 'normal' : '1px'}; font-family: ${scriptFontStack}; }
     .cut-line        { stroke:#1a1a1a; stroke-width:1.4; stroke-dasharray:6,3; }
     .cut-label       { font-size:14px; font-weight:bold; fill:#111; font-family: ${scriptFontStack}; }
     .col-tag         { font-size:12px; fill:#333; font-family: ${scriptFontStack}; }
     .sheet-title     { font-size:20px; font-weight:bold; fill:#111; font-family: ${scriptFontStack}; }
     .sheet-caption   { font-size:12.5px; fill:#444; font-family: ${scriptFontStack}; }
-    .bar-dot-dowel    { fill:#c0392b; stroke:#7a2015; stroke-width:0.6; }
-    .stirrup-tick     { stroke:#2f7a3d; stroke-width:1.3; }
-    .bar-top          { stroke:#1f5aa6; stroke-width:2.2; fill:none; }
-    .bar-dot-top      { fill:#1f5aa6; stroke:#123564; stroke-width:0.6; }
-    .band-outline     { fill:none; stroke:#c0392b; stroke-width:1; stroke-dasharray:5,3; }
-    .mesh-line-band   { stroke:#c0392b; stroke-width:2.4; }
-    .bar-dot-band     { fill:#c0392b; stroke:#7a2015; stroke-width:1; }
+    .bar-dot-dowel    { fill:${REBAR_MAIN}; stroke:${REBAR_MAIN_STROKE}; stroke-width:0.6; }
+    .dowel-bar        { fill:none; stroke:${REBAR_MAIN}; stroke-width:${MIN_STROKE_PX * 1.6}; stroke-linecap:round; stroke-linejoin:round; }
+    .tie-tick         { stroke:${REBAR_SECONDARY}; stroke-width:${MIN_STROKE_PX * 1.4}; }
+    .blinding-outline { stroke:#6b6f73; stroke-width:${MIN_STROKE_PX}; stroke-dasharray:3,2; }
+    .level-marker     { fill:${LEVEL_MARKER}; stroke:${LEVEL_MARKER_STROKE}; stroke-width:0.8; }
+    .level-line       { stroke:#1a1a1a; stroke-width:1; }
+    .centerline       { stroke:${CENTERLINE_COLOR}; stroke-width:1; stroke-dasharray:10,4,2,4; }
+    .centerline-dot   { fill:${CANVAS_BG}; stroke:${CENTERLINE_COLOR}; stroke-width:1.2; }
     .table-header-bg  { fill:#eef1f4; }
     .table-border     { stroke:#888; stroke-width:1; fill:none; }
     .table-text       { font-size:12px; fill:#111; font-family: ${defaultFontStack}; }
     .table-text-script{ font-size:12px; fill:#111; font-family: ${scriptFontStack}; }
     .table-header-txt { font-size:12px; font-weight:bold; fill:#111; font-family: ${scriptFontStack}; }
   </style>
-  <rect x="0" y="0" width="${CANVAS.w}" height="${canvasH}" fill="#ffffff"/>
-  <text x="${CANVAS.w / 2}" y="30" text-anchor="middle" class="sheet-title" dir="${lang === 'ar' ? 'rtl' : 'ltr'}">${esc(title)}</text>
+  <rect x="0" y="0" width="${canvasWidth}" height="${canvasH}" fill="${CANVAS_BG}"/>
+  <text x="${canvasWidth / 2}" y="30" text-anchor="middle" class="sheet-title" dir="${lang === 'ar' ? 'rtl' : 'ltr'}">${esc(title)}</text>
   ${renderPlanView(geometry, scale, lang)}
-  ${isDual ? renderLongSectionView(geometry, scale, lang, LONG_SECTION_BOX) : ''}
-  ${isDual ? renderSectionView(geometry, transScale, lang, TRANS_SECTION_BOX) : renderSectionView(geometry, scale, lang)}
+  ${renderSectionView(geometry, scale, lang)}
   <line x1="${PLAN_BOX.x}" y1="${SECTION_BOX.y - 30}" x2="${PLAN_BOX.x + PLAN_BOX.w}" y2="${SECTION_BOX.y - 30}" stroke="#ccc" stroke-width="1"/>${tableSvg}
-  ${renderCaption(caption, lang, captionBottomY)}
+  ${renderCaption(caption, lang, captionBottomY, canvasWidth)}
 </svg>`;
 }
 
@@ -1775,10 +2171,14 @@ function wrapText(text, maxCharsPerLine) {
 // the exact old hardcoded value) so renderFootingDiagramSVG can push the
 // caption below the new workshop table when one is drawn, without
 // touching the no-extras call path's output at all.
-function renderCaption(caption, lang, bottomAnchorY = CANVAS.h - 20) {
+// [This session] canvasWidth is the same idea applied to the RTL x-
+// anchor: defaults to the CANVAS.w constant (byte-identical whenever the
+// table doesn't need a wider canvas), but lets the caller pass its own
+// local canvasWidth when it does.
+function renderCaption(caption, lang, bottomAnchorY = CANVAS.h - 20, canvasWidth = CANVAS.w) {
   const lines = wrapText(caption, 100);
   const rtl = lang === 'ar';
-  const x = rtl ? CANVAS.w - 40 : 40;
+  const x = rtl ? canvasWidth - 40 : 40;
   const anchor = rtl ? 'end' : 'start';
   const startY = bottomAnchorY - (lines.length - 1) * 16;
   return lines
@@ -1791,20 +2191,17 @@ function renderCaption(caption, lang, bottomAnchorY = CANVAS.h - 20) {
 // there is no NLP ambiguity on the numbers that matter):
 //   /diagram isolated B=1800 L=1800 D=500 colB=400 colL=400 cover=50 dia=16 spacing=150 [unit=mm]
 //   /diagram combined B=1200 L=4200 D=600 col1b=400 col1l=400 col1off=700 col2b=400 col2l=400 col2off=3500 cover=50 dia=16 spacing=150 [unit=mm]
-//     [Step 20 optional] tiedia=8 tiespacing=150 tiecount=4 — column
-//     confinement ties, drawn on whichever column-segment stub the
-//     section shows (see computeFootingExtras' own comment on why these
-//     three are label-only; positions are distributed at render time).
-//     bandwidth=800 banddia=12 bandspacing=100 — reinforcement
-//     concentration band(s), one drawn centered on EVERY column in plan
-//     (see computeBandGeometry's own header on why width has no default
-//     and must always be given explicitly).
 //   /diagram strip B=900 L=7500 D=450 cols=3 col1b=350 col1l=350 col1off=750 col2b=350 col2l=350 col2off=3750 col3b=350 col3l=350 col3off=6750 cover=50 dia=14 spacing=150 [unit=mm] [sectionthrough=2]
 //   /diagram raft B=6000 L=9000 D=500 cols=4 col1b=400 col1l=400 col1offx=1000 col1offy=1000 col2b=400 col2l=400 col2offx=1000 col2offy=5000 col3b=400 col3l=400 col3offx=5000 col3offy=1000 col4b=400 col4l=400 col4offx=5000 col4offy=5000 cover=75 dia=16 spacing=200 [unit=mm] [sectionthrough=1]
 // strip/raft additionally require cols=N (2..MAX_COLUMNS) up front, then
 // col1.. through colN.. of the fields shown above — colNoff for strip
 // (1-D, distance along L), colNoffx/colNoffy for raft (2-D, distance
 // along L / along B respectively).
+// [This session] Optional, all four types: pedestalwidth=/pedestalheight=,
+// dowelcount=/doweldia=/dowelprojection=, meshspacing=/meshdia=,
+// blindingthickness=/blindingprojection=, tiedia=/tiespacing=/tiecount=,
+// columnbarsdia= (requires dowelcount=/doweldia=/dowelprojection= also
+// given — see computeFootingExtras' own BAD_PARAM gate).
 // Returns { ok:true, type, geometry } or { ok:false, code, message }.
 // Never throws — every DiagramError from the compute*Geometry functions
 // is caught and converted to the same { ok:false } shape validateImagePrompt()
@@ -1888,10 +2285,18 @@ export function parseDiagramCommand(text) {
   const dowels = optionalGroup({ count: 'dowelcount', dia: 'doweldia', projection: 'dowelprojection' });
   const meshSpacing = num('meshspacing');
   const meshDia = num('meshdia');
-  // [Step 20] Same flat-key convention, two more groups: tiedia=/
-  // tiespacing=/tiecount= and bandwidth=/banddia=/bandspacing=.
+  // [This session] Same flat-key convention, extended to blinding/ties.
+  const blinding = optionalGroup({ thickness: 'blindingthickness', projection: 'blindingprojection' });
   const ties = optionalGroup({ dia: 'tiedia', spacing: 'tiespacing', count: 'tiecount' });
-  const band = optionalGroup({ width: 'bandwidth', dia: 'banddia', spacing: 'bandspacing' });
+  // [This session] Single-field group — optionalGroup() still applies
+  // (same "return undefined, not {dia: undefined}, when the one key is
+  // absent" behavior computeFootingExtras' `!= null` gate depends on),
+  // it is just degenerate with only one entry in propToFlatKey. Shares
+  // dowels' own MAX_DOWELS-bounded count/positions (see
+  // computeFootingExtras' BAD_PARAM gate requiring dowels alongside
+  // this), so there is no columnbarscount flat key to parse here —
+  // only the diameter is a genuinely independent input.
+  const columnBars = optionalGroup({ dia: 'columnbarsdia' });
 
   try {
     let geometry;
@@ -1902,7 +2307,7 @@ export function parseDiagramCommand(text) {
         cover: num('cover'), dia: num('dia'),
         spacing: num('spacing'), spacingLong: num('spacinglong'), spacingShort: num('spacingshort'),
         unit: kv.unit || 'mm',
-        pedestal, dowels, meshSpacing, meshDia, ties, band,
+        pedestal, dowels, meshSpacing, meshDia, blinding, ties, columnBars,
       });
     } else if (type === 'combined') {
       geometry = computeCombinedFootingGeometry({
@@ -1912,7 +2317,7 @@ export function parseDiagramCommand(text) {
         cover: num('cover'), dia: num('dia'), spacing: num('spacing'),
         sectionThrough: num('sectionthrough') === 2 ? 2 : 1,
         unit: kv.unit || 'mm',
-        pedestal, dowels, meshSpacing, meshDia, ties, band,
+        pedestal, dowels, meshSpacing, meshDia, blinding, ties, columnBars,
       });
     } else if (type === 'strip') {
       const st = num('sectionthrough');
@@ -1922,7 +2327,7 @@ export function parseDiagramCommand(text) {
         cover: num('cover'), dia: num('dia'), spacing: num('spacing'),
         sectionThrough: Number.isFinite(st) ? st : 1,
         unit: kv.unit || 'mm',
-        pedestal, dowels, meshSpacing, meshDia, ties, band,
+        pedestal, dowels, meshSpacing, meshDia, blinding, ties, columnBars,
       });
     } else if (type === 'raft') {
       const st = num('sectionthrough');
@@ -1932,7 +2337,7 @@ export function parseDiagramCommand(text) {
         cover: num('cover'), dia: num('dia'), spacing: num('spacing'),
         sectionThrough: Number.isFinite(st) ? st : 1,
         unit: kv.unit || 'mm',
-        pedestal, dowels, meshSpacing, meshDia, ties, band,
+        pedestal, dowels, meshSpacing, meshDia, blinding, ties, columnBars,
       });
     } else {
       return { ok: false, code: 'UNSUPPORTED_TYPE', message: `"${type}" is not supported. Use isolated, combined, strip, or raft.` };
