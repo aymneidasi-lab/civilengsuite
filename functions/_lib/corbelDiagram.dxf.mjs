@@ -7,79 +7,86 @@
 //
 // computeCorbelDiagramGeometry() is consumed exactly as returned, imported
 // from corbelDiagram.mjs with zero modification to that file. This module
-// only renders; it never validates or computes. Verified directly against
-// that file's own compute() return shape before writing this:
-//   { type:'corbel', unit, id,
-//     geo: { colB, projection, av, h, h1, cover, tieBarDia, tieBarCount,
-//            stirrupDia, stirrupCount, bearingPlateWidth, d },
-//     tieLayer: { diaMM, count, barCentersMM }, meta: {...} }
+// only renders; it never validates or computes.
 //
 // v1 scope exclusions carried over unchanged from the prompt: no schedule
 // table (DXF TABLE), no long caption paragraph, no Arabic labels (English
 // only, hardcoded — not opts.lang-driven, matching every other
 // <element>.dxf.mjs in this project). Short per-entity text labels (e.g.
-// "Bearing Plate") are NOT "caption text" under that exclusion and were
-// already present before this revision.
+// "Bearing Plate") are NOT "caption text" under that exclusion.
 //
-// REVISION (guide-fidelity pass, same request/scope as corbelDiagram.mjs's
-// own header note — read that file's header for the full rationale; not
-// repeated verbatim here to keep the two files' comments from drifting out
-// of sync with each other over time): the bearing-plate edge-distance fix
-// needs NO change here (computeCorbelDiagramGeometry() owns that check;
-// this file only renders whatever geometry object it's handed). Render-
-// side changes, each the DXF-real-mm counterpart of the SVG-pixel fix of
-// the same name in corbelDiagram.mjs's own header:
-//   - exact-count Ah tie positions (distributeTicks() -> local
-//     distributeExact(), same reasoning as the SVG file)
-//   - a real 90-degree end hook on the main tie bar (was a bare straight
-//     "hookDrop"), arc+line, standard-hook proportions off tieBarDia
-//   - column ties immediately above the corbel (tieTickHDXF() — already
-//     exported, wasn't being called from this file)
-//   - bar-mark tags (barMarkTagDXF() — already exported, wasn't being
-//     called from this file) on the main bar, Ah ties, and column ties
-//   - a new third view, PLAN AT MAIN-STEEL LEVEL, same hairpin-anchorage
-//     geometry as the SVG file's renderPlanAnchorage(), independently
-//     re-derived in DXF's own y-up, real-mm arc-angle terms (verified by
-//     the same isolated-render-then-inspect method used for the SVG path
-//     — see the chat transcript's own geometry proof before this was
-//     written into the file; not assumed by analogy with the SVG
-//     derivation, since SVG path-arc sweep-flags and DXF start/end angles
-//     are different conventions that do not transliterate 1:1).
+// REVISION 3. Same scope as corbelDiagram.mjs's REVISION 4. No compute-side
+// change: computeCorbelDiagramGeometry()'s input contract and return shape
+// are byte-identical to the previous revision. Render-side changes only:
+//   D1. addHairpin180() renamed to addLoadedEndClosure180() and its doc
+//       comment corrected. The old name and its "bulging further in the
+//       ORIGINAL direction of travel (-x), i.e. away from the corbel"
+//       comment described the discarded main-bar hairpin around the
+//       column's far side (removed in REVISION 2), not the shape this
+//       function actually draws. The math was already right — a U-turn
+//       at the LOADED end of the closed tie — only the name/comment were
+//       stale, and a future maintainer trusting them could re-introduce
+//       the removed shape.
+//   D2. The plan-view tie-closure radius was bounded only by an
+//       arbitrary 0.18 * corbelStubDepth. At small colB that could push
+//       the return leg past colTopY. Now bounded by the same frame
+//       constraint the SVG path uses — (colTopY - tieY - margin)/2 — so
+//       the return leg always lands inside the section frame.
+//   D3. Plan-view mark 1's leader previously crossed the bearing-plate
+//       footprint (a vertical leader at x = entryX - 20, and entryX-20
+//       fell inside [plateX ± W/2] for typical CB1 inputs). Mark 1 tag
+//       moved to the clear upper-right gutter and its leader shortened
+//       so it enters the bar from outside the plate footprint, matching
+//       the SVG fix of the same name.
+//   D4. The Ah ≥ 0.5(As−An) callout was floating in the column stub at
+//       a y no reader associates with the Ah zone. In DXF there is no
+//       white-mask primitive equivalent to the SVG path's mask rect, and
+//       no placement inside the elevation's own Ah zone is leg-free at
+//       the DXF text height (110mm) the rest of the sheet uses. Moved to
+//       the margin to the right of the corbel at mid-height, and the
+//       file header notes this as an explicit DXF-vs-SVG deviation.
 //
-// REVISION 2 (correction pass, mirrors corbelDiagram.mjs's own REVISION 2
-// header — read that file for the full corner-by-corner derivation, not
-// repeated verbatim here): two errors, both confirmed against a fresh
-// high-resolution re-trace of the reference figure, not a guess:
-//   - the taper was backwards. TOP is flat (As runs level, no slope) and
-//     it is the BOTTOM that slopes — full depth h at the column face,
-//     shallower h1 at the tip. renderElevationViewDXF rewritten around a
-//     constant topY and a sloped bottomYAt(x).
-//   - the PLAN AT MAIN STEEL view's 180-degree hairpin never appeared in
-//     the reference. Replaced with what the figure actually shows: main
-//     bars run straight through the column, and only the outer bars (by
-//     width position) deflect at a shallow ANGLE toward their own
-//     nearest column corner; the closed tie is what closes with a
-//     rounded hook, at the LOADED end, not the column end. Also added:
-//     the four column-corner tie dots, and the bearing-plate footprint
-//     at shear span av (this view previously showed no load position at
-//     all). renderPlanAnchorageViewDXF rewritten around this reading.
+// The three RC-render corrections from REVISION 2 (flat top / sloped
+// bottom / vertical tip; loaded-end tie closure; corner deflections on
+// outer main bars only) are unchanged and untouched by this pass.
+//
+// REVISION 4 (this pass — integration-fix). Two execution-verified bugs
+// found by tracing the module against the kit's own documented contracts,
+// neither a logic-rewrite — one wrong arc angle pair, one missing kit
+// call:
+//   F1. addLoadedEndClosure180() drew its semicircle in the WRONG
+//       half-plane. DXF ARC always sweeps CCW from startAngle to
+//       endAngle, so the original (90, 270) passed through 180° (left
+//       of center) and bulged the closure -x, away from the tip —
+//       the exact opposite of the SVG loadedEndClosure180PathD(sweep=1)
+//       it is meant to mirror, and the opposite of this file's own
+//       D1 comment ("bulges in the direction of travel"). Fixed to
+//       (270, 90), which passes through 0° (right of center) and
+//       reproduces the SVG shape exactly for BOTH dir values (dir=-1
+//       draws the same curve, traversed from far end to near end —
+//       visually identical, handoff point unchanged).
+//   F2. renderPlanAnchorageViewDXF called dxf.addLine with
+//       lineType: 'DASHED' — a bare string — but nothing in this module
+//       ever registered a DASHED LTYPE. structuralDrawingDxfKit.mjs's
+//       own comment on defineDashedLType() states this exactly: an
+//       entity's lineType is written verbatim with no fallback, so an
+//       unregistered name dangles (renders continuous in some readers,
+//       errors in others, no fixed behavior). Fixed by importing
+//       defineDashedLType and DASHED_LTYPE_NAME from the kit, calling
+//       defineDashedLType(dxf) once in renderCorbelDiagramDXF right
+//       after defineDxfLayers(dxf), and replacing the literal 'DASHED'
+//       with the shared constant so the two names cannot drift.
 //
 // ── AXIS NOTE ──────────────────────────────────────────────────────────
-// Unlike stairDiagram.mjs (whose LOCAL profile coordinates are authored
-// y-down and need an explicit flip), corbelDiagram.mjs's own renderElevation
-// computes every SVG y-pixel directly as "baselineY - realHeightMM*scale"
-// — i.e. it already expresses every vertical position as a real mm height
-// ABOVE a baseline, just packaged as a screen-space subtraction. That
-// real-mm-above-baseline value is already exactly what a y-UP DXF world
-// needs, unchanged — no flip arithmetic required here (verified by
-// tracing the source's own topYAt()/tieStartY/tieEndY formulas before
-// writing this, not assumed by analogy with stairDiagram's different
-// case). World origin (0,0) below is the baseline/column-face corner:
-// x=0 at the column face (projection direction is +x), y=0 at the
-// baseline (the corbel's flat bottom face and the column stub's own
-// datum), matching corbelDiagram.mjs's own faceX/baselineY reference
-// point one-for-one. The new PLAN view (below) is a SEPARATE local frame
-// with its own origin, unrelated to this one — noted at its own function.
+// corbelDiagram.mjs's own renderElevation computes every SVG y-pixel as
+// "baselineY - realHeightMM*scale" — i.e. it already expresses every
+// vertical position as a real mm height ABOVE a baseline, just packaged
+// as a screen-space subtraction. That real-mm-above-baseline value is
+// already exactly what a y-UP DXF world needs, unchanged. World origin
+// (0,0) below is the baseline/column-face corner: x=0 at the column
+// face (projection direction is +x), y=0 at the baseline. The plan view
+// is a SEPARATE local frame with its own origin — noted at its own
+// function.
 
 import {
   DxfWriter,
@@ -87,6 +94,8 @@ import {
   Units,
   LAYERS,
   defineDxfLayers,
+  defineDashedLType,
+  DASHED_LTYPE_NAME,
   dxfText,
   closedRectDXF,
   closedPolylineDXF,
@@ -97,45 +106,35 @@ import {
   dimensionLineDXF,
   minPairwiseDistanceMM,
   DiagramError,
-} from '../shared/structuralDrawingDxfKit.mjs';
-import { TextHorizontalAlignment, TextVerticalAlignment } from '../shared/tarikjabiri-dxf.esm.js';
+} from './structuralDrawingDxfKit.mjs';
+import { TextHorizontalAlignment, TextVerticalAlignment } from './tarikjabiri-dxf.esm.js';
 
 // ── Layout conventions ──────────────────────────────────────────────
-// None of these come from geometry or from the prompt; each is a chosen
-// default for real-mm placement that the SVG path never needed (it drew
-// everything inside a fixed px canvas instead). All overridable via opts,
-// all named so they're auditable, per the session's "no magic number" rule.
+const COL_STUB_WIDTH_FACTOR = 0.55; // x h — also reused by the plan view's own schematic column "depth"
+const COL_STUB_ABOVE_FACTOR = 1.5;  // x h, height of stub above baseline
+const COL_STUB_BELOW_FACTOR = 0.4;  // x h, depth of stub below baseline
 
-// Column-stub proportions — direct real-mm translation of corbelDiagram.mjs's
-// own renderElevation proportions (colStubW = h*scale*0.55, colTopY =
-// baselineY - h*scale*1.5, colBottomY = baselineY + h*scale*0.4): the
-// SAME three ratios, applied to real h directly instead of h*scale px, so
-// the stub's schematic proportions to the corbel's own principal
-// dimension are preserved exactly, just unit-converted.
-const COL_STUB_WIDTH_FACTOR = 0.55; // x h — also reused by the new PLAN view's own schematic column "depth", same as corbelDiagram.mjs's COL_STUB_DEPTH_FACTOR
-const COL_STUB_ABOVE_FACTOR = 1.5; // x h, height of stub above baseline
-const COL_STUB_BELOW_FACTOR = 0.4; // x h, depth of stub below baseline
+const TIE_EMBEDMENT_MM = 30;
+const STIRRUP_ZONE_START_MIN_MM = 6;
 
-const TIE_EMBEDMENT_MM = 30; // min embedment length of the main tie bar into the column stub, past the face — mirrors the SVG source's own bare "30" (there, an unconverted px constant with no fixed mm meaning; given a named real-mm value here), still capped by 0.4x the stub width exactly as that source caps it
-const STIRRUP_ZONE_START_MIN_MM = 6; // min inset from the column face to the first closed-tie position — mirrors the SVG source's own bare "6"
-
-const PLATE_THICKNESS_MM = 20; // schematic bearing-plate thickness drawn above the corbel's sloped top surface — this geometry has no real plate-thickness input, so this is a representative visual convention, not a design value (same "schematic only" status the file header already assigns the bearing plate itself)
-const MARGIN_MM = 300; // gutter around the elevation view for dimension lines/labels
-const VIEW_GAP_MM = 600; // real-mm gap between views, model space
+const PLATE_THICKNESS_MM = 20;
+const MARGIN_MM = 300;
+const VIEW_GAP_MM = 600;
 const TITLE_HEIGHT_MM = 220;
-const SUBTITLE_HEIGHT_MM = 150; // view titles (ELEVATION/SECTION), dimension/plate labels
+const SUBTITLE_HEIGHT_MM = 150;
 const DIM_TEXT_HEIGHT_MM = 150;
 const NOTE_TEXT_HEIGHT_MM = 110;
+
+// D2 (this revision): minimum y-gap the plan view's Ah return leg keeps
+// from the column frame's own top edge. Named so the frame constraint is
+// auditable, not a bare constant.
+const PLAN_RETURN_LEG_MARGIN_MM = 20;
 
 function fmt0(mm) {
   return String(Math.round(mm));
 }
 
 // ── Standard hook / bend geometry (ACI 318-19 Table 25.3.1) ───────────
-// Identical formulas to corbelDiagram.mjs's own (duplicated, not
-// imported — the two render paths stay decoupled at the module level per
-// this project's own established convention; see that file's header for
-// the citation and the "schematic, not a BBS" caveat, not repeated here).
 function standardHookBendDiaMM(barDiaMM) {
   if (barDiaMM <= 25) return 6 * barDiaMM;
   if (barDiaMM <= 32) return 8 * barDiaMM;
@@ -147,14 +146,7 @@ function standardHookBendRadiusMM(barDiaMM) {
 function standardHook90ExtensionMM(barDiaMM) {
   return 12 * barDiaMM;
 }
-function standardHook180ExtensionMM(barDiaMM) {
-  return Math.max(4 * barDiaMM, 65);
-}
 
-// Exact-count position distribution — see corbelDiagram.mjs's own
-// distributeExact() header comment for why distributeTicks() (still used
-// elsewhere in this file's sibling modules) is the wrong tool for a
-// corbel's own Ah count specifically.
 function distributeExact(startMM, endMM, count) {
   const n = Math.max(1, Math.round(count));
   if (n === 1) return [(startMM + endMM) / 2];
@@ -164,11 +156,9 @@ function distributeExact(startMM, endMM, count) {
 
 // One 90-degree hook, DXF world (y-up): the incoming straight run ends at
 // (x,y) heading +x; this adds the quarter-circle bend plus a straight
-// tail, landing the bar heading -y (down toward the baseline). Center and
-// angle span derived and verified (see file header) so the arc's tangent
-// is horizontal at (x,y) and vertical at the hand-off point — NOT a
-// transliteration of the SVG path's sweep-flag, which has no DXF
-// equivalent. Returns the hand-off point so the caller can draw the tail.
+// tail, landing the bar heading -y. Center and angle span derived and
+// verified so the arc's tangent is horizontal at (x,y) and vertical at
+// the hand-off point. Returns the hand-off point.
 function addHookDown90(dxf, x, y, radiusMM, tailMM, layerName) {
   const center = point3d(x, y - radiusMM);
   dxf.addArc(center, radiusMM, 0, 90, { layerName });
@@ -178,27 +168,36 @@ function addHookDown90(dxf, x, y, radiusMM, tailMM, layerName) {
   return { x: exX, y: exY - tailMM };
 }
 
-// One 180-degree hairpin turn, in the PLAN view's own local frame: the
-// incoming run ends at (x,y) heading -x (into the column); this adds the
-// semicircular bend, landing the bar heading +x (back out), offset by one
-// bend diameter in y (dir=+1 toward +y, dir=-1 toward -y) — bulging
-// further in the ORIGINAL direction of travel (-x) either way, i.e. away
-// from the corbel, which is what makes it a U-turn rather than a hook
-// (both straight legs stay in this one plan plane). See file header for
-// the derivation. Returns the hand-off point for the return leg.
-function addHairpin180(dxf, x, y, radiusMM, dir, layerName) {
+// D1: renamed from addHairpin180. This draws the closed tie (Ah)'s own
+// 180-degree closure at the LOADED (tip) end of the corbel — NOT the
+// main-bar anchorage around the column's far side, which does not appear
+// in the reference and was removed in REVISION 2. Both straight legs stay
+// in this one plan plane (unlike a hook, which leaves the plane), and the
+// semicircle bulges in the direction of travel so the return leg sits one
+// bend diameter behind the incoming leg.
+//
+// F1 (REVISION 4): DXF ARC always sweeps CCW from startAngle to endAngle
+// in the entity's own coordinate system, so a chord-vertical semicircle
+// with center at (x, y+dir*r) is only correct as (270, 90) — that span
+// passes through 0° (right of center), producing a +x bulge that matches
+// SVG's loadedEndClosure180PathD(sweep=1) exactly. The original (90, 270)
+// passed through 180° and bulged -x, producing the mirror image of the
+// SVG shape and contradicting this function's own comment above. Because
+// the entity is a curve (direction-agnostic for rendering), the same
+// (270, 90) span is correct for dir=-1 as well: it draws the same
+// semicircle from far end to near end, and the handoff point returned
+// below is unchanged. Returns the hand-off point for the return leg.
+function addLoadedEndClosure180(dxf, x, y, radiusMM, dir, layerName) {
   const center = point3d(x, y + dir * radiusMM);
-  dxf.addArc(center, radiusMM, 90, 270, { layerName });
+  dxf.addArc(center, radiusMM, 270, 90, { layerName });
   return { x, y: y + dir * 2 * radiusMM };
 }
 
 function renderElevationViewDXF(dxf, geometry, origin) {
   const { colB, projection, av, h, h1, cover, tieBarDia, stirrupDia, stirrupCount, bearingPlateWidth, d } = geometry.geo;
-  const { x: ox, y: oy } = origin; // (ox,oy) maps to the column-face / FLAT-TOP corner
+  const { x: ox, y: oy } = origin;
 
-  // GEOMETRY CORRECTION: TOP is flat -- As runs level at oy across the
-  // whole span, no slope -- and the BOTTOM is what slopes: h below the
-  // top at the column face, the shallower h1 below the top at the tip.
+  // Flat top; sloped bottom (h at face, h1 at tip); vertical tip face.
   const bottomAtFaceY = oy - h;
   const bottomAtTipY = oy - h1;
   const bottomYAt = (xMM) => bottomAtFaceY + (xMM / projection) * (bottomAtTipY - bottomAtFaceY);
@@ -208,32 +207,27 @@ function renderElevationViewDXF(dxf, geometry, origin) {
     return projection * (yMM - bottomAtFaceY) / (bottomAtTipY - bottomAtFaceY);
   };
 
-  // Column stub (context only -- colB is the only real column dimension
-  // this module tracks; see file header's proportions).
+  // Column stub (context).
   const colStubWidth = h * COL_STUB_WIDTH_FACTOR;
   const colStubTop = oy + h * COL_STUB_ABOVE_FACTOR;
   const colStubBottom = bottomAtFaceY - h * COL_STUB_BELOW_FACTOR;
   closedRectDXF(dxf, ox - colStubWidth, colStubBottom, colStubWidth, colStubTop - colStubBottom, LAYERS.CONCRETE_OUTLINE.name);
 
-  // The column's own longitudinal bars -- context only (no real column
-  // reinforcement input; see file header).
+  // Column longitudinal bars (context).
   const colBarInset = Math.max(15, colStubWidth * 0.12);
   const colBarXs = [ox - colStubWidth + colBarInset, ox - colBarInset];
   for (const x of colBarXs) {
     dxf.addLine(point3d(x, colStubBottom + 6), point3d(x, colStubTop - 6), { layerName: LAYERS.REBAR_TOP.name });
   }
 
-  // Column ties immediately above the corbel -- GEOMETRY CORRECTION (per
-  // direct user review against the reference): a tie wraps the column's
-  // own LONGITUDINAL BARS, not the bare concrete width -- previously
-  // spanned the full stub width, past both bars into the cover.
+  // Column ties immediately above the corbel, wrapping the column's own
+  // longitudinal bars (not the bare concrete width).
   const colTieBandTop = oy + (colStubTop - oy) * 0.82;
   const colTieBandBottom = oy + (colStubTop - oy) * 0.18;
   const colTieYs = distributeExact(colTieBandBottom, colTieBandTop, 2);
   for (const y of colTieYs) tieTickHDXF(dxf, colBarXs[0], colBarXs[1], y, LAYERS.REBAR_BOTTOM.name);
 
-  // Corbel outline: flat top (face to tip) -> down the tip's own short
-  // face -> sloped bottom back to the face -> up the face.
+  // Corbel outline.
   closedPolylineDXF(dxf, [
     { x: ox, y: oy },
     { x: ox + projection, y: oy },
@@ -241,9 +235,9 @@ function renderElevationViewDXF(dxf, geometry, origin) {
     { x: ox, y: bottomAtFaceY },
   ], LAYERS.CONCRETE_OUTLINE.name);
 
-  // Main tie bar + 90-degree end hook at the loaded face.
+  // Main tie bar + 90-degree end hook.
   const tieOffset = cover + tieBarDia / 2;
-  const tieY = oy - tieOffset; // level throughout -- no slope on this face
+  const tieY = oy - tieOffset;
   const tieStartX = ox - Math.min(TIE_EMBEDMENT_MM, colStubWidth * 0.4);
   const hookRadiusMM = Math.min(
     standardHookBendRadiusMM(tieBarDia),
@@ -259,13 +253,7 @@ function renderElevationViewDXF(dxf, geometry, origin) {
   const hookTailMM = Math.min(standardHook90ExtensionMM(tieBarDia), maxHookTailMM);
   addHookDown90(dxf, tieEndX, tieY, hookRadiusMM, hookTailMM, LAYERS.REBAR_TOP.name);
 
-  // GEOMETRY CORRECTION (per the same review): Ah is NOT a vertical
-  // tick. The reference draws it exactly like As -- a HORIZONTAL bar,
-  // level, one per stirrupCount, stacked within (2/3)d of the column
-  // face (measured from As down toward the compression face at the
-  // column -- "d", not "h"). Each bar is cut off by the real sloped
-  // boundary via xAtBottomY(), matching the reference's own bars, which
-  // visibly get shorter the further down they sit.
+  // Ah bars — horizontal, level, cut by the real sloped boundary.
   const zoneBottomY = tieY - (2 / 3) * d;
   const ahColorLayers = [LAYERS.REBAR_EXTRA.name, LAYERS.ZONE_LABEL.name, LAYERS.STIRRUP_TIE.name, LAYERS.REBAR_HORIZONTAL.name];
   const ahYs = distributeExact(tieY - cover * 1.4, Math.max(zoneBottomY, bottomAtFaceY + cover * 0.6), stirrupCount);
@@ -274,13 +262,7 @@ function renderElevationViewDXF(dxf, geometry, origin) {
     dxf.addLine(point3d(ox - Math.min(20, colStubWidth * 0.3), y), point3d(ox + Math.max(10, xEndRel), y), { layerName: ahColorLayers[i % ahColorLayers.length] });
   });
 
-  // GEOMETRY ADDITION: the reference also draws secondary horizontal
-  // bars BELOW (2/3)d, in the remaining third of d toward the column's
-  // compression face -- outside the code-mandated Ah zone (ACI 318
-  // 16.5.5.2 / the same ECP clause caps Ah's OWN distribution at 2/3 d,
-  // no further), so these are not part of the Ah count either. Fixed at
-  // 2, same "placement only, no input for the count" status as the
-  // vertical legs and the strut-parallel bar below.
+  // Extra horizontal bars below (2/3)d, outside the Ah zone.
   const extraZoneTop = Math.max(zoneBottomY, bottomAtFaceY + cover * 0.6) - cover * 1.2;
   const extraZoneBottom = bottomAtFaceY + cover * 1.4;
   const extraYs = extraZoneTop > extraZoneBottom ? distributeExact(extraZoneTop, extraZoneBottom, 2) : [];
@@ -289,15 +271,8 @@ function renderElevationViewDXF(dxf, geometry, origin) {
     dxf.addLine(point3d(ox - Math.min(20, colStubWidth * 0.3), y), point3d(ox + Math.max(10, xEndRel), y), { layerName: LAYERS.REBAR_BOTTOM.name });
   }
 
-  // GEOMETRY ADDITION (per the same review -- vertical ties, named by
-  // the reference's own callout, were entirely absent before this):
-  // closed ties are RECTANGULAR loops, so the "parallel to As"
-  // horizontal legs above need a vertical leg to close them. A fixed,
-  // schematic 3 length-positions (no input for how many -- same status
-  // as the 2 column ties: placement is real, count is a drawing
-  // convention). Each leg runs from As down to the REAL sloped boundary
-  // at that x. Colored to match the reference's own choice (same family
-  // as the column ties, not the Ah bars).
+  // Vertical tie legs — three schematic positions, each down to the real
+  // sloped boundary at its own x.
   const legZoneStartX = ox + Math.max(10, colStubWidth * 0.15);
   const legZoneEndX = ox + projection * 0.68;
   const legXs = distributeExact(legZoneStartX, legZoneEndX, 3);
@@ -305,10 +280,7 @@ function renderElevationViewDXF(dxf, geometry, origin) {
     dxf.addLine(point3d(x, tieY), point3d(x, bottomYAt(Math.min(x - ox, projection)) + cover * 0.5), { layerName: LAYERS.REBAR_BOTTOM.name });
   }
 
-  // GEOMETRY ADDITION: steel running the length of (parallel and
-  // adjacent to) the compression strut line, not just crossing it --
-  // drawn as its own offset line alongside the strut, spanning nearly
-  // the full sloped face.
+  // Strut-parallel bar, offset alongside the compression strut.
   const stirrupOffsetMM = Math.max(10, stirrupDia * 1.5);
   const strutX1 = ox + projection - cover * 1.5;
   const strutY1 = bottomYAt(strutX1 - ox) + cover * 0.5;
@@ -322,30 +294,34 @@ function renderElevationViewDXF(dxf, geometry, origin) {
     point3d(strutX2 + strutNx * stirrupOffsetMM, strutY2 + strutNy * stirrupOffsetMM),
     { layerName: LAYERS.REBAR_BOTTOM.name },
   );
-  dxfText(dxf, strutX2 + 40, (strutY1 + strutY2) / 2 - 150, NOTE_TEXT_HEIGHT_MM, 'Ah >= 0.5(As-An)', {
-    layerName: LAYERS.ANNOTATION.name, hAlign: TextHorizontalAlignment.Left, vAlign: TextVerticalAlignment.Top,
+
+  // D4: Ah ≥ 0.5(As−An) callout moved OUT of the column stub (its previous
+  // position was floating in the column concrete, at a y the reader does
+  // not associate with the Ah zone) and OUT of the elevation body entirely
+  // — no placement inside the corbel outline is leg-free at the 110mm DXF
+  // text height the rest of the sheet uses, and DXF has no white-mask
+  // primitive equivalent to the SVG path's mask rect. Placed in the
+  // right-hand margin, clearly associated with the corbel by proximity and
+  // by the reader's own knowledge that this is the only corbel on the
+  // sheet. This is an explicit DXF-vs-SVG deviation — documented here
+  // rather than hidden.
+  dxfText(dxf, ox + projection + MARGIN_MM * 0.35, oy - h / 2, NOTE_TEXT_HEIGHT_MM, 'Ah >= 0.5(As-An)', {
+    layerName: LAYERS.ANNOTATION.name, hAlign: TextHorizontalAlignment.Left, vAlign: TextVerticalAlignment.Middle,
   });
 
-  // Mark 1 -- a short bar near the loaded face, same color/family as the
-  // column ties in the reference -- distinct from As (mark 2 there) and
-  // drawn just above the bearing plate.
+  // Short loaded-face bar (schematic; placement only).
   const mark1Len = Math.max(80, bearingPlateWidth * 0.6);
   const mark1Y = oy + PLATE_THICKNESS_MM + 90;
   dxf.addLine(point3d(ox + av - mark1Len / 2, mark1Y), point3d(ox + av + mark1Len / 2, mark1Y), { layerName: LAYERS.REBAR_BOTTOM.name });
 
-  // Bearing plate -- sits directly on the flat top, no slope to project
-  // it onto.
+  // Bearing plate.
   closedRectDXF(dxf, ox + av - bearingPlateWidth / 2, oy, bearingPlateWidth, PLATE_THICKNESS_MM, LAYERS.BEARING_PLATE.name);
   dxfText(dxf, ox + av, oy + PLATE_THICKNESS_MM + SUBTITLE_HEIGHT_MM * 0.4, SUBTITLE_HEIGHT_MM, 'Bearing Plate', {
     layerName: LAYERS.DIMENSIONS.name, hAlign: TextHorizontalAlignment.Center, vAlign: TextVerticalAlignment.Bottom,
   });
   dimensionLineDXF(dxf, ox + av + bearingPlateWidth / 2, oy + MARGIN_MM * 0.75, ox + projection, oy + MARGIN_MM * 0.75, `edge >= max(dia,cover)=${fmt0(Math.max(tieBarDia, cover))}mm`, { orientation: 'h', textHeightMM: NOTE_TEXT_HEIGHT_MM });
 
-  // Dimensions -- av, total projection (a) below everything; h (at
-  // face), h1 (at tip), d and (2/3)d (from As toward the column-face
-  // compression fiber) all measured DOWN from the flat top. d/(2/3)d
-  // are a GEOMETRY ADDITION: this zone was computed and used to place
-  // ties, but never actually drawn/labeled on the sheet before.
+  // Dimensions.
   dimensionLineDXF(dxf, ox, colStubBottom - MARGIN_MM * 0.4, ox + av, colStubBottom - MARGIN_MM * 0.4, `av=${fmt0(av)}mm`, { orientation: 'h', textHeightMM: DIM_TEXT_HEIGHT_MM });
   dimensionLineDXF(dxf, ox, colStubBottom - MARGIN_MM * 0.8, ox + projection, colStubBottom - MARGIN_MM * 0.8, `a=${fmt0(projection)}mm`, { orientation: 'h', textHeightMM: DIM_TEXT_HEIGHT_MM });
   dimensionLineDXF(dxf, ox - MARGIN_MM * 0.5, oy, ox - MARGIN_MM * 0.5, bottomAtFaceY, `h=${fmt0(h)}mm`, { orientation: 'v', textHeightMM: DIM_TEXT_HEIGHT_MM });
@@ -353,8 +329,7 @@ function renderElevationViewDXF(dxf, geometry, origin) {
   dimensionLineDXF(dxf, ox - MARGIN_MM * 1.6, tieY, ox - MARGIN_MM * 1.6, zoneBottomY, '(2/3)d', { orientation: 'v', textHeightMM: DIM_TEXT_HEIGHT_MM });
   dimensionLineDXF(dxf, ox + projection + MARGIN_MM * 0.5, oy, ox + projection + MARGIN_MM * 0.5, bottomAtTipY, `h1=${fmt0(h1)}mm`, { orientation: 'v', textHeightMM: DIM_TEXT_HEIGHT_MM });
 
-  // Bar-mark tags -- mark 1 (main tie), 2 (closed ties), 3 (column
-  // ties), matching this element's own SVG path (same three marks).
+  // Bar-mark tags.
   barMarkTagDXF(dxf, tieStartX - 200, tieY, '1', LAYERS.MARK_TAGS.name, { leaderTo: { x: tieStartX, y: tieY } });
   if (ahYs.length) {
     barMarkTagDXF(dxf, ox + 150, bottomAtFaceY + 200, '2', LAYERS.MARK_TAGS.name, { leaderTo: { x: legXs[0], y: ahYs[0] } });
@@ -381,12 +356,8 @@ function renderSectionViewDXF(dxf, geometry, origin) {
   const stirrupInset = cover;
   closedRectDXF(dxf, ox + stirrupInset, oy + stirrupInset, colB - 2 * stirrupInset, h - 2 * stirrupInset, LAYERS.STIRRUP_TIE.name);
 
-  const tieY = oy + h - (cover + tieBarDia / 2); // near the TOP face (tension tie steel), mirrors source's own tieY = sy + (cover+dia/2)*scale measured from the top of its y-down section box
+  const tieY = oy + h - (cover + tieBarDia / 2);
   const centers = tieLayer.barCentersMM.map((c) => ({ x: ox + c, y: tieY }));
-  // Real on-drawing pitch for this specific bar layer (evenly spaced
-  // across colB by computeBarLayerAcrossWidth(), but the true minimum
-  // spacing is still measured live, per the units decision's bar-dot-
-  // radius rule — never the schema's static spacing floor).
   const tiePitchMM = minPairwiseDistanceMM(centers);
   for (const c of centers) {
     barDotDXF(dxf, c.x, c.y, tieBarDia, tiePitchMM, LAYERS.REBAR_TOP.name);
@@ -402,20 +373,18 @@ function renderSectionViewDXF(dxf, geometry, origin) {
 }
 
 // PLAN AT MAIN-STEEL LEVEL — the reference guide's own "A-A" horizontal
-// section: each main bar turns through a 180-degree hairpin around the
-// column's far side, the small-diameter (<16mm) anchorage convention the
-// guide documents (see corbelDiagram.mjs header for the full citation).
-// OWN LOCAL FRAME, unrelated to the elevation's: local x=0 at the
-// column/corbel face, +x toward the corbel/tip, -x into the column;
-// local y = position across colB (arbitrary sense, consistent within
-// this view only). Column "depth" here is the SAME schematic proportion
-// of h the elevation's own stub already uses (COL_STUB_WIDTH_FACTOR) —
-// not a new real dimension; this module still has no real column-depth
-// input (see file header).
+// section. Main bars run straight through the column; only the outer bars
+// (nearest the top/bottom edge) deflect at a shallow angle toward their
+// own nearest column corner. The closed tie (Ah) closes with a rounded
+// U-turn at the LOADED end of the corbel. OWN LOCAL FRAME: local x=0 at
+// the column/corbel face, +x toward the corbel/tip, -x into the column;
+// local y = position across colB. Column "depth" here is the SAME
+// schematic proportion of h the elevation's own stub uses
+// (COL_STUB_WIDTH_FACTOR) — not a new real dimension.
 function renderPlanAnchorageViewDXF(dxf, geometry, origin) {
   const { colB, h, projection, av, tieBarDia, cover, bearingPlateWidth } = geometry.geo;
   const { tieLayer } = geometry;
-  const { x: ox, y: oy } = origin; // maps to the local (0,0): column/corbel face, y=0 edge of colB
+  const { x: ox, y: oy } = origin;
 
   const colDepth = h * COL_STUB_WIDTH_FACTOR;
   const colFarX = ox - colDepth;
@@ -425,29 +394,23 @@ function renderPlanAnchorageViewDXF(dxf, geometry, origin) {
 
   closedRectDXF(dxf, colFarX, oy, colDepth, colB, LAYERS.CONCRETE_OUTLINE.name);
   closedRectDXF(dxf, ox, oy, corbelStubDepth, colB, LAYERS.CONCRETE_OUTLINE.name);
-  dxf.addLine(point3d(ox, oy), point3d(ox, colTopY), { layerName: LAYERS.CONCRETE_OUTLINE.name, lineType: 'DASHED' });
+  // F2 (REVISION 4): lineType must reference a registered LTYPE name.
+  // DASHED_LTYPE_NAME is the kit's own constant; defineDashedLType(dxf)
+  // is called once in renderCorbelDiagramDXF before any entity is added.
+  dxf.addLine(point3d(ox, oy), point3d(ox, colTopY), { layerName: LAYERS.CONCRETE_OUTLINE.name, lineType: DASHED_LTYPE_NAME });
 
-  // Bearing-plate footprint at shear span av — addresses "where does the
-  // load actually sit", which this view previously showed nowhere.
+  // Bearing-plate footprint at shear span av, clipped to the section
+  // frame — the SVG fix of the same name; previously extended 15mm past
+  // both colB edges.
   const plateFootprintX = ox + av;
   const plateFootprintW = Math.max(10, bearingPlateWidth);
-  const rect = [
-    { x: plateFootprintX - plateFootprintW / 2, y: oy - 15 },
-    { x: plateFootprintX + plateFootprintW / 2, y: oy - 15 },
-    { x: plateFootprintX + plateFootprintW / 2, y: colTopY + 15 },
-    { x: plateFootprintX - plateFootprintW / 2, y: colTopY + 15 },
-  ];
-  for (let i = 0; i < 4; i++) {
-    dxf.addLine(point3d(rect[i].x, rect[i].y), point3d(rect[(i + 1) % 4].x, rect[(i + 1) % 4].y), { layerName: LAYERS.DIMENSIONS.name, lineType: 'DASHED' });
-  }
+  closedRectDXF(dxf, plateFootprintX - plateFootprintW / 2, oy, plateFootprintW, colB, LAYERS.BEARING_PLATE.name);
   dxfText(dxf, plateFootprintX, colTopY + 40, NOTE_TEXT_HEIGHT_MM, 'Bearing Plate', {
     layerName: LAYERS.DIMENSIONS.name, hAlign: TextHorizontalAlignment.Center, vAlign: TextVerticalAlignment.Bottom,
   });
 
-  // Main bars: straight through the column; only the bars nearest an
-  // edge deflect, at a shallow ANGLE — not a curve — toward that edge's
-  // own nearest column corner (REVISION 2: replaces a 180-degree hairpin
-  // that does not appear in the reference — see file header).
+  // Main bars: straight through the column; outer bars deflect toward
+  // their own nearest column corner.
   const cornerMarginMM = Math.max(9, cover * 1.1);
   const bendZoneStartX = colFarX + Math.max(24, colDepth * 0.3);
   const topEdgeMM = colB / 3;
@@ -463,15 +426,13 @@ function renderPlanAnchorageViewDXF(dxf, geometry, origin) {
     dxf.addLine(point3d(bendZoneStartX, y), point3d(colFarX + cornerMarginMM, targetY), { layerName: LAYERS.REBAR_TOP.name });
   }
 
-  // Column tie (mark 3) — a closed rectangular loop just inside the
-  // column footprint, matching the reference's own drawn shape
-  // (previously just 4 unconnected corner dots, no loop between them).
+  // Column tie (mark 3) — closed rectangular loop just inside the column
+  // footprint.
   const tieInsetMM = Math.max(20, cornerMarginMM * 0.7);
   closedRectDXF(dxf, colFarX + tieInsetMM, oy + tieInsetMM, colDepth - 2 * tieInsetMM, colB - 2 * tieInsetMM, LAYERS.REBAR_BOTTOM.name);
 
   // Column corner dots — at the same corners the loop above passes
-  // through, matching the reference's own corner markers (previously
-  // absent from this view).
+  // through.
   const corners = [
     { x: colFarX, y: oy }, { x: ox, y: oy },
     { x: colFarX, y: colTopY }, { x: ox, y: colTopY },
@@ -479,26 +440,38 @@ function renderPlanAnchorageViewDXF(dxf, geometry, origin) {
   const cornerPitchMM = minPairwiseDistanceMM(corners);
   for (const { x, y } of corners) barDotDXF(dxf, x, y, tieBarDia, cornerPitchMM, LAYERS.REBAR_BOTTOM.name);
 
-  // Closed tie (Ah), one representative run, closing with a rounded hook
-  // at the LOADED end (REVISION 2 — was closing at the column end via
-  // the same wrong hairpin; see file header). Positioned in the gap
-  // between the first two main bars so it never merges visually with
-  // either; falls back to mid-width with a single bar.
+  // Closed tie (Ah) — one representative run, closing with a rounded
+  // U-turn at the LOADED end.
   const centers = tieLayer.barCentersMM;
   const tieCMM = centers.length >= 2 ? (centers[0] + centers[1]) / 2 : colB / 2;
   const tieY = oy + tieCMM;
-  const tieRadiusMM = Math.max(15, Math.min(60, corbelStubDepth * 0.18));
+  // D2 (this revision): radius bounded by the frame constraint the SVG
+  // path uses — (colTopY - tieY - margin)/2 — so the return leg never
+  // leaves the section frame at small colB. The old 0.18*stubDepth bound
+  // alone could push it past colTopY.
+  const remainingToTopMM = colTopY - tieY;
+  const maxRadiusFromFrameMM = Math.max(8, (remainingToTopMM - PLAN_RETURN_LEG_MARGIN_MM) / 2);
+  const tieRadiusMM = Math.max(8, Math.min(60, corbelStubDepth * 0.18, maxRadiusFromFrameMM));
   const tieBendX = corbelFarX - Math.max(20, tieRadiusMM * 0.7);
   const tieStartX = colFarX + cornerMarginMM + 10;
   dxf.addLine(point3d(tieStartX, tieY), point3d(tieBendX, tieY), { layerName: LAYERS.STIRRUP_TIE.name });
-  const handoff = addHairpin180(dxf, tieBendX, tieY, tieRadiusMM, 1, LAYERS.STIRRUP_TIE.name);
+  const handoff = addLoadedEndClosure180(dxf, tieBendX, tieY, tieRadiusMM, 1, LAYERS.STIRRUP_TIE.name);
   dxf.addLine(point3d(tieBendX, handoff.y), point3d(tieStartX, handoff.y), { layerName: LAYERS.STIRRUP_TIE.name });
   dxfText(dxf, tieStartX + 20, tieY + 30, SUBTITLE_HEIGHT_MM * 0.7, 'Ah', {
     layerName: LAYERS.STIRRUP_TIE.name, hAlign: TextHorizontalAlignment.Left, vAlign: TextVerticalAlignment.Bottom,
   });
 
-  // Bar-mark tags — mark 1 (main tie), 2 (closed tie), 3 (column ties).
-  barMarkTagDXF(dxf, entryX - 20, colTopY + 200, '1', LAYERS.MARK_TAGS.name, { leaderTo: { x: entryX - 20, y: oy + centers[0] } });
+  // D3 (this revision): mark 1 tag moved out of the plate footprint's
+  // own x-range, and its leader shortened to a short diagonal entering
+  // the bar from OUTSIDE the plate footprint. Previously the tag sat at
+  // entryX - 20 with a vertical leader straight down through
+  // [plateFootprintX ± W/2] for typical CB1 inputs. Mark 2, mark 3
+  // positions unchanged — no collision was found for either.
+  const mark1TagX = corbelFarX + 40;
+  const mark1TagY = colTopY + 200;
+  barMarkTagDXF(dxf, mark1TagX, mark1TagY, '1', LAYERS.MARK_TAGS.name, {
+    leaderTo: { x: entryX, y: oy + centers[0] },
+  });
   barMarkTagDXF(dxf, tieStartX + 40, tieY - 200, '2', LAYERS.MARK_TAGS.name, { leaderTo: { x: tieStartX + 40, y: tieY } });
   barMarkTagDXF(dxf, colFarX - 200, oy - 200, '3', LAYERS.MARK_TAGS.name, { leaderTo: { x: colFarX, y: oy } });
 
@@ -518,6 +491,14 @@ export function renderCorbelDiagramDXF(geometry, opts = {}) {
   const dxf = new DxfWriter();
   dxf.setUnits(Units.Millimeters);
   defineDxfLayers(dxf);
+  // F2 (REVISION 4): register the DASHED linetype before any entity
+  // references it. DXF LTYPE must be defined in the document before a
+  // LINE/LWPOLYLINE can name it — the tarikjabiri-dxf writer does not
+  // fall back to Continuous for a dangling entity-level lineType (that
+  // fallback only exists for a LAYER's own default linetype). Called
+  // once here, at the same point as defineDxfLayers, so the ordering
+  // guarantee is auditable in one place.
+  defineDashedLType(dxf);
 
   const elevOrigin = { x: 0, y: 0 };
   const elevation = renderElevationViewDXF(dxf, geometry, elevOrigin);

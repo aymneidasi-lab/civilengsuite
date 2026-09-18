@@ -1,155 +1,99 @@
 // functions/_lib/corbelDiagram.mjs
 //
-// New-element track (session25 gate, corrected candidate — supersedes
-// the earlier "Isolated footing over pile" pick, which turned out to
-// already be built as pileCapDiagram.mjs; see that file's own header).
 // Deterministic, zero-AI SVG generator for a single corbel/bracket
-// projecting from one face of a column, per ACI 318-19 §16.5's short-
-// cantilever ("corbel") member class — the same "compute is arithmetic
-// on real input, never a guess" discipline as every sibling module.
-// Architecture follows columnDiagram.mjs literally (own file, own local
-// `L` dict, own MIN_*/MAX_* sanity caps, compute -> render ->
-// parseDiagramCommand -> parse*RebarPayload, DiagramError/kit imports
-// from structuralDrawingKit.mjs), matching pileCapDiagram.mjs's own
-// restatement of that same instruction.
+// projecting from one face of a column, per ACI 318-19 §16.5.
 //
-// [Build-only, per explicit user instruction this session] This file
-// is deliberately NOT wired into diagramCommandRouter.mjs, chat.js's
-// three dispatch tables, or either footing_pro/pc_suite HTML front end.
-// That wiring is this project's own documented definition of "done" for
-// a new element (see برومبت_استكمال_العمل_v17.md's Part 2), and is
-// skipped here only because the user explicitly asked for it to wait
-// until a later file update — not because of any architectural
-// blocker. Whoever performs that wiring later should follow
-// pileCapDiagram.mjs's own router/chat.js entries as the direct
-// template (same four-point shape: import, PARSERS[] entry,
-// DIAGRAM_TYPE_RENDERERS/DIAGRAM_TYPE_ERROR_MESSAGE/
-// REBAR_ELEMENT_DISPATCH entries, quick-reply menu entry in both HTML
-// files) — this header flags it explicitly rather than leaving a
-// future session to rediscover it silently, per this project's own
-// "don't skip a Part-2 item silently" convention.
+// REVISION 4 (this pass — layout parity with the reviewed hand-drawn SVG).
+// No compute-side change: computeCorbelDiagramGeometry()'s input contract
+// and return shape are byte-identical to the previous revision, so
+// corbelDiagram_dxf.mjs's "consumed exactly as returned" contract still
+// holds. Only renderCorbelDiagramSVG()'s layout constants and two text
+// placements change:
+//   L1. ELEVATION_BOX enlarged (h: 360 -> 560) and its contentH formula
+//       tightened (h*2.2 -> h*1.7), so fitScale() lands near 0.55 instead
+//       of the previous 0.245 — the corbel previously rendered at roughly
+//       a third the size the sheet had room for.
+//   L2. SECTION_BOX / PLAN_BOX pushed down (y: 480 -> 680) to clear the
+//       taller elevation box; canvas height grows accordingly.
+//   L3. Ah ≥ 0.5(As−An) callout moved from the strut's own midpoint
+//       (where the sloped bottom edge and the strut-parallel bar ran
+//       through its glyphs) into the clean horizontal band between the
+//       last Ah bar and the first extra bar, with a white mask so the
+//       middle vertical tie leg doesn't strike through it.
+//   L4. Plan-view mark tags: mark 1 moved out to the clear upper-right
+//       gutter (was landing on the "Bearing Plate" label); mark 3 moved
+//       to the plan box's own upper-left gutter (was landing on the view
+//       heading). Mark 2 unchanged.
+//   L5. Plan-view "Bearing Plate" label raised 10px so it clears the
+//       mark-1 tag's leader line.
+//   L6. A standalone "Column ties…" note added below the schedule
+//       table — the caption already says this, but the drawing now
+//       states it once at the point of use too.
 //
-// This app's own chat.js already carries corbel design knowledge (see
-// its "CORBELS AND SHORT CANTILEVERS — ACI 318-19 §16.5" block) used
-// for conversational Q&A, and states corbel design is roadmap/not yet
-// released as a drawing feature — this file is that drawing feature.
-// The engineering rules cited in this header (a/d <= 1.0, no inclined
-// bars, Ah adjacent to As) are taken directly from that existing block,
-// not invented independently, so the two stay consistent.
+// The three RC-render corrections from REVISION 2 (flat top / sloped
+// bottom / vertical tip; loaded-end tie closure; corner deflections on
+// outer main bars only) are unchanged and untouched by this pass.
 //
-// ── SCOPE (v1) ──────────────────────────────────────────────────────────
-// Exactly ONE corbel projecting from ONE vertical face of ONE column,
-// full column width (corbel width == colB, flush both side faces — no
-// narrower/wider corbel). Corbel depth tapers linearly from `h` at the
-// column face to `h1` at the outer tip, top face sloped, bottom face
-// flat and level with the column's own bearing line. ONE bearing plate
-// (rectangular, schematic only) centered at shear span `av` from the
-// column face. ONE layer of main (top) tension tie bars, ONE uniform
-// diameter, drawn parallel to the sloped top face at `cover` clear
-// distance (see "Rendering note" below for why parallel-to-slope, not
-// horizontal). Closed horizontal ties (Ah) distributed within (2/3)d of
-// the column face, per this app's own cited ACI 318 §16.5 language,
-// same uniform diameter.
-//
-// STILL NOT MODELED, on purpose (same "explicit scope boundary"
-// convention every sibling module's header uses):
-//   - any ACI 318 §16.5 STRENGTH check: flexure-plus-horizontal-tension
-//     (Mu, Nu combined), shear (Vn = Vc), or bearing strength at the
-//     plate (§22.8). This module only enforces the GEOMETRIC scope
-//     boundary that defines a corbel as a corbel (av/d <= 1.0) and a
-//     handful of schematic-drawability guards (taper minimum, plate-
-//     within-projection, bar-room-across-width) — none of these is a
-//     substitute for the actual design check, exactly as
-//     pileCapDiagram.mjs's own header draws the same line for pile
-//     capacity/group interaction.
-//   - inclined (diagonal) shear reinforcement — deliberately excluded,
-//     per this app's own chat.js text: "shown to be ineffective in
-//     corbel tests." Not a gap; a documented exclusion.
-//   - hanger bars / U-bar stirrup variants at the bearing plate, framing
-//     bars, or any bolted/welded steel bracket connection at the plate
-//     itself (only a plain schematic rectangle is drawn for the plate).
-//   - the column's own real cross-section, height, or reinforcement —
-//     drawn only as a proportioned stub block long enough to show the
-//     corbel's anchorage into it. colB is the ONE column dimension this
-//     module actually uses (it sets the corbel's own width).
-//   - more than one corbel on the same column, or a corbel on more than
-//     one face.
-//   - non-rectangular (e.g. haunched top, dapped-end interaction) corbel
-//     outlines.
-//
-// ── INPUT CONTRACT ───────────────────────────────────────────────────
-// {
-//   unit?: 'mm'|'cm'|'m',              // default 'mm'
-//   corbelId?: string,                 // mark, e.g. "C-1"
-//   colB: number,                      // column width == corbel width
-//   projection: number,                // 'a' — total horizontal length,
-//                                      // column face to outer tip
-//   av: number,                       // shear span — column face to
-//                                      // bearing-plate centerline
-//   h: number,                         // corbel depth at column face
-//   h1: number,                        // corbel depth at outer tip
-//                                      // (must be < h; taper)
-//   cover: number,                     // clear cover to main tie bars,
-//                                      // measured perpendicular to the
-//                                      // sloped top face
-//   tieBarDia: number,                 // main (top) tie bar diameter
-//   tieBarCount: number,               // integer, 2..8
-//   stirrupDia: number,                // closed horizontal tie (Ah) dia
-//   stirrupCount: number,              // integer, 1..8
-//   bearingPlateWidth: number,         // plate dimension along the
-//                                      // projection direction
-// }
-//
-// ── Rendering note — why the tie bar is drawn PARALLEL to the slope ──
-// A main tie bar held at a FIXED height above the flat bottom face
-// (i.e. horizontal) has shrinking clearance to the sloped top face as
-// x moves toward the tip, and can only keep `cover` at every x if h1 is
-// implausibly close to h — checked directly by drawing both ways during
-// this module's own development and confirmed geometrically, not
-// assumed. Offsetting the bar a constant `cover + tieBarDia/2` inward
-// from the sloped top face itself (so the bar's own line runs parallel
-// to that slope) keeps correct cover at every x with no special case at
-// the tip, and matches a detailing practice some corbels genuinely use
-// (bar bent to follow the taper). The av/d SCOPE check below still uses
-// the FACE-section effective depth d = h - cover - tieBarDia/2, per
-// standard corbel notation (d is always evaluated at the column face,
-// regardless of how the bar is subsequently drawn along its length).
-//
-// Resource lifecycle: pure/synchronous, zero state, no timers/fetch/KV/
-// handles — same as every sibling module.
-//
-// Fully deterministic — no `env.AI`, no model call, no network fetch, no
-// randomness anywhere in this file, same Step-17 statement every
-// sibling module restates in its own header.
+// Resource lifecycle: pure/synchronous, zero state, no timers/fetch/KV.
+// Fully deterministic.
 
 import {
   DiagramError, toMm, fmt, assertFinitePositive, assertInt,
   esc, captionLineCount, renderCaptionAt, fontStacks, kitStyleBlock,
-  hatchDefs, dimensionLine, barDot, stirrupTick, distributeTicks,
+  hatchDefs, dimensionLine, barDot, barMarkTag,
   fitScale, scheduleTable, svgToDataUri,
 } from './structuralDrawingKit.mjs';
 
 export { DiagramError, svgToDataUri };
 
 // ── Sanity caps ──────────────────────────────────────────────────────
-// Own file, own values — not shared with columnDiagram.mjs/
-// pileCapDiagram.mjs's own constants, per this project's per-file
-// convention. Bounds worst-case loop counts/input ranges so one request
-// can't build an oversized SVG or blow a Worker's CPU-time budget.
 const MIN_COL_B_MM = 200;
 const MAX_COL_B_MM = 1500;
 const MIN_H_MM = 200;
 const MAX_H_MM = 1200;
 const MIN_PROJECTION_MM = 100;
 const MAX_PROJECTION_MM = 900;
-const MIN_TIE_BAR_COUNT = 2;   // a single top bar isn't a practical corbel tie layer
+const MIN_TIE_BAR_COUNT = 2;
 const MAX_TIE_BAR_COUNT = 8;
 const MIN_STIRRUP_COUNT = 1;
 const MAX_STIRRUP_COUNT = 8;
-// Schematic-drawability guards ONLY — see SCOPE note above. Not a
-// substitute for a real ACI 318 §16.5 design check.
-const MIN_H1_FACTOR = 0.5;     // outer-tip depth >= half the face depth
-const MIN_PLATE_EDGE_MM = 40;  // min clearance, plate edge to outer tip
+const MIN_H1_FACTOR = 0.5;
+const COL_STUB_DEPTH_FACTOR = 0.55; // x h — plan view's schematic column depth
+
+// ── Standard hook / bend geometry (ACI 318-19 Table 25.3.1) ───────────
+function standardHookBendDiaMM(barDiaMM) {
+  if (barDiaMM <= 25) return 6 * barDiaMM;
+  if (barDiaMM <= 32) return 8 * barDiaMM;
+  return 10 * barDiaMM;
+}
+function standardHookBendRadiusMM(barDiaMM) {
+  return standardHookBendDiaMM(barDiaMM) / 2 + barDiaMM / 2;
+}
+function standardHook90ExtensionMM(barDiaMM) {
+  return 12 * barDiaMM;
+}
+
+// ── Exact-count position distribution (closed ties, Ah) ───────────────
+function distributeExact(startPx, endPx, count) {
+  const n = Math.max(1, Math.round(count));
+  if (n === 1) return [(startPx + endPx) / 2];
+  const step = (endPx - startPx) / (n - 1);
+  return Array.from({ length: n }, (_, i) => startPx + i * step);
+}
+
+// ── Rebar bend paths (SVG path `d`, centerline geometry) ──────────────
+function hookDown90PathD(x, y, radiusPx, tailPx) {
+  const exX = x + radiusPx;
+  const exY = y + radiusPx;
+  return `M ${x},${y} A ${radiusPx},${radiusPx} 0 0 1 ${exX},${exY} L ${exX},${exY + tailPx}`;
+}
+// REVISION 2 naming: the U-turn is at the LOADED end of the closed tie,
+// not around the column — see the DXF path's addLoadedEndClosure180()
+// for the same rename applied there.
+function loadedEndClosure180PathD(x, y, radiusPx, dir) {
+  const sweep = dir > 0 ? 1 : 0;
+  return `M ${x},${y} A ${radiusPx},${radiusPx} 0 0 ${sweep} ${x},${y + dir * 2 * radiusPx}`;
+}
 
 // ── Compute ──────────────────────────────────────────────────────────
 export function computeCorbelDiagramGeometry(raw) {
@@ -188,7 +132,11 @@ export function computeCorbelDiagramGeometry(raw) {
     throw new DiagramError('BAD_PARAM', `"h1" (${h1}mm) must be less than "h" (${h}mm) \u2014 a corbel tapers down from the column face to its outer tip.`);
   }
   if (h1 < MIN_H1_FACTOR * h) {
-    throw new DiagramError('TAPER_TOO_STEEP', `"h1" (${h1}mm) is less than ${MIN_H1_FACTOR} x "h" (${h}mm) \u2014 this schematic enforces the common corbel-detailing minimum of half-depth at the outer tip; a steeper taper is not drawable by this module.`);
+    throw new DiagramError('TAPER_TOO_STEEP', `"h1" (${h1}mm) is less than ${MIN_H1_FACTOR} x "h" (${h}mm) \u2014 this schematic enforces the common corbel-detailing minimum of half-depth at the outer tip.`);
+  }
+  if (av > projection) {
+    throw new DiagramError('AV_EXCEEDS_PROJECTION',
+      `"av" (${av}mm) exceeds "projection" (${projection}mm) \u2014 the load point cannot sit beyond the corbel's own outer tip.`);
   }
 
   assertInt('tieBarCount', raw.tieBarCount, { min: MIN_TIE_BAR_COUNT, max: MAX_TIE_BAR_COUNT });
@@ -196,23 +144,17 @@ export function computeCorbelDiagramGeometry(raw) {
   const tieBarCount = raw.tieBarCount;
   const stirrupCount = raw.stirrupCount;
 
-  // Effective depth at the column face — standard corbel notation, used
-  // ONLY for this module's own av/d SCOPE boundary check, never as a
-  // stand-in for the actual ACI 318 §16.5 strength design (see header).
   const d = h - cover - tieBarDia / 2;
   assertFinitePositive('effective depth (h - cover - tieBarDia/2)', d);
 
   if (av / d > 1.0) {
-    throw new DiagramError(
-      'AV_D_RATIO_EXCEEDS_SCOPE',
-      `av/d = ${(av / d).toFixed(2)} exceeds 1.0 (av=${fmt(av, 'mm', 0)}, d=${fmt(d, 'mm', 0)}) \u2014 beyond this ratio the member behaves as a short beam, not a corbel (ACI 318 \u00a716.5), and is outside this module's scope.`,
-    );
+    throw new DiagramError('AV_D_RATIO_EXCEEDS_SCOPE',
+      `av/d = ${(av / d).toFixed(2)} exceeds 1.0 (av=${fmt(av, 'mm', 0)}, d=${fmt(d, 'mm', 0)}) \u2014 beyond this ratio the member behaves as a short beam, not a corbel (ACI 318 \u00a716.5).`);
   }
-  if (av + bearingPlateWidth / 2 + MIN_PLATE_EDGE_MM > projection) {
-    throw new DiagramError(
-      'BEARING_EXCEEDS_PROJECTION',
-      `Bearing plate (av=${fmt(av, 'mm', 0)}, half-width=${fmt(bearingPlateWidth / 2, 'mm', 0)}) plus the minimum edge distance (${MIN_PLATE_EDGE_MM}mm) exceeds the corbel projection (${fmt(projection, 'mm', 0)}) \u2014 the plate would hang off the outer tip.`,
-    );
+  const minPlateEdgeMM = Math.max(tieBarDia, cover);
+  if (av + bearingPlateWidth / 2 + minPlateEdgeMM > projection) {
+    throw new DiagramError('BEARING_EXCEEDS_PROJECTION',
+      `Bearing plate (av=${fmt(av, 'mm', 0)}, half-width=${fmt(bearingPlateWidth / 2, 'mm', 0)}) plus the minimum edge distance (max(tieBarDia, cover) = ${fmt(minPlateEdgeMM, 'mm', 0)}) exceeds the corbel projection (${fmt(projection, 'mm', 0)}).`);
   }
 
   const tieLayer = computeBarLayerAcrossWidth({
@@ -236,12 +178,6 @@ export function computeCorbelDiagramGeometry(raw) {
   };
 }
 
-// Own local helper — evenly places `count` bar centers across
-// [cover+dia/2, hostWidthMM-cover-dia/2]. Same "first/last center inset
-// by cover+dia/2, evenly step between" convention as
-// pileCapDiagram.mjs's own local computeMeshLayer, simplified to a
-// fixed bar COUNT (a corbel's tie-bar count is caller-specified
-// directly, not spacing-derived).
 function computeBarLayerAcrossWidth({ hostWidthMM, cover, diaMM, count }) {
   assertFinitePositive('tie layer host width', hostWidthMM);
   const envelope = hostWidthMM - 2 * cover - diaMM;
@@ -256,37 +192,56 @@ function computeBarLayerAcrossWidth({ hostWidthMM, cover, diaMM, count }) {
 }
 
 // ── Labels ───────────────────────────────────────────────────────────
-// Local `L = {en:{...}, ar:{...}}` dict, per this project's own explicit
-// decision (structuralLabels.mjs is footingDiagram.mjs-only; every other
-// element carries its own — see columnDiagram.mjs/pileCapDiagram.mjs's
-// own headers). Every Arabic value below is written parenthesis- and
-// em/en-dash-free, following the same verified-safe convention (Noto
-// Naskh Arabic has no glyph for either).
 const L = {
   en: {
     title: (id) => `CORBEL ${id} \u2014 REINFORCEMENT DETAIL`,
-    elevation: 'ELEVATION', section: 'SECTION',
+    elevation: 'ELEVATION', section: 'SECTION', plan: 'PLAN AT MAIN STEEL \u2014 ANCHORAGE',
     column: 'Column', mainTie: 'Main Tie Steel (As)', stirrup: 'Closed Ties (Ah)',
-    plate: 'Bearing Plate',
+    colTie: 'Column ties (by column design, not scheduled here)',
+    colTieNote: 'Column ties shown in the elevation are by column design and are not scheduled in this drawing.',
+    plate: 'Bearing Plate', edgeNote: '\u2265 max(dia,cover)', asLabel: 'As', ahLabel: 'Ah', ahMinNote: 'Ah \u2265 0.5(As\u2212An)',
+    mark1: '1', mark2: '2', mark3: '3',
     colMark: 'Mark', colElement: 'Element', colDia: 'dia (mm)', colCount: 'count',
-    caption: 'Schematic corbel detail generated from the supplied data \u2014 verify per ACI 318 \u00a716.5 (or the design code governing your project) before issuing for construction. This drawing does not check flexure-plus-tension (Mu, Nu), shear (Vn = Vc), or bearing strength at the plate (\u00a722.8) \u2014 those remain the design engineer\'s responsibility. Inclined bars are not shown \u2014 ACI 318 \u00a716.5 excludes them as ineffective in corbels. Only the geometry and reinforcement layout supplied are drawn.',
+    caption: 'Schematic corbel detail generated from the supplied data \u2014 verify per ACI 318 \u00a716.5 (or the design code governing your project) before issuing for construction. This drawing does not check flexure-plus-tension (Mu, Nu), shear (Vn = Vc), or bearing strength at the plate (\u00a722.8) \u2014 those remain the design engineer\'s responsibility. Inclined bars are not shown \u2014 ACI 318 \u00a716.5 excludes them as ineffective in corbels. Main-bar anchorage follows the small-diameter convention (ECP 203 Fig. 2-11 style): outer bars deflect at a shallow angle toward the column\'s near corner \u2014 not a curve \u2014 plus a 90\u00b0 end hook at the loaded face; the closed tie itself closes with a rounded U-turn at that same loaded end. Hook and bend sizes use ACI 318 Table 25.3.1 proportions and are schematic, not a bar-bending schedule. Ah is drawn level, like As, stacked at exactly stirrupCount positions within (2/3)d of the main steel, matching the input exactly \u2014 each drawn in its own color. Column ties wrap the column\'s own longitudinal bars, not the bare concrete width. Below (2/3)d, two more horizontal bars appear outside the code-mandated Ah zone, so not part of the Ah count. These, the vertical legs closing each tie, the bar running the length of the compression strut, and the short bar at the loaded face, are placement only \u2014 two, three, one, and one respectively, fixed \u2014 this module has no input for any of those four counts. Column-tie size and count are likewise the column\'s own design and are shown only as a placement callout.',
     dirAttr: 'ltr',
   },
   ar: {
-    title: (id) => `تفصيلة تسليح الكتيفة ${id}`,
-    elevation: 'الواجهة', section: 'قطاع',
-    column: 'عمود', mainTie: 'حديد الشد الرئيسي', stirrup: 'الأساور المغلقة',
-    plate: 'لوحة الارتكاز',
+    title: (id) => `تفصيلة تسليح الكابولي ${id}`,
+    elevation: 'الواجهة', section: 'قطاع رأسي', plan: 'مسقط عند حديد الشد الرئيسي - الرباط',
+    column: 'عمود', mainTie: 'حديد الشد الرئيسي', stirrup: 'الكانات الرأسية',
+    colTie: 'كانات الأعمدة حسب تسليح العمود، غير مجدولة هنا',
+    colTieNote: 'كانات الأعمدة الظاهرة في الواجهة حسب تصميم العمود وليست مجدولة في هذا الرسم.',
+    plate: 'لوحة الارتكاز', edgeNote: 'اكبر من قطر السيخ او الغطاء', asLabel: 'As', ahLabel: 'Ah', ahMinNote: 'Ah \u2265 0.5(As\u2212An)',
+    mark1: '1', mark2: '2', mark3: '3',
     colMark: 'العلامة', colElement: 'النوع', colDia: 'القطر مم', colCount: 'العدد',
-    caption: 'رسم تفصيلي توضيحي للكتيفة أُنشئ من البيانات المُدخلة، للتحقق فقط وفق الكود الإنشائي المعتمد في مشروعك مثل ACI 318 قبل الاعتماد للتنفيذ. هذا الرسم لا يتحقق من الانعطاف مع الشد المحوري أو القص أو قدرة تحمل لوحة الارتكاز، وتبقى هذه مسؤولية المهندس المصمم. لا يُظهر هذا الرسم حديدا مائلا لأنه غير فعال في الكتيفات وفق نفس الكود. يُعرض هنا فقط الشكل الهندسي وتوزيع حديد التسليح المُدخل.',
+    caption: 'رسم تفصيلي توضيحي للكابولي أُنشئ من البيانات المُدخلة، للتحقق فقط وفق الكود الإنشائي المعتمد في مشروعك مثل ACI 318 قبل الاعتماد للتنفيذ. هذا الرسم لا يتحقق من الانعطاف مع الشد المحوري أو القص أو قدرة تحمل لوحة الارتكاز. لا يُظهر هذا الرسم حديدا مائلا لأنه غير فعال في الكوابيل وفق نفس الكود. تثبيت الحديد الرئيسي مرسوم وفق الطريقة المتبعة للأقطار الصغيرة اقل من 16 مم، حيث ينحرف الحديد الطرفي بزاوية بسيطة نحو الركن القريب من العمود دون تدوير، مع كلابة بزاوية 90 درجة عند وجه التحميل، وتُغلق الكانة الرأسية نفسها بكلابة دائرية عند وجه التحميل أيضا. أبعاد الكلابة والانحناء وفق جدول ACI 318 رقم 25.3.1 وهي أبعاد توضيحية وليست جدول تشكيل حديد نهائي. حديد Ah مرسوم أفقيا مثل As تماما، بعدد يطابق المدخل موزعا خلال ثلثي d من الحديد الرئيسي. كانات الأعمدة تحيط بالحديد الطولي للعمود نفسه وليس عرض الخرسانة كاملا. أسفل ثلثي d يظهر حديدان أفقيان إضافيان خارج نطاق Ah الذي يحدده الكود فلا يُحسبان ضمن عدد Ah. هذه والحديدان والكانات الرأسية والحديد الممتد بطول رباط الضغط والحديد القصير عند وجه التحميل كلها إشارة موضع فقط بأعداد ثابتة.',
     dirAttr: 'rtl',
   },
 };
 
+function ahTieTick(xPx, yTopPx, yBottomPx) {
+  const cap = 4;
+  return `
+    <line x1="${xPx}" y1="${yTopPx}" x2="${xPx}" y2="${yBottomPx}" class="bar-ahtie"/>
+    <line x1="${xPx - cap}" y1="${yTopPx}" x2="${xPx + cap}" y2="${yTopPx}" class="bar-ahtie"/>
+    <line x1="${xPx - cap}" y1="${yBottomPx}" x2="${xPx + cap}" y2="${yBottomPx}" class="bar-ahtie"/>`;
+}
+function columnTieTick(xLeftPx, xRightPx, yPx) {
+  const cap = 4;
+  return `
+    <line x1="${xLeftPx}" y1="${yPx}" x2="${xRightPx}" y2="${yPx}" class="tie-column"/>
+    <line x1="${xLeftPx}" y1="${yPx - cap}" x2="${xLeftPx}" y2="${yPx + cap}" class="tie-column"/>
+    <line x1="${xRightPx}" y1="${yPx - cap}" x2="${xRightPx}" y2="${yPx + cap}" class="tie-column"/>`;
+}
+
 // ── Render ───────────────────────────────────────────────────────────
-const CANVAS_W = 960;
-const ELEVATION_BOX = { x: 80, y: 70, w: 800, h: 330 };
-const SECTION_BOX = { x: 80, y: 440, w: 320, h: 260 };
+const CANVAS_W = 1100;
+
+// L1: elevation box enlarged and content formula tightened so fitScale()
+// lands near 0.55 instead of 0.245. L2: section/plan pushed down to clear.
+const ELEVATION_BOX = { x: 80, y: 90, w: 900, h: 560 };
+const SECTION_BOX = { x: 80, y: 700, w: 320, h: 290 };
+const PLAN_BOX = { x: 460, y: 700, w: 500, h: 290 };
 
 export function renderCorbelDiagramSVG(geometry, opts = {}) {
   const lang = opts.lang === 'ar' ? 'ar' : 'en';
@@ -294,8 +249,21 @@ export function renderCorbelDiagramSVG(geometry, opts = {}) {
   const { defaultFontStack, scriptFontStack } = fontStacks(lang);
   const { geo, tieLayer } = geometry;
 
-  const elevScale = fitScale([{ contentW: geo.projection * 1.35, contentH: geo.h * 2.2, boxW: ELEVATION_BOX.w - 100, boxH: ELEVATION_BOX.h - 90 }]);
-  const sectionScale = fitScale([{ contentW: geo.colB, contentH: geo.h, boxW: SECTION_BOX.w - 70, boxH: SECTION_BOX.h - 70 }]);
+  const elevScale = fitScale([{
+    contentW: geo.projection * 1.35,
+    contentH: geo.h * 1.7,
+    boxW: ELEVATION_BOX.w - 100,
+    boxH: ELEVATION_BOX.h - 90,
+  }]);
+  const sectionScale = fitScale([{
+    contentW: geo.colB, contentH: geo.h,
+    boxW: SECTION_BOX.w - 70, boxH: SECTION_BOX.h - 70,
+  }]);
+  const planScale = fitScale([{
+    contentW: COL_STUB_DEPTH_FACTOR * geo.h + geo.projection * 0.6 + 140,
+    contentH: geo.colB + 60,
+    boxW: PLAN_BOX.w - 90, boxH: PLAN_BOX.h - 70,
+  }]);
 
   const tableRows = buildScheduleRows(geo, l);
   const tableColW = Math.floor((CANVAS_W - 120) / 4);
@@ -305,29 +273,50 @@ export function renderCorbelDiagramSVG(geometry, opts = {}) {
     { key: 'dia', label: l.colDia, width: tableColW },
     { key: 'count', label: l.colCount, width: CANVAS_W - 120 - tableColW * 3 },
   ];
-  const tableY = ELEVATION_BOX.y + ELEVATION_BOX.h + SECTION_BOX.h + 30;
+  const tableY = Math.max(SECTION_BOX.y + SECTION_BOX.h, PLAN_BOX.y + PLAN_BOX.h) + 30;
   const table = scheduleTable(60, tableY, tableCols, tableRows, { lang });
 
-  const captionY = tableY + table.height + 34;
+  // L6: standalone "column ties" note between table and caption.
+  const noteY = tableY + table.height + 24;
+  const noteSvg = `<text x="60" y="${noteY}" class="corbel-note">${esc(l.colTieNote)}</text>`;
+
+  const captionY = noteY + 22;
   const captionLines = captionLineCount(l.caption, 110);
   const CANVAS_H = captionY + captionLines * 15 + 24;
 
   const style = kitStyleBlock({ defaultFontStack, scriptFontStack, lang }) + `
-    .corbel-title  { font-size:20px; font-weight:bold; fill:#111; font-family: ${scriptFontStack}; }
-    .box-label     { font-size:13px; font-weight:bold; fill:#333; font-family: ${scriptFontStack}; }
-    .col-rect      { fill:#e2e2e2; stroke:#1a1a1a; stroke-width:1.7; }
-    .corbel-outline{ fill:#f4f4f4; stroke:#1a1a1a; stroke-width:1.7; }
+    .corbel-title  { font-size:22px; font-weight:bold; fill:#111; font-family:${scriptFontStack}; }
+    .box-label     { font-size:14px; font-weight:bold; fill:#333; letter-spacing:0.5px; font-family:${scriptFontStack}; }
+    .col-rect      { fill:#cbb393; stroke:#5c4a34; stroke-width:1.7; }
+    .corbel-outline{ fill:#d9c4a3; stroke:#5c4a34; stroke-width:1.7; }
     .plate-rect    { fill:#dfe9f5; stroke:#2a5a8c; stroke-width:1.4; }
-    .bar-dot-tie   { fill:#1f5aa6; stroke:#123564; stroke-width:0.6; }`;
+    .callout-text  { font-size:11px; fill:#555; font-family:${scriptFontStack}; }
+    .corbel-note   { font-size:11px; fill:#555; font-family:${scriptFontStack}; }
+    .bar-mainsteel { stroke:#1f5aa6; stroke-width:3.2; fill:none; stroke-linecap:round; }
+    .bar-ahtie     { stroke:#1f8a5c; stroke-width:2.6; fill:none; stroke-linecap:round; }
+    .bar-ahtie-1   { stroke:#c9761f; stroke-width:2.6; fill:none; stroke-linecap:round; }
+    .bar-ahtie-2   { stroke:#8a7a1f; stroke-width:2.6; fill:none; stroke-linecap:round; }
+    .bar-ahtie-3   { stroke:#1f8a5c; stroke-width:2.6; fill:none; stroke-linecap:round; }
+    .bar-ahtie-4   { stroke:#8c2f8a; stroke-width:2.6; fill:none; stroke-linecap:round; }
+    .bar-extra     { stroke:#8c2f3a; stroke-width:2.4; fill:none; stroke-linecap:round; }
+    .tie-column    { stroke:#8c2f3a; stroke-width:3; fill:none; stroke-linecap:round; }
+    .col-bar       { stroke:#1f5aa6; stroke-width:3.4; stroke-linecap:round; }
+    .bar-dot-tie   { fill:#1f5aa6; stroke:#123564; stroke-width:0.6; }
+    .bar-dot-coltie{ fill:#8c2f3a; stroke:#5c1c24; stroke-width:0.6; }
+    .plate-footprint{ fill:none; stroke:#2a5a8c; stroke-width:1.2; stroke-dasharray:4,3; }
+    .inline-label  { font-size:13px; font-style:italic; fill:#1a1a1a; font-family:${scriptFontStack}; }
+    .ah-callout-bg { fill:#ffffff; }`;
 
   return `<svg viewBox="0 0 ${CANVAS_W} ${CANVAS_H}" xmlns="http://www.w3.org/2000/svg" font-family="${defaultFontStack}">
   <defs>${hatchDefs()}</defs>
   <style>${style}</style>
   <rect x="0" y="0" width="${CANVAS_W}" height="${CANVAS_H}" fill="#ffffff"/>
-  <text x="${CANVAS_W / 2}" y="32" text-anchor="middle" class="corbel-title" dir="${l.dirAttr}">${esc(l.title(geometry.id))}</text>
+  <text x="${CANVAS_W / 2}" y="34" text-anchor="middle" class="corbel-title" dir="${l.dirAttr}">${esc(l.title(geometry.id))}</text>
   ${renderElevation(geo, elevScale, l)}
   ${renderSection(geo, tieLayer, sectionScale, l)}
+  ${renderPlanAnchorage(geo, tieLayer, planScale, l)}
   ${table.svg}
+  ${noteSvg}
   ${renderCaptionAt(l.caption, { x: lang === 'ar' ? CANVAS_W - 60 : 60, startY: captionY, lang, maxCharsPerLine: 110, lineHeight: 15 })}
 </svg>`;
 }
@@ -335,72 +324,140 @@ export function renderCorbelDiagramSVG(geometry, opts = {}) {
 function renderElevation(geo, scale, l) {
   const { projection, av, h, h1, cover, tieBarDia, stirrupDia, stirrupCount, bearingPlateWidth, d } = geo;
 
-  const baselineY = ELEVATION_BOX.y + ELEVATION_BOX.h - 70;
-  const colStubW = Math.max(70, h * scale * 0.55);
-  const colTopY = baselineY - h * scale * 1.5;
-  const colBottomY = baselineY + h * scale * 0.4;
-  const colLeftX = ELEVATION_BOX.x + 50;
+  // Flat top; sloped bottom (h at face, h1 at tip); vertical tip face.
+  const topY = ELEVATION_BOX.y + 130;
+  const colStubW = Math.max(70, h * scale * COL_STUB_DEPTH_FACTOR);
+  const colTopY = topY - h * scale * 0.5;
+  const bottomAtFaceY = topY + h * scale;
+  const bottomAtTipY = topY + h1 * scale;
+  const colBottomY = bottomAtFaceY + h * scale * 0.4;
+  const colLeftX = ELEVATION_BOX.x + 95;
   const faceX = colLeftX + colStubW;
-
   const tipX = faceX + projection * scale;
-  const topFaceY = baselineY - h * scale;
-  const topTipY = baselineY - h1 * scale;
 
-  // Linear interpolation of the sloped top face's y at a given x —
-  // reused for both the tie-bar offset line and the stirrup tick tops,
-  // so both always stay inside the tapered outline (see header's
-  // "Rendering note").
-  const topYAt = (xPx) => topFaceY + ((xPx - faceX) / (tipX - faceX)) * (topTipY - topFaceY);
+  const bottomYAt = (xPx) => bottomAtFaceY + ((xPx - faceX) / (tipX - faceX)) * (bottomAtTipY - bottomAtFaceY);
+  const xAtBottomY = (yPx) => {
+    if (yPx <= bottomAtTipY) return tipX;
+    if (yPx >= bottomAtFaceY) return faceX;
+    return faceX + (tipX - faceX) * (yPx - bottomAtFaceY) / (bottomAtTipY - bottomAtFaceY);
+  };
 
   const coverPx = cover * scale;
   const tieOffsetPx = (cover + tieBarDia / 2) * scale;
-  const tieStartX = faceX - Math.min(30, colStubW * 0.4); // embedment into column stub
-  const tieEndX = tipX - Math.max(8, coverPx * 0.6);
-  const tieStartY = topYAt(faceX) + tieOffsetPx;
-  const tieEndY = topYAt(tieEndX) + tieOffsetPx;
-  const tieHookDropPx = Math.min(20, (baselineY - tieEndY) * 0.5);
+  const tieStartX = faceX - Math.min(30, colStubW * 0.4);
+  const tieY = topY + tieOffsetPx;
 
-  // Closed horizontal ties (Ah), distributed within (2/3)d of the
-  // column face — see header's ACI §16.5 citation. Drawn with
-  // stirrupTick() (vertical stroke, top-steel-line to bottom-steel-
-  // line), the same primitive beamDiagram.mjs uses for its own
-  // elevation-view stirrups on a horizontally-running member — a corbel
-  // is exactly that orientation, unlike columnDiagram.mjs's vertical
-  // member (which is why THAT module uses tieTickH() instead).
-  const zoneEndMM = (2 / 3) * d;
-  const zoneStartX = faceX + Math.max(6, coverPx * 0.5);
-  const zoneEndX = faceX + zoneEndMM * scale;
-  const stirrupXs = distributeTicks(zoneStartX, Math.max(zoneStartX + 1, zoneEndX), stirrupCount);
-  const stirrupTicks = stirrupXs.map((x) => {
-    const topY = Math.max(topYAt(Math.min(x, tipX)) + coverPx * 0.6, topFaceY);
-    return stirrupTick(x, topY, baselineY - coverPx * 0.6);
+  const hookRadiusPx = Math.min(
+    standardHookBendRadiusMM(tieBarDia) * scale,
+    Math.max(4, (tipX - coverPx) - (faceX + 10)),
+  );
+  const tieEndX = tipX - coverPx - hookRadiusPx;
+  const maxHookTailPx = Math.max(6, (bottomYAt(tieEndX) - coverPx * 0.6) - (tieY + hookRadiusPx));
+  const hookTailPx = Math.min(standardHook90ExtensionMM(tieBarDia) * scale, maxHookTailPx);
+  const hookPathD = hookDown90PathD(tieEndX, tieY, hookRadiusPx, hookTailPx);
+
+  const zoneBottomY = tieY + (2 / 3) * d * scale;
+  const ahColorClasses = ['bar-ahtie-1', 'bar-ahtie-2', 'bar-ahtie-3', 'bar-ahtie-4'];
+  const ahYs = distributeExact(tieY + coverPx * 1.4, Math.min(zoneBottomY, bottomAtFaceY - coverPx * 0.6), stirrupCount);
+  const ahBars = ahYs.map((y, i) => {
+    const xEnd = Math.min(xAtBottomY(y) - coverPx * 0.4, tipX - coverPx * 0.4);
+    const cls = ahColorClasses[i % ahColorClasses.length];
+    return `<line x1="${faceX - Math.min(20, colStubW * 0.3)}" y1="${y}" x2="${Math.max(faceX + 10, xEnd)}" y2="${y}" class="${cls}"/>`;
   }).join('');
+
+  const extraZoneTop = Math.min(zoneBottomY, bottomAtFaceY - coverPx * 0.6) + coverPx * 1.2;
+  const extraZoneBottom = bottomAtFaceY - coverPx * 1.4;
+  const extraYs = extraZoneBottom > extraZoneTop ? distributeExact(extraZoneTop, extraZoneBottom, 2) : [];
+  const extraBars = extraYs.map((y) => {
+    const xEnd = Math.min(xAtBottomY(y) - coverPx * 0.4, tipX - coverPx * 0.4);
+    return `<line x1="${faceX - Math.min(20, colStubW * 0.3)}" y1="${y}" x2="${Math.max(faceX + 10, xEnd)}" y2="${y}" class="bar-extra"/>`;
+  }).join('');
+
+  const legZoneStartX = faceX + Math.max(10, colStubW * 0.15);
+  const legZoneEndX = faceX + (tipX - faceX) * 0.68;
+  const legXs = distributeExact(legZoneStartX, legZoneEndX, 3);
+  const verticalLegs = legXs.map((x) => `<line x1="${x}" y1="${tieY}" x2="${x}" y2="${bottomYAt(Math.min(x, tipX)) - coverPx * 0.5}" class="tie-column"/>`).join('');
+
+  const stirrupOffsetPx = Math.max(10, stirrupDia * scale * 1.5);
+
+  const colTieBandTop = colTopY + (topY - colTopY) * 0.18;
+  const colTieBandBottom = topY - (topY - colTopY) * 0.18;
+  const colTieYs = distributeExact(colTieBandTop, colTieBandBottom, 2);
+  const colBarInsetPx = Math.max(10, colStubW * 0.12);
+  const colBarXs = [colLeftX + colBarInsetPx, faceX - colBarInsetPx];
+  const colTicks = colTieYs.map((y) => columnTieTick(colBarXs[0], colBarXs[1], y)).join('');
 
   const plateX = faceX + av * scale;
   const plateW = Math.max(10, bearingPlateWidth * scale);
   const plateThicknessPx = 10;
-  const plateTopSurfaceY = topYAt(plateX);
+  const mark1BarLen = Math.max(24, plateW * 0.6);
+  const mark1BarY = topY - plateThicknessPx - 22;
+  const mark1BarX1 = plateX - mark1BarLen / 2;
+  const mark1BarX2 = plateX + mark1BarLen / 2;
 
-  const outline = `M ${faceX},${baselineY} L ${faceX},${topFaceY} L ${tipX},${topTipY} L ${tipX},${baselineY} Z`;
+  const outline = `M ${faceX},${topY} L ${tipX},${topY} L ${tipX},${bottomAtTipY} L ${faceX},${bottomAtFaceY} Z`;
+
+  const strutX1 = tipX - coverPx * 1.5;
+  const strutY1 = bottomYAt(strutX1) - coverPx * 0.5;
+  const strutX2 = faceX;
+  const strutY2 = bottomAtFaceY;
+  const strutLen = Math.hypot(strutX2 - strutX1, strutY2 - strutY1) || 1;
+  const strutNx = -(strutY2 - strutY1) / strutLen;
+  const strutNy = (strutX2 - strutX1) / strutLen;
+  const strutBarLine = `<line x1="${strutX1 + strutNx * stirrupOffsetPx}" y1="${strutY1 + strutNy * stirrupOffsetPx}" x2="${strutX2 + strutNx * stirrupOffsetPx}" y2="${strutY2 + strutNy * stirrupOffsetPx}" class="tie-column"/>`;
+
+  // L3: Ah ≥ 0.5(As−An) callout — moved from the strut's own midpoint
+  // into the clean band between the last Ah bar and the first extra bar,
+  // with a white mask so the middle vertical tie leg doesn't strike
+  // through its glyphs.
+  const ahCalloutY = (ahYs.length ? ahYs[ahYs.length - 1] : zoneBottomY) + 22;
+  const ahCalloutX = faceX + 40;
+  const ahCalloutW = 112;
+  const ahCalloutMaskSvg =
+    `<rect x="${ahCalloutX - 4}" y="${ahCalloutY - 12}" width="${ahCalloutW}" height="16" class="ah-callout-bg"/>` +
+    `<text x="${ahCalloutX}" y="${ahCalloutY}" class="callout-text">${esc(l.ahMinNote)}</text>`;
+
+  const markMainBar = barMarkTag(tieStartX - 16, tieY, l.mark1, { leaderTo: { x: tieStartX, y: tieY } });
+  const markStirrup = ahYs.length
+    ? barMarkTag(faceX + 10, bottomAtFaceY - 15, l.mark2, { leaderTo: { x: legXs[0], y: ahYs[0] } })
+    : '';
+  const markColTie = barMarkTag(colLeftX - 16, colTieYs[0], l.mark3, { leaderTo: { x: colBarXs[0], y: colTieYs[0] } });
+
+  const dBracketX = ELEVATION_BOX.x + 60;
+  const twoThirdsDBracketX = ELEVATION_BOX.x + 30;
 
   return `<g>
     <text x="${ELEVATION_BOX.x}" y="${ELEVATION_BOX.y}" class="box-label">${esc(l.elevation)}</text>
     <rect x="${colLeftX}" y="${colTopY}" width="${colStubW}" height="${colBottomY - colTopY}" class="col-rect"/>
+    ${colTicks}
+    ${colBarXs.map((x) => `<line x1="${x}" y1="${colTopY + 4}" x2="${x}" y2="${colBottomY - 4}" class="col-bar"/>`).join('')}
     <path d="${outline}" class="corbel-outline"/>
-    ${stirrupTicks}
-    <line x1="${tieStartX}" y1="${tieStartY}" x2="${tieEndX}" y2="${tieEndY}" class="bar-top"/>
-    <line x1="${tieEndX}" y1="${tieEndY}" x2="${tieEndX}" y2="${tieEndY + tieHookDropPx}" class="bar-top"/>
-    <rect x="${plateX - plateW / 2}" y="${plateTopSurfaceY - plateThicknessPx}" width="${plateW}" height="${plateThicknessPx}" class="plate-rect"/>
-    ${dimensionLine(faceX, baselineY + 22, plateX, baselineY + 22, `av = ${fmt(av, 'mm', 0)}`)}
-    ${dimensionLine(faceX, baselineY + 46, tipX, baselineY + 46, `a = ${fmt(projection, 'mm', 0)}`)}
-    ${dimensionLine(faceX - 22, topFaceY, faceX - 22, baselineY, `h = ${fmt(h, 'mm', 0)}`, { orientation: 'v' })}
-    ${dimensionLine(tipX + 22, topTipY, tipX + 22, baselineY, `h1 = ${fmt(h1, 'mm', 0)}`, { orientation: 'v' })}
-    <text x="${plateX}" y="${plateTopSurfaceY - plateThicknessPx - 6}" text-anchor="middle" class="dim-label">${esc(l.plate)}</text>
+    ${ahBars}
+    ${extraBars}
+    ${verticalLegs}
+    ${strutBarLine}
+    <line x1="${mark1BarX1}" y1="${mark1BarY}" x2="${mark1BarX2}" y2="${mark1BarY}" class="tie-column"/>
+    <line x1="${tieStartX}" y1="${tieY}" x2="${tieEndX}" y2="${tieY}" class="bar-mainsteel"/>
+    <path d="${hookPathD}" class="bar-mainsteel"/>
+    <text x="${tieStartX + 46}" y="${tieY + 16}" class="inline-label">${esc(l.asLabel)}</text>
+    <rect x="${plateX - plateW / 2}" y="${topY - plateThicknessPx}" width="${plateW}" height="${plateThicknessPx}" class="plate-rect"/>
+    ${dimensionLine(faceX, colBottomY + 22, plateX, colBottomY + 22, `av = ${fmt(av, 'mm', 0)}`)}
+    ${dimensionLine(faceX, colBottomY + 46, tipX, colBottomY + 46, `a = ${fmt(projection, 'mm', 0)}`)}
+    ${dimensionLine(faceX - 22, topY, faceX - 22, bottomAtFaceY, `h = ${fmt(h, 'mm', 0)}`, { orientation: 'v' })}
+    ${dimensionLine(dBracketX, tieY, dBracketX, bottomAtFaceY, `d = ${fmt(d, 'mm', 0)}`, { orientation: 'v' })}
+    ${dimensionLine(twoThirdsDBracketX, tieY, twoThirdsDBracketX, zoneBottomY, `(2/3)d`, { orientation: 'v' })}
+    ${dimensionLine(tipX + 55, topY, tipX + 55, bottomAtTipY, `h1 = ${fmt(h1, 'mm', 0)}`, { orientation: 'v' })}
+    <text x="${plateX}" y="${topY - plateThicknessPx - 8}" text-anchor="middle" class="dim-label">${esc(l.plate)}</text>
+    ${dimensionLine(plateX + plateW / 2, topY - 40, tipX, topY - 40, l.edgeNote)}
+    ${ahCalloutMaskSvg}
+    ${markMainBar}
+    ${markStirrup}
+    ${markColTie}
   </g>`;
 }
 
 function renderSection(geo, tieLayer, scale, l) {
-  const { colB, h, cover, tieBarDia, stirrupDia } = geo;
+  const { colB, h, cover, tieBarDia } = geo;
   const sx = SECTION_BOX.x + 40;
   const sy = SECTION_BOX.y + 40;
   const sw = colB * scale;
@@ -408,7 +465,6 @@ function renderSection(geo, tieLayer, scale, l) {
 
   const tieY = sy + (cover + tieBarDia / 2) * scale;
   const tieDots = tieLayer.barCentersMM.map((c) => barDot(sx + c * scale, tieY, tieBarDia, scale, 'tie')).join('');
-
   const stirrupInset = cover * scale;
 
   return `<g>
@@ -420,15 +476,102 @@ function renderSection(geo, tieLayer, scale, l) {
   </g>`;
 }
 
+function renderPlanAnchorage(geo, tieLayer, scale, l) {
+  const { colB, h, projection, av, tieBarDia, cover, bearingPlateWidth } = geo;
+  const colDepthPx = COL_STUB_DEPTH_FACTOR * h * scale;
+
+  const colLeftX = PLAN_BOX.x + 60;
+  const colTopY = PLAN_BOX.y + 45;
+  const colRightX = colLeftX + colDepthPx;
+  const colBottomY = colTopY + colB * scale;
+
+  const corbelStubLenPx = Math.min(PLAN_BOX.w - (colRightX - PLAN_BOX.x) - 30, Math.max(160, projection * scale * 0.6));
+  const corbelRightX = colRightX + corbelStubLenPx;
+
+  const cornerMarginPx = Math.max(9, cover * scale * 1.1);
+  const bendZoneStartX = colLeftX + Math.max(24, colDepthPx * 0.3);
+  const topEdgeMM = colB / 3;
+  const bottomEdgeMM = (colB * 2) / 3;
+  const entryX = corbelRightX - Math.max(16, corbelStubLenPx * 0.12);
+
+  const barLines = tieLayer.barCentersMM.map((c) => {
+    const y = colTopY + c * scale;
+    let targetY = y;
+    if (c < topEdgeMM) targetY = colTopY + cornerMarginPx;
+    else if (c > bottomEdgeMM) targetY = colBottomY - cornerMarginPx;
+    return `
+      <line x1="${entryX}" y1="${y}" x2="${bendZoneStartX}" y2="${y}" class="bar-mainsteel"/>
+      <line x1="${bendZoneStartX}" y1="${y}" x2="${colLeftX + cornerMarginPx}" y2="${targetY}" class="bar-mainsteel"/>`;
+  }).join('');
+
+  const tieInsetPx = Math.max(6, cornerMarginPx * 0.7);
+  const tieRectX = colLeftX + tieInsetPx;
+  const tieRectY = colTopY + tieInsetPx;
+  const tieRectW = colDepthPx - 2 * tieInsetPx;
+  const tieRectH = (colBottomY - colTopY) - 2 * tieInsetPx;
+  const colTieLoop = `<rect x="${tieRectX}" y="${tieRectY}" width="${tieRectW}" height="${tieRectH}" rx="8" ry="8" class="tie-column" fill="none"/>`;
+
+  const corners = [
+    [colLeftX, colTopY], [colRightX, colTopY],
+    [colLeftX, colBottomY], [colRightX, colBottomY],
+  ];
+  const cornerDots = corners.map(([cx, cy]) => barDot(cx, cy, tieBarDia, scale, 'coltie')).join('');
+
+  const barCenters = tieLayer.barCentersMM;
+  const tieYmm = barCenters.length >= 2 ? (barCenters[0] + barCenters[1]) / 2 : colB / 2;
+  const tieY = colTopY + tieYmm * scale;
+  const remainingRunPx = colBottomY - tieY;
+  const RETURN_LEG_MARGIN_PX = 6;
+  const maxRadiusFromFramePx = Math.max(4, (remainingRunPx - RETURN_LEG_MARGIN_PX) / 2);
+  const tieRadiusPx = Math.max(4, Math.min(20, corbelStubLenPx * 0.16, maxRadiusFromFramePx));
+  const tieBendX = corbelRightX - Math.max(18, tieRadiusPx * 0.7);
+  const tieReturnY = tieY + 2 * tieRadiusPx;
+  const tieStartX = colLeftX + cornerMarginPx + 4;
+  const tieGroup = `
+    <line x1="${tieStartX}" y1="${tieY}" x2="${tieBendX}" y2="${tieY}" class="bar-ahtie"/>
+    <path d="${loadedEndClosure180PathD(tieBendX, tieY, tieRadiusPx, 1)}" class="bar-ahtie"/>
+    <line x1="${tieBendX}" y1="${tieReturnY}" x2="${tieStartX}" y2="${tieReturnY}" class="bar-ahtie"/>
+    <text x="${tieStartX + 6}" y="${tieY - 8}" class="inline-label">${esc(l.ahLabel)}</text>`;
+
+  const plateFootprintX = colRightX + av * scale;
+  const plateFootprintW = Math.max(10, bearingPlateWidth * scale);
+
+  // L4: mark 1 pushed out to the clear upper-right gutter; mark 3 pushed
+  // to the plan box's own upper-left gutter. Mark 2 unchanged.
+  const markMainBar = barMarkTag(
+    corbelRightX + 30, colTopY - 26, l.mark1,
+    { leaderTo: { x: entryX, y: colTopY + tieLayer.barCentersMM[0] * scale } },
+  );
+  const markTie = barMarkTag(tieStartX + 20, tieY + 22, l.mark2, { leaderTo: { x: tieStartX + 20, y: tieY } });
+  const markColTie = barMarkTag(colLeftX - 60, colTopY - 8, l.mark3, { leaderTo: { x: colLeftX, y: colTopY } });
+
+  return `<g>
+    <text x="${PLAN_BOX.x}" y="${PLAN_BOX.y}" class="box-label">${esc(l.plan)}</text>
+    <rect x="${colLeftX}" y="${colTopY}" width="${colDepthPx}" height="${colBottomY - colTopY}" class="col-rect"/>
+    <rect x="${colRightX}" y="${colTopY}" width="${corbelRightX - colRightX}" height="${colBottomY - colTopY}" class="corbel-outline"/>
+    <line x1="${colRightX}" y1="${colTopY}" x2="${colRightX}" y2="${colBottomY}" stroke="#1a1a1a" stroke-width="1.2" stroke-dasharray="5,3"/>
+    <rect x="${plateFootprintX - plateFootprintW / 2}" y="${colTopY}" width="${plateFootprintW}" height="${colBottomY - colTopY}" class="plate-footprint"/>
+    ${colTieLoop}
+    ${barLines}
+    ${tieGroup}
+    ${cornerDots}
+    <text x="${(colLeftX + colRightX) / 2}" y="${colBottomY + 26}" text-anchor="middle" class="dim-label">${esc(l.column)}</text>
+    <text x="${plateFootprintX}" y="${colTopY - 22}" text-anchor="middle" class="callout-text">${esc(l.plate)}</text>
+    ${markMainBar}
+    ${markTie}
+    ${markColTie}
+  </g>`;
+}
+
 function buildScheduleRows(geo, l) {
   return [
-    { mark: '1', element: l.mainTie, dia: String(Math.round(geo.tieBarDia)), count: String(geo.tieBarCount) },
-    { mark: '2', element: l.stirrup, dia: String(Math.round(geo.stirrupDia)), count: String(geo.stirrupCount) },
+    { mark: l.mark1, element: l.mainTie, dia: String(Math.round(geo.tieBarDia)), count: String(geo.tieBarCount) },
+    { mark: l.mark2, element: l.stirrup, dia: String(Math.round(geo.stirrupDia)), count: String(geo.stirrupCount) },
+    { mark: l.mark3, element: l.colTie, dia: '\u2014', count: '\u2014' },
   ];
 }
 
 // ── Chat-facing entry point (mode:'rebarDiagram' JSON payload) ────────
-// Mirrors pileCapDiagram.mjs's parsePileCapRebarPayload contract exactly.
 export function parseCorbelRebarPayload(raw) {
   try {
     const geometry = computeCorbelDiagramGeometry(raw);
@@ -439,18 +582,7 @@ export function parseCorbelRebarPayload(raw) {
   }
 }
 
-// ── Flat-text /diagram command parser ──────────────────────────────────
-// Syntax:
-//   /diagram corbel id=C1 colb=400 projection=350 av=150 h=500 h1=300
-//     cover=40 tiebardia=16 tiebarcount=3 stirrupdia=10 stirrupcount=4
-//     bearingplatewidth=150 [unit=mm]
-// Accepts BOTH leading tokens "corbel" and "bracket" (screenshot's own
-// English pairing, "Corbel / Bracket") and echoes back whichever one the
-// caller typed — same dual-spelling convention gradeBeamDiagram.mjs uses
-// for "gradebeam"/"tiebeam", for the same reason (one schematic product,
-// two names in common use). Same BAD_SYNTAX/UNSUPPORTED_TYPE reservation,
-// same never-throws contract, same lower-cased leading token as every
-// sibling parser.
+// ── Flat-text /diagram command parser ─────────────────────────────────
 export function parseDiagramCommand(text) {
   const trimmed = (text || '').trim();
   const m = trimmed.match(/^(\S+)\s+(.+)$/);

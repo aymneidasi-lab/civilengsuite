@@ -1,4 +1,4 @@
-// shared/structuralLabels.mjs
+// functions/_lib/structuralLabels.mjs
 //
 // Central EN/AR label dictionary for the deterministic (computed)
 // structural-diagram path — Plan Step 4. Fixes the concrete gap Step 0
@@ -32,13 +32,13 @@
 // renderFootingDiagramSVG header already documents why: Noto Naskh
 // Arabic (the font scriptFontStack actually selects for lang==='ar')
 // has no glyph for either, confirmed there by isolated-glyph probing
-// against cairosvg. sectionTitle() below composes the Arabic "through
-// column" phrase with a plain space instead of the English version's
-// parenthetical for exactly this reason — this is not a stylistic
-// choice, it is a tofu-avoidance requirement. Run
+// against cairosvg. sectionAAWithColumn() below composes the Arabic
+// "through column" phrase with a plain space instead of the English
+// version's parenthetical for exactly this reason — this is not a
+// stylistic choice, it is a tofu-avoidance requirement. Run
 // assertNoUnsafeArabicPunctuation() (bottom of this file) against any
 // new Arabic value added here before shipping it.
-//
+
 // Step 17 addendum — the two file-header points not already covered above:
 // Safety limits (MAX_*): this file defines none. It is a pure lookup
 // dictionary + string-composition helpers; the only quantity that scales
@@ -49,23 +49,7 @@
 // the canonical explanation of that distinction where it does apply.
 // Fully deterministic: no env.AI, no network call, no randomness — every
 // export here is a pure function of STRUCTURAL_LABELS and its arguments.
-//
-// [Integration merge — this pass] This file previously existed as two
-// byte-divergent copies, one shipped alongside each of two footingDiagram
-// lineages that forked from a common Step-17 ancestor and were never
-// reconciled:
-//   (a) footing/footingDiagram.mjs (ties/band/multi-layer/dual-section
-//       cut views — Steps 20-21), and
-//   (b) footing/footingDiagram.extended.mjs (blinding concrete,
-//       dowel-lap-length dimension, column main-bar callout, level
-//       markers — "this session", forked before Step 20 existed).
-// Both copies were byte-identical for every key through meshSpacing and
-// for all five exported functions below; they diverged only in which
-// keys each fork appended afterward. This merge takes the union of both
-// key sets. tieDia/tieSpacing/tieCount are declared once below (both
-// forks used the identical EN and AR strings for these three — verified
-// by direct diff before merging, not assumed). No key's value was
-// changed from either source file; nothing was removed.
+
 export const STRUCTURAL_LABELS = {
   en: {
     footIsolated: 'Isolated Footing',
@@ -102,73 +86,6 @@ export const STRUCTURAL_LABELS = {
     // inaccurate once pedestal/dowels/mesh became real optional inputs.
     // New wording is accurate whether or not the caller supplies them.
     captionComputed: 'Schematic computed from the entered values — verify against your own design. Reinforcement is simplified: one representative bottom-mesh layer; pedestal and dowels are drawn only when explicitly specified in the input — this is not a construction/shop drawing (no stirrups, no development-length detailing).',
-    // [Step 20] ties/band — see footing/footingDiagram.mjs's
-    // computeFootingExtras() for the compute side. Same per-field
-    // table-column naming already established for dowel*/mesh* above
-    // (tieDia/tieSpacing/tieCount, bandWidth/bandDia/bandSpacing), not
-    // generic "Dia"/"Spacing", for the identical reason: one summary
-    // row, one dedicated column per optional group. tieDia/tieSpacing/
-    // tieCount are also read by footing/footingDiagram.extended.mjs's
-    // own ties block (added independently under "this session" below) —
-    // same three keys, same values in both forks, declared once here.
-    ties: 'Ties',
-    tieDia: 'Tie Dia',
-    tieSpacing: 'Tie Spacing',
-    tieCount: 'Tie Count',
-    band: 'Band',
-    bandWidth: 'Band Width',
-    bandDia: 'Band Bar Dia',
-    bandSpacing: 'Band Bar Spacing',
-    // Plan-view layer callouts — wording matches the Egyptian code
-    // detailing guide's own four-layer breakdown (top/bottom x
-    // longitudinal/transverse) rather than a generic "top"/"bottom", so
-    // a reader cross-checking against that guide sees matching terms.
-    topLongitudinal: 'Top Longitudinal',
-    bottomLongitudinal: 'Bottom Longitudinal',
-    topTransverse: 'Top Transverse',
-    bottomTransverse: 'Bottom Transverse',
-    // [Step 20] Appended to captionComputed ONLY when the drawing
-    // actually has a second (top) layer and/or a band — see
-    // renderFootingDiagramSVG's own hasExtras branch. Kept as a SEPARATE
-    // key, never concatenated into captionComputed itself, so the
-    // no-extras caption stays byte-identical to its pre-Step-20 value
-    // (same backward-compatibility reasoning Step 14.2's own reworded
-    // captionComputed comment already documents).
-    captionExtrasLegend: 'When shown: dashed blue marks a top layer, solid red a bottom layer, and a heavier red line a concentrated band.',
-    // [Step 20, revised] Reports the same gross/net pair the guide draws
-    // as two stacked dimension lines (طول/عرض القاعدة العادية vs
-    // المسلحة), but as text in the caption — see renderPlanView's own
-    // comment on why the drawn version was tried and rejected after
-    // actually rendering it.
-    reinforcedExtentNote: 'Net-of-cover reinforced extent',
-    // [Step 21] combined/strip now show TWO sections: a primary
-    // longitudinal cut (through the column line, matching the Egyptian
-    // code guide's own قطاع رأس ١-١ — both columns and the span between
-    // them) and the pre-Step-21 single-column transverse cut, kept as a
-    // secondary "side" view per direct request. isolated/raft are
-    // unaffected (see renderFootingDiagramSVG's own type check) and keep
-    // using sectionTitle/translatedSectionTitle exactly as before.
-    longitudinalSectionTitle: 'LONGITUDINAL SECTION',
-    transverseSectionTitle: 'TRANSVERSE SECTION',
-    // [Bugfix, this session] Added independently in the
-    // footingDiagram.extended.mjs fork for its blinding/dowel-leg/tie
-    // rendering code (levelMarker x2, the dowel lap-length dimension,
-    // the blinding thickness/projection dimensions). tieCount/tieDia/
-    // tieSpacing themselves are declared once above (kit block) — same
-    // values in both forks, confirmed by diff.
-    topFootingLevel: 'Top of Footing Level',
-    foundingLevel: 'Founding Level',
-    blindingThickness: 'Blinding Thickness',
-    blindingProjection: 'Blinding Projection',
-    dowelLapLength: 'Dowel Lap Length',
-    // [This session] columnBars — the column's own main longitudinal
-    // reinforcement, drawn continuing above the dowel lap length up to
-    // a break symbol (see footingDiagram.extended.mjs's
-    // computeColumnBarGeometry/renderSectionView block). Only a
-    // table-less inline "N ØD" callout on the drawing itself uses this —
-    // no dedicated schedule column, so no english table-header string is
-    // needed beyond this one label used as the on-drawing tag.
-    columnBarsLabel: 'Column Bars',
   },
   ar: {
     footIsolated: 'قاعدة منفردة',
@@ -201,44 +118,6 @@ export const STRUCTURAL_LABELS = {
     // هذه الحقول أو لم تُزوَّد — بدل نص شرطي يتغير حسب المدخلات. بلا
     // أقواس ولا شرطة طويلة/متوسطة (راجع تحذير أعلى الملف).
     captionComputed: 'رسم تخطيطي محسوب من القيم المُدخلة، للتحقق فقط. التسليح مبسّط: شبكة سفلية تمثيلية واحدة؛ البرمة وأسياخ الانتظار تُرسم فقط عند تحديدها صراحة في المدخلات؛ بلا كانات ولا تفاصيل أطوال ربط. هذا ليس رسم تنفيذي.',
-    // [Step 20] "كانات" و"شريحة تركيز التسليح" منقولان حرفياً من نص دليل
-    // التفاصيل الانشائية للكود المصري ٢٠٠١ (شكل ١٦-٣) نفسه — وليسا ترجمة
-    // مُختلَقة — حتى تُطابق التسمية على الرسم المصطلح الوارد في الدليل
-    // مباشرة. بلا أقواس ولا شرطات (راجع تحذير أعلى الملف).
-    ties: 'كانات',
-    tieDia: 'قطر الكانات',
-    tieSpacing: 'تباعد الكانات',
-    tieCount: 'عدد الكانات',
-    band: 'شريحة التركيز',
-    bandWidth: 'عرض شريحة التركيز',
-    bandDia: 'قطر أسياخ الشريحة',
-    bandSpacing: 'تباعد أسياخ الشريحة',
-    // نفس تسميات دليل الكود المصري بالحرف: "تسليح علوي طولي"، "تسليح سفلي
-    // طولي"، "تسليح علوي عرضي"، "تسليح سفلي عرضي" (شكل ١٦-٣).
-    topLongitudinal: 'تسليح علوي طولي',
-    bottomLongitudinal: 'تسليح سفلي طولي',
-    topTransverse: 'تسليح علوي عرضي',
-    bottomTransverse: 'تسليح سفلي عرضي',
-    captionExtrasLegend: 'عند ظهورها: الأزرق المتقطع يمثل الطبقة العلوية، الأحمر المتصل الطبقة السفلية، والخط الأحمر الأثقل شريحة التركيز.',
-    reinforcedExtentNote: 'امتداد القاعدة المسلحة بعد خصم الغطاء الخرساني',
-    longitudinalSectionTitle: 'قطاع طولي',
-    transverseSectionTitle: 'قطاع عرضي',
-    // [Bugfix, this session] نفس الثمانية مفاتيح المُضافة في نسخة en أعلاه
-    // — كانت مفقودة من القاموسين معاً (ar وen)، فكانت translate() ترجع
-    // اسم المفتاح الخام بلا أي ترجمة بأي لغة. المصطلحات أدناه مطابقة
-    // حرفياً لتسميات شكل ٢-١٦ في دليل التفاصيل الانشائية (ECP 203) —
-    // "منسوب ظهر القاعدة المسلحة"/"منسوب التأسيس"/"طول التماس" هي ألفاظ
-    // الدليل نفسه، وليست ترجمة مُختلَقة. بلا أقواس ولا شرطة طويلة/متوسطة
-    // (راجع تحذير أعلى الملف) — تم فحصها يدوياً وستُتحقق أيضاً عبر
-    // assertNoUnsafeArabicPunctuation().
-    topFootingLevel: 'منسوب ظهر القاعدة المسلحة',
-    foundingLevel: 'منسوب التأسيس',
-    blindingThickness: 'سمك الخرسانة العادية',
-    blindingProjection: 'بروز الخرسانة العادية',
-    dowelLapLength: 'طول التماس',
-    // [This session] انظر التعليق المقابل في نسخة en أعلاه — تسمية واحدة
-    // تُستخدم كوسم داخل الرسم فقط لمجموعة أسياخ العمود الرئيسية.
-    columnBarsLabel: 'أسياخ العمود',
   },
 };
 
