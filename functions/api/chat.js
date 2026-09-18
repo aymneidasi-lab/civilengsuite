@@ -2101,6 +2101,14 @@ import {
 // function, zero I/O — same import-cost profile as factGuard.mjs.
 import { extractPersistentFileAnchors } from '../_lib/contextAnchor.mjs';
 
+// [NEW — semantic session file persistence] Session-scoped file memory's
+// server-side selector: scores allIncomingFiles against the user's message
+// with bge-m3 so an unrelated turn costs zero file tokens regardless of how
+// many files are stored (see sessionFileSelector.mjs's own header for the
+// full contract). Same "pure-ish, fail-open" import-cost profile as
+// contextAnchor.mjs immediately above.
+import { selectRelevantFiles } from '../_lib/sessionFileSelector.mjs';
+
 // ── [PATCH] Streaming rewrite — see /docs or PR description for the full
 // latency/token-overhead audit these address. Each module is self-contained
 // and independently unit-tested (see functions/_lib/*.test.mjs if present in
@@ -8018,7 +8026,33 @@ export async function onRequestPost(context) {
   if (!kvFilesResult.ok) {
     return json({ error: kvFilesResult.error }, 400, undefined, request);
   }
-  const textFilesBlock = buildTextFilesBlock(textFilesResult.files.concat(kvFilesResult.files));
+  const allIncomingFiles = textFilesResult.files.concat(kvFilesResult.files);
+  let filesForPrompt = allIncomingFiles;
+  let fileEmbeddingsOut = {};
+
+  if (allIncomingFiles.length > 0) {
+    // > 0, not > 1 — the selector must run for a single incoming
+    // file too. See deliverable 1's rules: a file-count bypass here
+    // is exactly the bug v1 of this feature shipped with.
+    try {
+      const selection = await selectRelevantFiles(env, userMessage, allIncomingFiles, {
+        threshold: 0.45,
+        maxFiles: 3,
+        timeoutMs: 8000,
+        cachedEmbeddings: (body.fileEmbeddings && typeof body.fileEmbeddings === 'object')
+          ? body.fileEmbeddings
+          : {},
+      });
+      filesForPrompt = selection.selected;
+      fileEmbeddingsOut = selection.embeddings;
+      console.info('[chat.js] Session file selector kept', filesForPrompt.length,
+        'of', allIncomingFiles.length, '—', JSON.stringify(selection.scores));
+    } catch (err) {
+      console.warn('[chat.js] Session file selector failed (using all files):', err.message);
+    }
+  }
+
+  const textFilesBlock = buildTextFilesBlock(filesForPrompt);
 
   // NEW — mirrors vision.js's identical fix: any text file this request
   // excluded (bad content, now that a single bad file no longer 400s the
@@ -8889,6 +8923,7 @@ inferring one. General engineering knowledge is still fine to answer from, with 
         interrupted: !!(finalWinResult && finalWinResult.interrupted),
         ...(sources.length > 0 && { sources }),
         ...(isDeveloperMode && { devMode: true }),
+        ...(Object.keys(fileEmbeddingsOut).length > 0 && { fileEmbeddings: fileEmbeddingsOut }),
       });
       closeStream();
      } catch (err) {
