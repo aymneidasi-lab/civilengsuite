@@ -86,8 +86,8 @@ import {
   // column-stub-above-the-footing needs, so no new kit primitive, only
   // a new call site here (see renderSectionViewDXF's own ties block).
   tieTickHDXF,
-} from '../shared/structuralDrawingDxfKit.mjs';
-import { TextHorizontalAlignment, TextVerticalAlignment } from '../shared/tarikjabiri-dxf.esm.js';
+} from './structuralDrawingDxfKit.mjs';
+import { TextHorizontalAlignment, TextVerticalAlignment } from './tarikjabiri-dxf.esm.js';
 
 const FOOTING_TYPES = ['isolated', 'combined', 'strip', 'raft'];
 // Mirrors footingDiagram.mjs's own module-level NUMBERED_COLUMN_TYPES

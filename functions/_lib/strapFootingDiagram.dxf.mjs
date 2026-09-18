@@ -153,8 +153,8 @@ import {
   distributeTicks,
   minPairwiseDistanceMM,
   DiagramError,
-} from '../shared/structuralDrawingDxfKit.mjs';
-import { TextHorizontalAlignment, TextVerticalAlignment } from '../shared/tarikjabiri-dxf.esm.js';
+} from './structuralDrawingDxfKit.mjs';
+import { TextHorizontalAlignment, TextVerticalAlignment } from './tarikjabiri-dxf.esm.js';
 
 // Layout conventions — none of these come from geometry; each is a
 // chosen default for real-mm placement the SVG path never needed. All

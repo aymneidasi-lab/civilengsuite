@@ -125,7 +125,7 @@
 // needed for column ties, only a new call site here.
 import {
   DiagramError, assertInt, barDot, scheduleTable, tieTickH, assertNoIntervalOverlap,
-} from '../shared/structuralDrawingKit.mjs';
+} from './structuralDrawingKit.mjs';
 export { DiagramError };
 // [Step 4 — translation] footingTitle/columnTag/sectionTitle replace
 // this file's old module-scope TITLES table and the raw col.tag /
@@ -133,7 +133,7 @@ export { DiagramError };
 // used to emit regardless of `lang` — see structuralLabels.mjs's own
 // header for the full rationale and the tofu-avoidance constraint on
 // any Arabic value added there.
-import { translate, footingTitle, columnTag, sectionTitle as translatedSectionTitle } from '../shared/structuralLabels.mjs';
+import { translate, footingTitle, columnTag, sectionTitle as translatedSectionTitle } from './structuralLabels.mjs';
 
 // Local duplicates of structuralDrawingKit.mjs's MM_PER_UNIT/toMm/fromMm/
 // assertFinitePositive/fmt — see this file's Step 17 header addendum

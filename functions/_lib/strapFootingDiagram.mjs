@@ -265,7 +265,7 @@ import {
   esc, captionLineCount, renderCaptionAt, fontStacks, kitStyleBlock,
   hatchDefs, dimensionLine, fitScale, scheduleTable, stirrupTick,
   distributeTicks, svgToDataUri, wrapText,
-} from '../shared/structuralDrawingKit.mjs';
+} from './structuralDrawingKit.mjs';
 
 export { DiagramError, svgToDataUri };
 
