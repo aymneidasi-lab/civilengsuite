@@ -81,8 +81,13 @@ import {
   dimensionLineDXF,
   distributeTicks,
   DiagramError,
-} from './structuralDrawingDxfKit.mjs';
-import { TextHorizontalAlignment, TextVerticalAlignment } from './tarikjabiri-dxf.esm.js';
+  // [Step 20] tieTickHDXF: already built in the kit for columnDiagram's
+  // own vertical-member elevation ties — same geometry this file's own
+  // column-stub-above-the-footing needs, so no new kit primitive, only
+  // a new call site here (see renderSectionViewDXF's own ties block).
+  tieTickHDXF,
+} from '../shared/structuralDrawingDxfKit.mjs';
+import { TextHorizontalAlignment, TextVerticalAlignment } from '../shared/tarikjabiri-dxf.esm.js';
 
 const FOOTING_TYPES = ['isolated', 'combined', 'strip', 'raft'];
 // Mirrors footingDiagram.mjs's own module-level NUMBERED_COLUMN_TYPES
@@ -108,6 +113,10 @@ const CUT_LINE_OVERHANG_MM = 150; // how far the section-cut marker extends past
 const CUT_LABEL_GAP_MM = 70; // gap from the cut-line's overhung end to its lettered label
 const SECTION_STUB_NO_PEDESTAL_MM = 600; // fixed "column continues" decorative stub above the footing top when no pedestal is given — real-mm analogue of the SVG source's fixed 90px stub (neither version is ever given a real column height to draw to scale)
 const PEDESTAL_STUB_MM = 200; // shorter decorative stub above a real-scale pedestal, real-mm analogue of the SVG source's fixed 40px secondary stub
+
+// [Step 21] Mirrors footingDiagram.mjs's own DUAL_SECTION_TYPES exactly —
+// see that file's comment for why isolated/raft are excluded.
+const DUAL_SECTION_TYPES = new Set(['combined', 'strip']);
 const LABEL_STACK_GAP_MM = 130; // vertical gap between the stacked cover/bar-spec text lines in the section view
 
 function fmt0(mm) {
@@ -174,7 +183,7 @@ function renderSectionViewDXF(dxf, geometry, origin, opts) {
   const footingTopY = soy + section.depthMM;
   const colW = section.colWidthMM;
   const colX = sox + wPx / 2 - colW / 2;
-  let colTop, dowelHostX;
+  let colTop, dowelHostX, colSegBottom;
   if (geometry.pedestal) {
     const pedW = geometry.pedestal.widthMM, pedH = geometry.pedestal.heightMM;
     const pedX = sox + wPx / 2 - pedW / 2;
@@ -185,10 +194,38 @@ function renderSectionViewDXF(dxf, geometry, origin, opts) {
     closedRectDXF(dxf, colX, footingTopY + pedH, colW, PEDESTAL_STUB_MM, LAYERS.CONCRETE_OUTLINE.name);
     colTop = footingTopY + pedH + PEDESTAL_STUB_MM;
     dowelHostX = pedX;
+    colSegBottom = footingTopY + pedH; // [Step 20] top of the pedestal = bottom of the drawn COLUMN segment
   } else {
     closedRectDXF(dxf, colX, footingTopY, colW, SECTION_STUB_NO_PEDESTAL_MM, LAYERS.CONCRETE_OUTLINE.name);
     colTop = footingTopY + SECTION_STUB_NO_PEDESTAL_MM;
     dowelHostX = colX;
+    colSegBottom = footingTopY; // [Step 20] no pedestal — the column segment runs straight down to the footing top
+  }
+
+  // [Step 20] Column ties — same column-segment-only scope as the SVG
+  // renderer's own ties block (never the pedestal segment; see that
+  // file's comment on why). distributeTicks, not footingDiagram.mjs's
+  // own local distributeCenters (not exported, and this is a different
+  // file): already imported here and already this file's own established
+  // way to spread an exact count across a real-mm range (see the plan
+  // mesh's short-way block above this function). geometry.ties.count is
+  // already clamped to [2, MAX_TIES=12] at compute time, comfortably
+  // inside distributeTicks' own internal [2,24] clamp.
+  if (geometry.ties) {
+    const tieInsetMM = 40; // real-mm analogue of the SVG renderer's 8px inset, scaled for typical dowel/tie diagram sizes in this file's other real-mm insets (see MARGIN_MM/BAR_LINE_INSET_MM below)
+    // [Bug found via entity-count verification, not the earlier "does it
+    // throw" pass] This file's Y axis runs UP (colTop > colSegBottom
+    // numerically — colTop is further from the footing, not closer to
+    // it, unlike the SVG renderer's Y-DOWN px convention this line was
+    // first adapted from). distributeTicks treats its first argument as
+    // the smaller bound and silently collapses to one point whenever
+    // start >= end — passing the larger value first made every call
+    // degenerate to a single tick regardless of geometry.ties.count.
+    // colSegBottom is the smaller Y here, so it goes first.
+    const ys = distributeTicks(colSegBottom + tieInsetMM, colTop - tieInsetMM, geometry.ties.count);
+    for (const y of ys) {
+      tieTickHDXF(dxf, colX, colX + colW, y, LAYERS.STIRRUP_TIE.name);
+    }
   }
 
   // Collect every REBAR-BOTTOM dot this view will draw BEFORE drawing
@@ -202,16 +239,38 @@ function renderSectionViewDXF(dxf, geometry, origin, opts) {
   // envelope (dowelHostX / sox respectively — mesh always spans the full
   // section width, dowels only their host's, per computeFootingExtras's
   // own documented split).
+  // [Bug fix, mirrors renderSectionView's SVG-side fix] barY/meshY (used
+  // for the LINE below) are the TRANSVERSE bars' true-cover reference
+  // position; the LONGITUDINAL bars these dots represent are a different
+  // bar crossing at that point, not the same bar drawn twice, so they
+  // cannot sit on the line itself. Shifted one radius toward mid-depth —
+  // DXF's Y axis runs up, so that is +radius from the bottom face and
+  // -radius from the top face.
   const dots = [];
   const barY = soy + section.coverMM;
-  for (const cMM of section.barCentersMM) dots.push({ x: sox + cMM, y: barY, diaMM: section.diaMM });
+  const barRadiusMM = section.diaMM / 2;
+  const barDotY = barY + barRadiusMM;
+  for (const cMM of section.barCentersMM) dots.push({ x: sox + cMM, y: barDotY, diaMM: section.diaMM, layer: LAYERS.REBAR_BOTTOM.name });
   if (geometry.dowels) {
-    for (const cMM of geometry.dowels.centersMM) dots.push({ x: dowelHostX + cMM, y: footingTopY, diaMM: geometry.dowels.diaMM });
+    for (const cMM of geometry.dowels.centersMM) dots.push({ x: dowelHostX + cMM, y: footingTopY, diaMM: geometry.dowels.diaMM, layer: LAYERS.REBAR_BOTTOM.name });
   }
   let meshY = null;
+  let meshDotY = null;
   if (geometry.mesh) {
     meshY = footingTopY - section.coverMM;
-    for (const cMM of geometry.mesh.barCentersMM) dots.push({ x: sox + cMM, y: meshY, diaMM: geometry.mesh.diaMM });
+    meshDotY = meshY - geometry.mesh.diaMM / 2;
+    // [Step 20] REBAR_TOP, not REBAR_BOTTOM — this layer now also gets a
+    // plan-view presence (renderPlanViewDXF below), where, unlike this
+    // section view, there is no position cue distinguishing top from
+    // bottom (a plan is a projection — top and bottom bars land on the
+    // same plane), so the two families need their own layer/color to
+    // stay visually distinguishable in EVERY view they now both appear
+    // in, not only here where inset-from-the-top-face already did that
+    // job on its own. Matches every other element in this shared kit,
+    // which already puts top and bottom steel on separate layers — this
+    // file was the one exception, only while the top layer stayed
+    // section-only.
+    for (const cMM of geometry.mesh.barCentersMM) dots.push({ x: sox + cMM, y: meshDotY, diaMM: geometry.mesh.diaMM, layer: LAYERS.REBAR_TOP.name });
   }
   function nearestNeighborMM(index) {
     const p = dots[index];
@@ -229,33 +288,188 @@ function renderSectionViewDXF(dxf, geometry, origin, opts) {
   // either, individual dots only.
   dxf.addLine(point3d(sox + BAR_LINE_INSET_MM, barY), point3d(sox + wPx - BAR_LINE_INSET_MM, barY), { layerName: LAYERS.REBAR_BOTTOM.name });
   if (geometry.mesh) {
-    dxf.addLine(point3d(sox + BAR_LINE_INSET_MM, meshY), point3d(sox + wPx - BAR_LINE_INSET_MM, meshY), { layerName: LAYERS.REBAR_BOTTOM.name });
+    dxf.addLine(point3d(sox + BAR_LINE_INSET_MM, meshY), point3d(sox + wPx - BAR_LINE_INSET_MM, meshY), { layerName: LAYERS.REBAR_TOP.name });
   }
   dots.forEach((d, i) => {
-    barDotDXF(dxf, d.x, d.y, d.diaMM, nearestNeighborMM(i), LAYERS.REBAR_BOTTOM.name);
+    barDotDXF(dxf, d.x, d.y, d.diaMM, nearestNeighborMM(i), d.layer);
   });
 
-  // Dimensions: depth (right), width (below), cover + bar-spec (stacked,
-  // centered above the bottom bar row — matches the SVG source's own
-  // "stacked on two centered lines, not left/right on one line" fix).
+  // Dimensions: depth (right, vertical), width (below, horizontal).
   dimensionLineDXF(dxf, sox + wPx + MARGIN_MM * 0.5, soy, sox + wPx + MARGIN_MM * 0.5, footingTopY, `D = ${fmt0(section.depthMM)}mm`, { orientation: 'v', textHeightMM: DIM_TEXT_HEIGHT_MM });
   const widthLabel = section.widthMM === geometry.meta.B ? 'B' : geometry.plan.shortLabel;
-  dimensionLineDXF(dxf, sox, soy - MARGIN_MM * 0.6, sox + wPx, soy - MARGIN_MM * 0.6, `${widthLabel} = ${fmt0(section.widthMM)}mm`, { orientation: 'h', textHeightMM: DIM_TEXT_HEIGHT_MM });
+  // [Bug fix — root cause confirmed by reading dimensionLineDXF's actual
+  // source, not further guessing: for horizontal orientation it places
+  // text at (midY + LABEL_GAP_MM(=120)), Bottom-aligned. The previous
+  // MARGIN*0.6 line position put that text only 60mm below the footing —
+  // with 150mm-tall Bottom-aligned text extending UPWARD from its
+  // anchor, 90mm of it landed inside the footing, overlapping the bottom
+  // bar row (and, in the rendered image, everything stacked below it in
+  // turn). MARGIN*1.3 clears the footing with 120mm to spare, verified
+  // by this arithmetic, not re-guessed from the next rendered image.
+  dimensionLineDXF(dxf, sox, soy - MARGIN_MM * 1.3, sox + wPx, soy - MARGIN_MM * 1.3, `${widthLabel} = ${fmt0(section.widthMM)}mm`, { orientation: 'h', textHeightMM: DIM_TEXT_HEIGHT_MM });
 
+  // Cover/bar-spec/title: each independently Top-aligned (this file
+  // controls their exact span directly, unlike the dimension line's
+  // text), each with a verified real gap to the row above — 150-180mm of
+  // actual clearance, not a value that merely avoided the one case that
+  // got rendered last.
   const midX = sox + wPx / 2;
-  dxfText(dxf, midX, barY + LABEL_STACK_GAP_MM, DIM_TEXT_HEIGHT_MM, `cover = ${fmt0(section.coverMM)}mm`, {
-    layerName: LAYERS.DIMENSIONS.name, hAlign: TextHorizontalAlignment.Center, vAlign: TextVerticalAlignment.Bottom,
+  dxfText(dxf, midX, soy - MARGIN_MM * 1.9, DIM_TEXT_HEIGHT_MM, `cover = ${fmt0(section.coverMM)}mm`, {
+    layerName: LAYERS.DIMENSIONS.name, hAlign: TextHorizontalAlignment.Center, vAlign: TextVerticalAlignment.Top,
   });
-  dxfText(dxf, midX, barY + LABEL_STACK_GAP_MM * 2, DIM_TEXT_HEIGHT_MM, `${section.barCount} \u00d8${fmt0(section.diaMM)} @ ${fmt0(section.actualSpacingMM)}mm`, {
-    layerName: LAYERS.DIMENSIONS.name, hAlign: TextHorizontalAlignment.Center, vAlign: TextVerticalAlignment.Bottom,
+  dxfText(dxf, midX, soy - MARGIN_MM * 2.7, DIM_TEXT_HEIGHT_MM, `${section.barCount} \u00d8${fmt0(section.diaMM)} @ ${fmt0(section.actualSpacingMM)}mm`, {
+    layerName: LAYERS.DIMENSIONS.name, hAlign: TextHorizontalAlignment.Center, vAlign: TextVerticalAlignment.Top,
   });
 
   const throughIdx = NUMBERED_COLUMN_TYPES.has(geometry.type) ? geometry.sectionThrough - 1 : null;
-  dxfText(dxf, midX, soy - MARGIN_MM * 1.3, SUBTITLE_HEIGHT_MM, sectionTitleEN(geometry.type, throughIdx), {
+  // [Step 21] opts.secondary: this function now serves two roles, same
+  // as its SVG-source sibling — the sole section for isolated/raft
+  // (unchanged), and the secondary "side" view for combined/strip, which
+  // gets a short, distinct title instead of the SVG version's overflow
+  // problem (fixed there by shortening rather than combining strings;
+  // DXF text has no fixed-box width to overflow, but the shorter title
+  // is kept for the same reason it reads more clearly either way).
+  const titleTextDXF = opts.secondary ? 'TRANSVERSE SECTION' : sectionTitleEN(geometry.type, throughIdx);
+  const titleY = soy - MARGIN_MM * 3.5;
+  dxfText(dxf, midX, titleY, SUBTITLE_HEIGHT_MM, titleTextDXF, {
     layerName: LAYERS.ANNOTATION.name, hAlign: TextHorizontalAlignment.Center, vAlign: TextVerticalAlignment.Top,
   });
 
-  return { width: wPx, height: colTop - soy };
+  // [Bug fix — mirrors the SVG source's own Step 14.3 dynamic
+  // captionBottomY fix] bottomTextY reports how far down this view's OWN
+  // text reaches, so the caller can position the sheet caption safely
+  // below it instead of a fixed offset a tall text stack can defeat
+  // again — exactly the class of bug the row redesign above was fixing
+  // in the first place, now closed at its source instead of re-opened
+  // one level up.
+  const bottomTextY = titleY - SUBTITLE_HEIGHT_MM;
+  return { width: wPx, height: colTop - soy, bottomTextY };
+}
+
+// ── Step 21: primary longitudinal section (combined/strip only) ────────
+// DXF mirror of footingDiagram.mjs's renderLongSectionView. Same bar-role
+// swap as that function's own header documents (this cut is perpendicular
+// to B, so transverse bars are the circles and longitudinal bars are the
+// line — opposite of renderSectionViewDXF above), same stacking-offset
+// fix, same "every column gets the one global pedestal/tie/dowel spec"
+// simplification, same no-curtailment scope decision.
+// origin = (ox, oy) is the footing outline's own bottom-left corner, same
+// convention renderPlanViewDXF/renderSectionViewDXF already use.
+function renderLongSectionViewDXF(dxf, geometry, origin, opts) {
+  const { plan, meta } = geometry;
+  const { x: ox, y: oy } = origin;
+  const wPx = plan.longMM;
+
+  closedRectDXF(dxf, ox, oy, wPx, meta.D, LAYERS.CONCRETE_OUTLINE.name);
+  const footingTopY = oy + meta.D;
+
+  let maxColTop = footingTopY;
+  plan.columns.forEach((col, i) => {
+    const colW = col.alongLongMM;
+    const cx = ox + col.centerLongMM;
+    const colX = cx - colW / 2;
+    let colTop, dowelHostX, colSegBottom;
+    if (geometry.pedestal) {
+      const pedW = geometry.pedestal.widthMM, pedH = geometry.pedestal.heightMM;
+      const pedX = cx - pedW / 2;
+      closedRectDXF(dxf, pedX, footingTopY, pedW, pedH, LAYERS.CONCRETE_OUTLINE.name);
+      closedRectDXF(dxf, colX, footingTopY + pedH, colW, PEDESTAL_STUB_MM, LAYERS.CONCRETE_OUTLINE.name);
+      colTop = footingTopY + pedH + PEDESTAL_STUB_MM;
+      dowelHostX = pedX;
+      colSegBottom = footingTopY + pedH;
+    } else {
+      closedRectDXF(dxf, colX, footingTopY, colW, SECTION_STUB_NO_PEDESTAL_MM, LAYERS.CONCRETE_OUTLINE.name);
+      colTop = footingTopY + SECTION_STUB_NO_PEDESTAL_MM;
+      dowelHostX = colX;
+      colSegBottom = footingTopY;
+    }
+    maxColTop = Math.max(maxColTop, colTop);
+    if (geometry.ties) {
+      const tieInsetMM = 40;
+      const ys = distributeTicks(colSegBottom + tieInsetMM, colTop - tieInsetMM, geometry.ties.count);
+      for (const y of ys) tieTickHDXF(dxf, colX, colX + colW, y, LAYERS.STIRRUP_TIE.name);
+    }
+    if (geometry.dowels) {
+      for (const cMM of geometry.dowels.centersMM) {
+        barDotDXF(dxf, dowelHostX + cMM, footingTopY, geometry.dowels.diaMM, Infinity, LAYERS.REBAR_BOTTOM.name);
+      }
+    }
+    if (col.tag) {
+      dxfText(dxf, cx, colTop + COLUMN_TAG_GAP_MM, SUBTITLE_HEIGHT_MM, columnTagEN(geometry.type, i), {
+        layerName: LAYERS.ANNOTATION.name, hAlign: TextHorizontalAlignment.Center, vAlign: TextVerticalAlignment.Bottom,
+      });
+    }
+  });
+
+  // Bottom layer: transverse bars (circles, true cover) + longitudinal
+  // bar (line, shifted toward mid-depth) — see this function's own
+  // header on the role swap versus renderSectionViewDXF.
+  const transYBottom = oy + meta.cover;
+  const barRadiusMM = meta.dia / 2;
+  const longYBottom = transYBottom + barRadiusMM;
+  dxf.addLine(point3d(ox + BAR_LINE_INSET_MM, longYBottom), point3d(ox + wPx - BAR_LINE_INSET_MM, longYBottom), { layerName: LAYERS.REBAR_BOTTOM.name });
+  const transXsBottom = computeTransverseXPositionsMMDXF(plan.longMM, meta.cover, meta.dia, meta.spacingLong ?? meta.spacing);
+  for (const posMM of transXsBottom) {
+    barDotDXF(dxf, ox + posMM, transYBottom, meta.dia, meta.spacingLong ?? meta.spacing, LAYERS.REBAR_BOTTOM.name);
+  }
+  if (geometry.band) {
+    for (const zone of geometry.band.zones) {
+      for (const cMM of zone.barCentersMM) {
+        barDotDXF(dxf, ox + cMM, transYBottom, geometry.band.diaMM, geometry.band.spacingMM, LAYERS.REBAR_BOTTOM.name);
+      }
+    }
+  }
+
+  if (geometry.mesh) {
+    const transYTop = footingTopY - meta.cover;
+    const longYTop = transYTop - geometry.mesh.diaMM / 2;
+    dxf.addLine(point3d(ox + BAR_LINE_INSET_MM, longYTop), point3d(ox + wPx - BAR_LINE_INSET_MM, longYTop), { layerName: LAYERS.REBAR_TOP.name });
+    const transXsTop = computeTransverseXPositionsMMDXF(plan.longMM, meta.cover, geometry.mesh.diaMM, geometry.mesh.spacingMM);
+    for (const posMM of transXsTop) {
+      barDotDXF(dxf, ox + posMM, transYTop, geometry.mesh.diaMM, geometry.mesh.spacingMM, LAYERS.REBAR_TOP.name);
+    }
+  }
+
+  // [Bug fix — same root cause as renderSectionViewDXF's own fix above:
+  // MARGIN*0.6 put this line's text only 60mm below the footing, and its
+  // 150mm Bottom-aligned height put 90mm of it inside the footing,
+  // overlapping the bottom bar row.
+  dimensionLineDXF(dxf, ox, oy - MARGIN_MM * 1.3, ox + wPx, oy - MARGIN_MM * 1.3, `${plan.longLabel} = ${fmt0(plan.longMM)}mm`, { orientation: 'h', textHeightMM: DIM_TEXT_HEIGHT_MM });
+  dimensionLineDXF(dxf, ox + wPx + MARGIN_MM * 0.5, oy, ox + wPx + MARGIN_MM * 0.5, footingTopY, `D = ${fmt0(meta.D)}mm`, { orientation: 'v', textHeightMM: DIM_TEXT_HEIGHT_MM });
+  // [Bug fix — confirmed via exact coordinates: D='s text is Middle-
+  // aligned at the footing's own vertical MIDPOINT (oy+footingTopY)/2,
+  // which for a typical D is close to transYBottom+LABEL_STACK_GAP_MM —
+  // this was landing in the same Y range as D's text, not just visually
+  // near it. Moved out of the footing entirely, into its own row below
+  // it, same as cover already is in renderSectionViewDXF above — one
+  // convention for "where does the cover callout go" across both
+  // section functions, not two.
+  dxfText(dxf, ox + wPx / 2, oy - MARGIN_MM * 1.9, DIM_TEXT_HEIGHT_MM, `cover = ${fmt0(meta.cover)}mm`, {
+    layerName: LAYERS.DIMENSIONS.name, hAlign: TextHorizontalAlignment.Center, vAlign: TextVerticalAlignment.Top,
+  });
+  const longTitleY = oy - MARGIN_MM * 2.7;
+  dxfText(dxf, ox + wPx / 2, longTitleY, SUBTITLE_HEIGHT_MM, 'LONGITUDINAL SECTION', {
+    layerName: LAYERS.ANNOTATION.name, hAlign: TextHorizontalAlignment.Center, vAlign: TextVerticalAlignment.Top,
+  });
+
+  const bottomTextY = longTitleY - SUBTITLE_HEIGHT_MM;
+  return { width: wPx, height: maxColTop - oy, bottomTextY };
+}
+
+// Local copy of footingDiagram.mjs's computeTransverseXPositionsMM —
+// duplicated, not imported: this file and footingDiagram.mjs are
+// independent sibling renderers of the same geometry object, neither
+// importing from the other anywhere else in this codebase (each imports
+// only its own kit), and renderPlanViewDXF below already independently
+// re-derives this exact formula inline for the same reason. Suffixed
+// DXF only to avoid any accidental name collision; the math is identical.
+function computeTransverseXPositionsMMDXF(longMM, coverMM, diaMM, spacingMM) {
+  const env = longMM - 2 * coverMM - diaMM;
+  const count = Math.max(2, Math.floor(env / spacingMM) + 1);
+  const first = coverMM + diaMM / 2;
+  const last = longMM - coverMM - diaMM / 2;
+  const step = count > 1 ? (last - first) / (count - 1) : 0;
+  return Array.from({ length: count }, (_, i) => (count === 1 ? longMM / 2 : first + i * step));
 }
 
 // Draws the top-down view: footing outline, a reinforcement mesh drawn
@@ -290,6 +504,41 @@ function renderPlanViewDXF(dxf, geometry, origin, opts) {
     }
   }
 
+  // [Step 20] Top mesh, both directions — REBAR_TOP layer carries the
+  // top/bottom distinction here (DXF has no dash-weight convention the
+  // way the SVG renderer's stroke-dasharray does; a CAD viewer toggling
+  // REBAR-TOP's layer visibility gets the same practical separation).
+  if (geometry.mesh) {
+    for (const cMM of geometry.mesh.barCentersMM) {
+      const y = oy + cMM;
+      dxf.addLine(point3d(ox + MESH_LINE_INSET_MM, y), point3d(ox + plan.longMM - MESH_LINE_INSET_MM, y), { layerName: LAYERS.REBAR_TOP.name });
+    }
+    const env = plan.longMM - 2 * geometry.meta.cover - geometry.mesh.diaMM;
+    const count = Math.max(2, Math.floor(env / geometry.mesh.spacingMM) + 1);
+    const first = geometry.meta.cover + geometry.mesh.diaMM / 2;
+    const last = plan.longMM - geometry.meta.cover - geometry.mesh.diaMM / 2;
+    const xs = distributeTicks(ox + first, ox + last, count);
+    for (const x of xs) {
+      dxf.addLine(point3d(x, oy + MESH_LINE_INSET_MM), point3d(x, oy + plan.shortMM - MESH_LINE_INSET_MM), { layerName: LAYERS.REBAR_TOP.name });
+    }
+  }
+
+  // [Step 20] Concentration band(s) — dashed REBAR_BOTTOM outline per
+  // zone (closedRectDXF already has a DASHED_LTYPE_NAME path, used above
+  // for the pedestal footprint outline) plus the zone's own extra
+  // transverse bars, additive to the field mesh drawn above it — see
+  // computeBandGeometry's own header (footingDiagram.mjs) for why
+  // additive, never a replacement.
+  if (geometry.band) {
+    for (const zone of geometry.band.zones) {
+      closedRectDXF(dxf, ox + zone.startMM, oy, zone.endMM - zone.startMM, plan.shortMM, LAYERS.REBAR_BOTTOM.name, { lineType: DASHED_LTYPE_NAME });
+      for (const cMM of zone.barCentersMM) {
+        const x = ox + cMM;
+        dxf.addLine(point3d(x, oy + MESH_LINE_INSET_MM), point3d(x, oy + plan.shortMM - MESH_LINE_INSET_MM), { layerName: LAYERS.REBAR_BOTTOM.name });
+      }
+    }
+  }
+
   plan.columns.forEach((col, i) => {
     const cx = ox + col.centerLongMM;
     // raft columns carry their own centerShortMM (2-D plan position);
@@ -319,9 +568,20 @@ function renderPlanViewDXF(dxf, geometry, origin, opts) {
     dxfText(dxf, cx, yLo - CUT_LABEL_GAP_MM, SUBTITLE_HEIGHT_MM, 'A', { layerName: LAYERS.ANNOTATION.name, hAlign: TextHorizontalAlignment.Center, vAlign: TextVerticalAlignment.Top });
     dxfText(dxf, cx, yHi + CUT_LABEL_GAP_MM, SUBTITLE_HEIGHT_MM, 'A', { layerName: LAYERS.ANNOTATION.name, hAlign: TextHorizontalAlignment.Center, vAlign: TextVerticalAlignment.Bottom });
   }
+  // [Step 21] Second marker for the new PRIMARY longitudinal section —
+  // horizontal, through the column centerline (B/2) — mirrors
+  // renderPlanView's own SVG-side addition; see that comment for why a
+  // numeral ('1') rather than a translated/lettered label.
+  if (DUAL_SECTION_TYPES.has(geometry.type)) {
+    const cy = oy + plan.shortMM / 2;
+    const xLo = ox - CUT_LINE_OVERHANG_MM, xHi = ox + plan.longMM + CUT_LINE_OVERHANG_MM;
+    dxf.addLine(point3d(xLo, cy), point3d(xHi, cy), { layerName: LAYERS.ANNOTATION.name, lineType: DASHED_LTYPE_NAME });
+    dxfText(dxf, xLo - CUT_LABEL_GAP_MM, cy, SUBTITLE_HEIGHT_MM, '1', { layerName: LAYERS.ANNOTATION.name, hAlign: TextHorizontalAlignment.Right, vAlign: TextVerticalAlignment.Middle });
+    dxfText(dxf, xHi + CUT_LABEL_GAP_MM, cy, SUBTITLE_HEIGHT_MM, '1', { layerName: LAYERS.ANNOTATION.name, hAlign: TextHorizontalAlignment.Left, vAlign: TextVerticalAlignment.Middle });
+  }
 
   dimensionLineDXF(dxf, ox, oy + plan.shortMM + MARGIN_MM * 0.6, ox + plan.longMM, oy + plan.shortMM + MARGIN_MM * 0.6, `${plan.longLabel} = ${fmt0(plan.longMM)}mm`, { orientation: 'h', textHeightMM: DIM_TEXT_HEIGHT_MM });
-  dimensionLineDXF(dxf, ox - MARGIN_MM * 0.6, oy, ox - MARGIN_MM * 0.6, oy + plan.shortMM, `${plan.shortLabel} = ${fmt0(plan.shortMM)}mm`, { orientation: 'v', textHeightMM: DIM_TEXT_HEIGHT_MM });
+  dimensionLineDXF(dxf, ox - MARGIN_MM * 1.0, oy, ox - MARGIN_MM * 1.0, oy + plan.shortMM, `${plan.shortLabel} = ${fmt0(plan.shortMM)}mm`, { orientation: 'v', textHeightMM: DIM_TEXT_HEIGHT_MM });
 
   dxfText(dxf, ox + plan.longMM / 2, oy - SUBTITLE_HEIGHT_MM * 1.2, SUBTITLE_HEIGHT_MM, 'PLAN', {
     layerName: LAYERS.ANNOTATION.name, hAlign: TextHorizontalAlignment.Center, vAlign: TextVerticalAlignment.Top,
@@ -352,19 +612,48 @@ export function renderFootingDiagramDXF(geometry, opts = {}) {
   // large horizontal extent competing for column alignment with the
   // other's, exactly the layout problem the SVG source's own box choice
   // already solved for this element.
+  // [Step 21] combined/strip: primary longitudinal section at the
+  // origin, secondary transverse section placed beside it (the SVG
+  // source's own side-by-side arrangement, per direct request — see
+  // that file's DUAL_SECTION_TYPES comment), plan stacked above
+  // whichever of the two is taller. isolated/raft: unchanged single
+  // section call, exactly as before Step 21.
+  const isDual = DUAL_SECTION_TYPES.has(geometry.type);
   const sectionOrigin = { x: 0, y: 0 };
-  const section = renderSectionViewDXF(dxf, geometry, sectionOrigin, opts);
+  let sectionsHeight, sectionsWidth, lowestTextY;
+  if (isDual) {
+    const longSec = renderLongSectionViewDXF(dxf, geometry, sectionOrigin, opts);
+    const transOrigin = { x: sectionOrigin.x + longSec.width + (opts.viewGapMM ?? VIEW_GAP_MM) * 0.5, y: sectionOrigin.y };
+    const transSec = renderSectionViewDXF(dxf, geometry, transOrigin, { ...opts, secondary: true });
+    sectionsWidth = (transOrigin.x - sectionOrigin.x) + transSec.width;
+    sectionsHeight = Math.max(longSec.height, transSec.height);
+    lowestTextY = Math.min(longSec.bottomTextY, transSec.bottomTextY);
+  } else {
+    const section = renderSectionViewDXF(dxf, geometry, sectionOrigin, opts);
+    sectionsWidth = section.width;
+    sectionsHeight = section.height;
+    lowestTextY = section.bottomTextY;
+  }
 
-  const planOrigin = { x: 0, y: sectionOrigin.y + section.height + (opts.viewGapMM ?? VIEW_GAP_MM) };
+  const planOrigin = { x: 0, y: sectionOrigin.y + sectionsHeight + (opts.viewGapMM ?? VIEW_GAP_MM) };
   const plan = renderPlanViewDXF(dxf, geometry, planOrigin, opts);
 
-  const overallWidth = Math.max(plan.width, section.width);
+  const overallWidth = Math.max(plan.width, sectionsWidth);
   const titleY = planOrigin.y + plan.height + MARGIN_MM * 2.2;
   dxfText(dxf, overallWidth / 2, titleY, TITLE_HEIGHT_MM, FOOTING_TITLE_EN[geometry.type], {
     layerName: LAYERS.ANNOTATION.name, hAlign: TextHorizontalAlignment.Center, vAlign: TextVerticalAlignment.Bottom,
   });
 
-  const captionY = sectionOrigin.y - MARGIN_MM * 2.4; // below the section view's own title/dimensions, the sheet's lowest element — mirrors the SVG source's own bottom-of-sheet caption placement
+  // [Bug fix — mirrors the SVG source's own Step 14.3 dynamic
+  // captionBottomY fix] Was a fixed sectionOrigin.y - MARGIN*2.4,
+  // independent of how far the section view(s)' own title/dimension text
+  // actually reached — collided with that text whenever the stack below
+  // the footing was taller than whoever picked that fixed offset
+  // anticipated (a long bar-spec string; two side-by-side sections each
+  // with their own title). Anchored to the actual lowest text edge
+  // instead, so a taller stack pushes the caption down with it rather
+  // than being overlapped by it.
+  const captionY = lowestTextY - MARGIN_MM * 0.7;
   dxfText(dxf, overallWidth / 2, captionY, CAPTION_HEIGHT_MM, CAPTION_EN, {
     layerName: LAYERS.ANNOTATION.name, hAlign: TextHorizontalAlignment.Center, vAlign: TextVerticalAlignment.Top,
   });

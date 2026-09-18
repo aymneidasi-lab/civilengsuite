@@ -449,12 +449,23 @@ export function stirrupTick(xPx, yTopPx, yBottomPx) {
 // call site, all positional) — a new, additive export instead, same
 // cap-line visual convention so a tie and a stirrup read as the same
 // kind of mark on any sheet that shows both.
-export function tieTickH(xLeftPx, xRightPx, yPx) {
-  const cap = 4;
+// [Integration merge — this pass] opts.capPx/opts.cssClass added,
+// defaulting to the original hardcoded values (4, 'stirrup-tick') — any
+// existing 3-argument call site is byte-for-byte unaffected. Added so
+// footing/footingDiagram.extended.mjs's own column/confinement tie mark
+// (previously a local duplicate named tieTick(), capPx=5,
+// class="tie-tick" — see that file's history for why it was local: this
+// kit file was not co-located with it at the time) can call this shared
+// primitive instead. Verified byte-identical output for both the
+// pre-existing default call shape and the new opts shape before this
+// function replaced either local copy — see test/regression-tietickh.mjs.
+export function tieTickH(xLeftPx, xRightPx, yPx, opts = {}) {
+  const cap = opts.capPx ?? 4;
+  const cls = opts.cssClass ?? 'stirrup-tick';
   return `
-    <line x1="${xLeftPx}" y1="${yPx}" x2="${xRightPx}" y2="${yPx}" class="stirrup-tick"/>
-    <line x1="${xLeftPx}" y1="${yPx - cap}" x2="${xLeftPx}" y2="${yPx + cap}" class="stirrup-tick"/>
-    <line x1="${xRightPx}" y1="${yPx - cap}" x2="${xRightPx}" y2="${yPx + cap}" class="stirrup-tick"/>`;
+    <line x1="${xLeftPx}" y1="${yPx}" x2="${xRightPx}" y2="${yPx}" class="${cls}"/>
+    <line x1="${xLeftPx}" y1="${yPx - cap}" x2="${xLeftPx}" y2="${yPx + cap}" class="${cls}"/>
+    <line x1="${xRightPx}" y1="${yPx - cap}" x2="${xRightPx}" y2="${yPx + cap}" class="${cls}"/>`;
 }
 
 // Evenly-spaced representative tick x-positions (px) across [startPx,
