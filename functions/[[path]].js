@@ -1369,24 +1369,53 @@ export async function onRequest(context) {
   const XOR_KEY = (xorHex.length === 2 && /^[0-9A-Fa-f]{2}$/.test(xorHex))
     ? parseInt(xorHex, 16) : 0x5A;
 
-  // ── Read .enc file via Cloudflare ASSETS binding ───────────────────────────
-  let encData;
+  // ── [CACHE] Read .enc via ASSETS binding, keyed on ITS OWN ETag/Last-Modified ─
+  // Scope: this caches ONLY the decrypt + base-href + favicon result — the part
+  // that is byte-identical for every visitor of this page/version. Per-request
+  // work (nonce, bot/human branch, XOR, base64, everything from [E1] on) is
+  // untouched below and still runs fresh on every request.
+  //
+  // Invalidation: the cache key embeds the .enc file's own ETag (falls back to
+  // Last-Modified). A new deploy changes the .enc file's bytes → Cloudflare
+  // assigns it a new ETag → the cache key changes automatically → the old
+  // entry is simply never looked up again (no purge step, nothing to forget).
+  // If neither header is present, caching is skipped entirely for that
+  // request rather than risking a fixed/stale key — it just decrypts fresh,
+  // same as before this patch.
+  const edgeCache = caches.default;
+  let encResp;
   try {
-    const encResp = await env.ASSETS.fetch(new URL(`/public/${encFile}`, url.origin));
+    encResp = await env.ASSETS.fetch(new URL(`/public/${encFile}`, url.origin));
     if (!encResp.ok) throw new Error(`HTTP ${encResp.status}`);
-    encData = (await encResp.text()).trim();
   } catch (e) {
     console.error('[ces:decrypt] File read error:', encFile, e.message);
     return errResponse(500, 'Server Error', 'A configuration error occurred. Please try again later.');
   }
 
-  // ── Decrypt ────────────────────────────────────────────────────────────────
+  const assetVersion = encResp.headers.get('ETag') || encResp.headers.get('Last-Modified') || null;
+  const cacheKey = assetVersion
+    ? new Request(new URL(
+        `/__ces_page_cache/${url.hostname}/${encodeURIComponent(assetVersion)}/${encFile}`,
+        url.origin
+      ), { method: 'GET' })
+    : null;
+  const cachedHit = cacheKey ? await edgeCache.match(cacheKey) : null;
+  console.log(cachedHit ? `[ces:cache] HIT ${encFile}` : `[ces:cache] MISS ${encFile} (decrypting now)`);
+
+  // ── Decrypt (skipped entirely on a cache hit) ───────────────────────────────
   let html;
-  try {
-    html = await decryptEnc(encData, keyHex);
-  } catch (e) {
-    console.error('[ces:decrypt] Decryption failed for', encFile, '—', e.message);
-    return errResponse(500, 'Server Error', 'A configuration error occurred. Please try again later.');
+  if (cachedHit) {
+    encResp.body?.cancel();
+    html = await cachedHit.text();
+  } else {
+    let encData;
+    try {
+      encData = (await encResp.text()).trim();
+      html = await decryptEnc(encData, keyHex);
+    } catch (e) {
+      console.error('[ces:decrypt] Decryption failed for', encFile, '—', e.message);
+      return errResponse(500, 'Server Error', 'A configuration error occurred. Please try again later.');
+    }
   }
 
   // ── [E1] Top-level safety net ─────────────────────────────────────────────
@@ -1396,6 +1425,7 @@ export async function onRequest(context) {
   // Check Workers & Pages → Functions → Logs to see the exact error.
   try {
 
+  if (!cachedHit) {
   // ── Inject base href ───────────────────────────────────────────────────────
   html = html.replace(/(<head[^>]*>)/i, `$1<base href="${baseHref}">`);
 
@@ -1409,6 +1439,16 @@ export async function onRequest(context) {
   // Guard prevents duplication if the source already declares its own icons.
   if (faviconLinks && !/<link[^>]+rel=["'](?:icon|shortcut icon|apple-touch-icon)["']/i.test(html)) {
     html = html.replace(/(<\/head>)/i, `${faviconLinks}$1`);
+  }
+
+  // ── [CACHE] Store the visitor-independent result for the next request ──────
+  // waitUntil: the write happens after THIS response is already on its way to
+  // the visitor, so it never adds latency to the request that computed it.
+  if (cacheKey) {
+    context.waitUntil(edgeCache.put(cacheKey, new Response(html, {
+      headers: { 'Cache-Control': 'max-age=86400' }, // internal TTL only — never sent to real visitors
+    })));
+  }
   }
 
   // ── Per-request nonce ──────────────────────────────────────────────────────
